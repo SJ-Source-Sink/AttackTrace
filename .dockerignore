@@ -1,0 +1,28 @@
+# Keep Docker build context lean
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+
+# Frontend build artifacts (frontend has its own Dockerfile)
+platform/frontend/node_modules
+platform/frontend/.next
+
+# Results and reports from AttackTrace scans
+results/
+reports/
+screenshots/
+
+# Git and IDE
+.git
+.gitignore
+**/.DS_Store
+
+# Docs and local dev files
+docs/
+*.md
+.env
+.env.*
+!.env.example

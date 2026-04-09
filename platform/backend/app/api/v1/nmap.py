@@ -1,0 +1,257 @@
+"""
+Nmap network scanner API — runs nmap and streams results via SSE.
+"""
+
+import asyncio
+import json
+import re
+import shutil
+import subprocess
+import uuid
+from datetime import datetime, timezone
+from typing import Annotated, AsyncGenerator
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, field_validator
+
+from app.core.dependencies import get_current_user
+from app.models.db.user import User
+
+router = APIRouter(prefix="/nmap", tags=["Nmap"])
+
+# In-memory scan history (per process lifetime — good enough for a scanner tool)
+_scan_history: dict[str, dict] = {}
+
+SCAN_PRESETS: dict[str, list[str]] = {
+    "quick": ["-T4", "-F"],
+    "full_port": ["-T4", "-p-"],
+    "service_version": ["-sV", "-T4"],
+    "os_detection": ["-O", "-T4"],
+    "stealth_syn": ["-sS", "-T4"],
+    "aggressive": ["-A", "-T4"],
+    "custom": [],
+}
+
+
+class NmapScanRequest(BaseModel):
+    target: str
+    scan_type: str = "quick"
+    ports: str | None = None
+    timing: str = "T4"
+    custom_flags: str | None = None
+
+    @field_validator("target")
+    @classmethod
+    def validate_target(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Target is required")
+        # Basic sanity — block shell metacharacters
+        if re.search(r"[;&|`$(){}<>]", v):
+            raise ValueError("Target contains invalid characters")
+        return v
+
+    @field_validator("timing")
+    @classmethod
+    def validate_timing(cls, v: str) -> str:
+        if not re.match(r"^T[0-5]$", v):
+            raise ValueError("Timing must be T0–T5")
+        return v
+
+    @field_validator("ports")
+    @classmethod
+    def validate_ports(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip()
+        if v and not re.match(r"^[\d,\-]+$", v):
+            raise ValueError("Ports must be numbers, commas, or ranges (e.g. 80,443,1-1024)")
+        return v or None
+
+    @field_validator("custom_flags")
+    @classmethod
+    def validate_custom_flags(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        # Block dangerous shell chars
+        if re.search(r"[;&|`$(){}<>]", v or ""):
+            raise ValueError("Custom flags contain invalid characters")
+        return v
+
+
+def _build_nmap_cmd(req: NmapScanRequest) -> list[str]:
+    nmap_bin = shutil.which("nmap") or "nmap"
+    cmd = [nmap_bin]
+
+    if req.scan_type in SCAN_PRESETS and req.scan_type != "custom":
+        cmd.extend(SCAN_PRESETS[req.scan_type])
+    elif req.custom_flags:
+        cmd.extend(req.custom_flags.split())
+
+    # Override timing if explicit
+    cmd = [c for c in cmd if not c.startswith("-T")]
+    cmd.append(f"-{req.timing}")
+
+    if req.ports:
+        cmd.extend(["-p", req.ports])
+
+    cmd.append(req.target)
+    return cmd
+
+
+def _parse_nmap_output(raw: str) -> list[dict]:
+    """Parse nmap text output into structured host/port/service records."""
+    hosts = []
+    current_host: dict | None = None
+
+    for line in raw.splitlines():
+        line = line.strip()
+
+        host_match = re.match(r"Nmap scan report for (.+)", line)
+        if host_match:
+            if current_host:
+                hosts.append(current_host)
+            current_host = {
+                "host": host_match.group(1),
+                "ports": [],
+                "os": None,
+                "status": "up",
+            }
+            continue
+
+        if current_host is None:
+            continue
+
+        # Port line: 80/tcp   open   http    Apache httpd 2.4
+        port_match = re.match(
+            r"(\d+)/(tcp|udp)\s+(open|closed|filtered)\s+(\S+)?\s*(.*)?", line
+        )
+        if port_match:
+            current_host["ports"].append(
+                {
+                    "port": int(port_match.group(1)),
+                    "protocol": port_match.group(2),
+                    "state": port_match.group(3),
+                    "service": port_match.group(4) or "",
+                    "version": port_match.group(5).strip() if port_match.group(5) else "",
+                }
+            )
+            continue
+
+        # OS detection
+        os_match = re.match(r"OS details: (.+)", line)
+        if os_match and current_host:
+            current_host["os"] = os_match.group(1)
+
+    if current_host:
+        hosts.append(current_host)
+
+    return hosts
+
+
+async def _stream_nmap(scan_id: str, req: NmapScanRequest) -> AsyncGenerator[str, None]:
+    cmd = _build_nmap_cmd(req)
+
+    def _sse(event: str, data: dict) -> str:
+        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    yield _sse("start", {
+        "scan_id": scan_id,
+        "command": " ".join(cmd),
+        "target": req.target,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    _scan_history[scan_id] = {
+        "id": scan_id,
+        "target": req.target,
+        "command": " ".join(cmd),
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "raw": "",
+        "hosts": [],
+    }
+
+    raw_output = []
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+
+        assert proc.stdout is not None
+        async for line_bytes in proc.stdout:
+            line = line_bytes.decode("utf-8", errors="replace").rstrip()
+            raw_output.append(line)
+            yield _sse("output", {"line": line})
+            await asyncio.sleep(0)
+
+        await proc.wait()
+        raw = "\n".join(raw_output)
+        hosts = _parse_nmap_output(raw)
+
+        _scan_history[scan_id].update({
+            "status": "completed" if proc.returncode == 0 else "failed",
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "raw": raw,
+            "hosts": hosts,
+            "exit_code": proc.returncode,
+        })
+
+        yield _sse("complete", {
+            "scan_id": scan_id,
+            "hosts": hosts,
+            "exit_code": proc.returncode,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+    except Exception as exc:
+        _scan_history[scan_id].update({"status": "failed", "error": str(exc)})
+        yield _sse("error", {"message": str(exc)})
+
+
+@router.post("/scan", summary="Run an nmap scan and stream results")
+async def run_nmap_scan(
+    payload: NmapScanRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> StreamingResponse:
+    if not shutil.which("nmap"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="nmap is not installed on this server",
+        )
+    scan_id = str(uuid.uuid4())
+    return StreamingResponse(
+        _stream_nmap(scan_id, payload),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/scans", summary="List nmap scan history")
+async def list_nmap_scans(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    scans = sorted(
+        _scan_history.values(),
+        key=lambda s: s.get("started_at", ""),
+        reverse=True,
+    )
+    return {"items": scans, "total": len(scans)}
+
+
+@router.get("/scans/{scan_id}", summary="Get nmap scan result")
+async def get_nmap_scan(
+    scan_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    scan = _scan_history.get(scan_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return scan

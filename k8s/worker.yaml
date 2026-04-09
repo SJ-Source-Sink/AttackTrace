@@ -1,0 +1,183 @@
+# ─── AttackTrace Celery Workers — Deployment + KEDA ScaledObject ────────────────────
+#
+# Workers run AttackTrace scans which are:
+#   - Network intensive (subdomain enumeration, port scanning)
+#   - CPU intensive (Playwright screenshot rendering, report generation)
+#   - Long-running (up to 2 hours for a full scan)
+#
+# Resource sizing (per worker pod):
+#   CPU   2 cores  — Playwright + nmap/nuclei can spike hard
+#   RAM   4 Gi     — Chromium instances peak ~500 MB each; 2 concurrency = 1+ GB
+#   Ephemeral disk — scan workspace is written to emptyDir
+#
+# Concurrency = 2 per pod: conservative given Chromium memory footprint.
+# KEDA scales the pod count, not the per-pod concurrency.
+#
+# Beat scheduler is a separate Deployment below — only ONE replica, ever.
+# Running two beat instances causes duplicate scheduled tasks.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: attacktrace-platform
+  labels:
+    app.kubernetes.io/name: worker
+    app.kubernetes.io/component: celery-worker
+    app.kubernetes.io/part-of: attacktrace-platform
+  annotations:
+    configmap.reloader.stakater.com/reload: "easd-config"
+    secret.reloader.stakater.com/reload: "easd-secrets"
+spec:
+  # KEDA manages replica count — set to 0 here so KEDA starts from its minReplicas
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  # Recreate strategy is safer for long-running scan tasks:
+  # - RollingUpdate can leave two generations of workers processing the same queue
+  # - Recreate ensures clean drain before new workers start
+  # Pair with a preStop hook and SIGTERM handling in Celery (--without-gossip, etc.)
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: worker
+        app.kubernetes.io/name: worker
+        app.kubernetes.io/component: celery-worker
+    spec:
+      # Allow scans to finish — Celery default SIGTERM grace period is 10s;
+      # we extend to match our soft time limit so in-flight tasks complete.
+      terminationGracePeriodSeconds: 7200
+      containers:
+        - name: worker
+          image: easd-backend:latest
+          imagePullPolicy: Always
+          command:
+            - celery
+            - -A
+            - app.workers.celery_app
+            - worker
+            - --loglevel=info
+            - --queues=default,scans
+            - --concurrency=2
+            - --hostname=worker@%h
+            # Soft shutdown: allow running tasks to finish when SIGTERM received
+            - --without-gossip
+            - --without-mingle
+          envFrom:
+            - configMapRef:
+                name: easd-config
+            - secretRef:
+                name: easd-secrets
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          # Workers don't expose HTTP so we use a process-level liveness check
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - celery -A app.workers.celery_app inspect ping -d celery@$HOSTNAME --timeout 10
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 15
+            failureThreshold: 3
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            allowPrivilegeEscalation: false
+            # readOnlyRootFilesystem disabled: Playwright needs to write to /tmp
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: easd-workspace
+              mountPath: /tmp/attacktrace_scans
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: easd-workspace
+          emptyDir:
+            # Limit ephemeral disk — large scan reports can be multi-MB
+            sizeLimit: 5Gi
+        - name: tmp
+          emptyDir: {}
+
+---
+# ─── Beat Scheduler ──────────────────────────────────────────────────────────
+# CRITICAL: Only ever run 1 replica of beat. Multiple instances will fire
+# the same periodic tasks multiple times. Use a Redis lock (redbeat) if you
+# need HA beat scheduling.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-beat
+  namespace: attacktrace-platform
+  labels:
+    app.kubernetes.io/name: worker-beat
+    app.kubernetes.io/component: celery-beat
+    app.kubernetes.io/part-of: attacktrace-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker-beat
+  # Recreate avoids two beat instances running simultaneously during a rollout
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: worker-beat
+        app.kubernetes.io/name: worker-beat
+        app.kubernetes.io/component: celery-beat
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: worker-beat
+          image: easd-backend:latest
+          imagePullPolicy: Always
+          command:
+            - celery
+            - -A
+            - app.workers.celery_app
+            - beat
+            - --loglevel=info
+            - --scheduler=redbeat.RedBeatScheduler
+          envFrom:
+            - configMapRef:
+                name: easd-config
+            - secretRef:
+                name: easd-secrets
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

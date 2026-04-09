@@ -1,0 +1,403 @@
+"""
+Findings API: list, filter, update lifecycle, add comments, and manage suppressions.
+"""
+
+import math
+from datetime import datetime, timezone
+from typing import Annotated, List, Optional
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_db
+from app.core.dependencies import get_current_org_id, get_current_user
+from app.models.db.audit import AuditLog
+from app.models.db.finding import (
+    Finding,
+    FindingComment,
+    FindingSeverity,
+    FindingStatus,
+    FindingSuppression,
+)
+from app.models.db.user import User
+from app.models.schemas.finding import (
+    FindingCommentCreate,
+    FindingCommentResponse,
+    FindingFilter,
+    FindingResponse,
+    FindingUpdate,
+)
+
+router = APIRouter(prefix="/findings", tags=["Findings"])
+
+
+def _get_client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+@router.get(
+    "",
+    summary="List and filter findings with pagination",
+    description=(
+        "Supports filtering by severity, status, category, scan, asset, CVE presence, "
+        "and free-text search. Scoped to the authenticated organization."
+    ),
+)
+async def list_findings(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+    scan_job_id: Optional[str] = None,
+    severity: Optional[List[str]] = Query(None),
+    finding_status: Optional[List[str]] = Query(None),
+    category: Optional[str] = None,
+    search: Optional[str] = None,
+    asset_id: Optional[str] = None,
+    false_positive: Optional[bool] = None,
+    suppressed: Optional[bool] = None,
+    has_cve: Optional[bool] = None,
+    min_cvss: Optional[float] = None,
+    page: int = 1,
+    per_page: int = 50,
+) -> dict:
+    query = select(Finding).where(Finding.org_id == org_id)
+
+    if scan_job_id:
+        try:
+            query = query.where(Finding.scan_job_id == UUID(scan_job_id))
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": {"code": "INVALID_UUID", "message": "Invalid scan_job_id"}},
+            )
+
+    if severity:
+        try:
+            sev_enums = [FindingSeverity(s) for s in severity]
+            query = query.where(Finding.severity.in_(sev_enums))
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": {"code": "INVALID_SEVERITY", "message": str(e)}},
+            )
+
+    if finding_status:
+        try:
+            status_enums = [FindingStatus(s) for s in finding_status]
+            query = query.where(Finding.status.in_(status_enums))
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": {"code": "INVALID_STATUS", "message": str(e)}},
+            )
+
+    if category:
+        query = query.where(Finding.category.ilike(f"%{category}%"))
+
+    if search:
+        query = query.where(
+            Finding.title.ilike(f"%{search}%") | Finding.description.ilike(f"%{search}%")
+        )
+
+    if asset_id:
+        try:
+            query = query.where(Finding.asset_id == UUID(asset_id))
+        except ValueError:
+            pass
+
+    if false_positive is not None:
+        query = query.where(Finding.false_positive == false_positive)
+
+    if suppressed is not None:
+        query = query.where(Finding.suppressed == suppressed)
+
+    if has_cve is True:
+        query = query.where(func.array_length(Finding.cve, 1) > 0)
+    elif has_cve is False:
+        query = query.where(
+            (Finding.cve == None) | (func.array_length(Finding.cve, 1) == 0)
+        )
+
+    if min_cvss is not None:
+        query = query.where(Finding.cvss_score >= min_cvss)
+
+    # Count
+    count_query = select(func.count()).select_from(query.subquery())
+    total = (await db.execute(count_query)).scalar_one()
+
+    # Severity order for sorting
+    severity_order = {
+        FindingSeverity.CRITICAL: 0,
+        FindingSeverity.HIGH: 1,
+        FindingSeverity.MEDIUM: 2,
+        FindingSeverity.LOW: 3,
+        FindingSeverity.INFO: 4,
+    }
+
+    offset = (page - 1) * per_page
+    query = query.order_by(Finding.created_at.desc()).offset(offset).limit(per_page)
+    result = await db.execute(query)
+    findings = result.scalars().all()
+
+    # Get comment counts in one query
+    finding_ids = [f.id for f in findings]
+    comment_counts = {}
+    if finding_ids:
+        cc_result = await db.execute(
+            select(FindingComment.finding_id, func.count(FindingComment.id).label("cnt"))
+            .where(FindingComment.finding_id.in_(finding_ids))
+            .group_by(FindingComment.finding_id)
+        )
+        comment_counts = {row.finding_id: row.cnt for row in cc_result.all()}
+
+    pages = math.ceil(total / per_page) if per_page > 0 else 0
+
+    return {
+        "items": [
+            FindingResponse.from_orm(f, comment_counts.get(f.id, 0)).model_dump()
+            for f in findings
+        ],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": pages,
+    }
+
+
+@router.get(
+    "/summary/by-severity",
+    summary="Get finding count summary grouped by severity",
+)
+async def finding_severity_summary(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    scan_job_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    query = select(
+        Finding.severity,
+        func.count(Finding.id).label("count")
+    ).where(
+        Finding.org_id == org_id,
+        Finding.suppressed == False,
+        Finding.false_positive == False,
+    )
+
+    if scan_job_id:
+        try:
+            query = query.where(Finding.scan_job_id == UUID(scan_job_id))
+        except ValueError:
+            pass
+
+    query = query.group_by(Finding.severity)
+    result = await db.execute(query)
+
+    summary = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    for row in result.all():
+        summary[row.severity.value] = row.count
+
+    return summary
+
+
+@router.get(
+    "/{finding_id}",
+    response_model=FindingResponse,
+    summary="Get a single finding with full detail",
+)
+async def get_finding(
+    finding_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> FindingResponse:
+    finding = await _get_finding_or_404(db, finding_id, org_id)
+    cc_result = await db.execute(
+        select(func.count(FindingComment.id)).where(FindingComment.finding_id == finding_id)
+    )
+    comment_count = cc_result.scalar_one()
+    return FindingResponse.from_orm(finding, comment_count)
+
+
+@router.patch(
+    "/{finding_id}",
+    response_model=FindingResponse,
+    summary="Update finding lifecycle (status, severity, FP flag, suppression, ticket ref)",
+)
+async def update_finding(
+    finding_id: UUID,
+    payload: FindingUpdate,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> FindingResponse:
+    finding = await _get_finding_or_404(db, finding_id, org_id)
+
+    before_state = {
+        "status": finding.status.value,
+        "severity": finding.severity.value,
+        "false_positive": finding.false_positive,
+        "suppressed": finding.suppressed,
+    }
+
+    if payload.status is not None:
+        try:
+            finding.status = FindingStatus(payload.status)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": {"code": "INVALID_STATUS", "message": f"Invalid status: {payload.status}"}},
+            )
+
+    if payload.severity is not None:
+        try:
+            finding.severity = FindingSeverity(payload.severity)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": {"code": "INVALID_SEVERITY", "message": f"Invalid severity: {payload.severity}"}},
+            )
+
+    if payload.false_positive is not None:
+        finding.false_positive = payload.false_positive
+        if payload.false_positive:
+            finding.status = FindingStatus.FALSE_POSITIVE
+
+    if payload.suppressed is not None:
+        old_suppressed = finding.suppressed
+        finding.suppressed = payload.suppressed
+        finding.suppressed_reason = payload.suppressed_reason
+        finding.suppressed_until = payload.suppressed_until
+        finding.suppressed_by = current_user.id if payload.suppressed else None
+
+        # Record suppression history
+        suppression_record = FindingSuppression(
+            finding_id=finding_id,
+            suppressed_by=current_user.id,
+            action="suppress" if payload.suppressed else "unsuppress",
+            reason=payload.suppressed_reason,
+            until=payload.suppressed_until,
+        )
+        db.add(suppression_record)
+
+    if payload.ticket_ref is not None:
+        finding.ticket_ref = payload.ticket_ref
+
+    if payload.remediation is not None:
+        finding.remediation = payload.remediation
+
+    db.add(finding)
+
+    after_state = {
+        "status": finding.status.value,
+        "severity": finding.severity.value,
+        "false_positive": finding.false_positive,
+        "suppressed": finding.suppressed,
+    }
+
+    log = AuditLog(
+        org_id=org_id,
+        user_id=current_user.id,
+        action="finding.status_changed",
+        resource_type="finding",
+        resource_id=str(finding_id),
+        before_state=before_state,
+        after_state=after_state,
+        ip_address=_get_client_ip(request),
+    )
+    db.add(log)
+    await db.flush()
+    await db.refresh(finding)
+
+    cc_result = await db.execute(
+        select(func.count(FindingComment.id)).where(FindingComment.finding_id == finding_id)
+    )
+    comment_count = cc_result.scalar_one()
+    return FindingResponse.from_orm(finding, comment_count)
+
+
+@router.post(
+    "/{finding_id}/comments",
+    response_model=FindingCommentResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a comment to a finding",
+)
+async def add_comment(
+    finding_id: UUID,
+    payload: FindingCommentCreate,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> FindingCommentResponse:
+    await _get_finding_or_404(db, finding_id, org_id)
+
+    comment = FindingComment(
+        finding_id=finding_id,
+        user_id=current_user.id,
+        body=payload.body,
+    )
+    db.add(comment)
+    await db.flush()
+    await db.refresh(comment)
+
+    return FindingCommentResponse.from_orm(comment, current_user)
+
+
+@router.get(
+    "/{finding_id}/comments",
+    summary="List comments on a finding",
+)
+async def list_comments(
+    finding_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+    page: int = 1,
+    per_page: int = 50,
+) -> dict:
+    await _get_finding_or_404(db, finding_id, org_id)
+
+    count_result = await db.execute(
+        select(func.count()).select_from(FindingComment).where(FindingComment.finding_id == finding_id)
+    )
+    total = count_result.scalar_one()
+
+    offset = (page - 1) * per_page
+    result = await db.execute(
+        select(FindingComment, User)
+        .join(User, FindingComment.user_id == User.id)
+        .where(FindingComment.finding_id == finding_id)
+        .order_by(FindingComment.created_at.asc())
+        .offset(offset)
+        .limit(per_page)
+    )
+    rows = result.all()
+    pages = math.ceil(total / per_page) if per_page > 0 else 0
+
+    return {
+        "items": [FindingCommentResponse.from_orm(c, u).model_dump() for c, u in rows],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": pages,
+    }
+
+
+# --- Helpers ---
+
+async def _get_finding_or_404(db: AsyncSession, finding_id: UUID, org_id: UUID) -> Finding:
+    result = await db.execute(
+        select(Finding).where(Finding.id == finding_id, Finding.org_id == org_id)
+    )
+    finding = result.scalar_one_or_none()
+    if not finding:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"code": "FINDING_NOT_FOUND", "message": "Finding not found"}},
+        )
+    return finding

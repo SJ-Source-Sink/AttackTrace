@@ -1,0 +1,133 @@
+# EASD Configuration File
+# Copy this file to config.yaml and fill in your API keys
+
+easd:
+  # API Keys for external services
+  # You can also set these as environment variables:
+  # SHODAN_API_KEY, CENSYS_API_ID, CENSYS_API_SECRET, etc.
+  api_keys:
+    shodan: ""
+    censys_id: ""
+    censys_secret: ""
+    securitytrails: ""
+    virustotal: ""
+    hunter: ""
+    binaryedge: ""
+
+  # Scan settings
+  scan:
+    # Scan intensity: passive, normal, aggressive
+    # - passive: Only passive reconnaissance (no port scanning)
+    # - normal: Balanced approach with moderate scanning
+    # - aggressive: Full scanning with higher rate limits
+    intensity: "normal"
+
+    # Rate limit for network requests (requests per second)
+    rate_limit: 500
+
+    # Connection timeout in seconds
+    timeout: 10
+
+    # Number of retries for failed requests
+    retries: 2
+
+    # Maximum concurrent threads
+    threads: 50
+
+    # Delay between requests in seconds (0 for no delay)
+    delay_between_requests: 0.0
+
+  # Module-specific settings
+  modules:
+    # Subdomain enumeration
+    subdomain:
+      # Path to custom wordlist for bruteforce
+      wordlist: ""
+      # Path to DNS resolvers list
+      resolvers: ""
+      # Enable DNS bruteforce
+      bruteforce: true
+      # Threads for bruteforce
+      bruteforce_threads: 50
+      # Enable recursive enumeration
+      recursive: false
+      # Max recursion depth
+      max_depth: 2
+
+    # Port scanning
+    ports:
+      # Number of top ports to scan (1-65535)
+      top_ports: 1000
+      # Additional custom ports to scan
+      custom_ports: [8080, 8443, 9090, 9000]
+      # Scan type: tcp, udp, both
+      scan_type: "tcp"
+      # Enable service detection
+      service_detection: true
+      # Enable version detection
+      version_detection: true
+      # Enable OS detection (requires root/admin)
+      os_detection: false
+      # Enable NSE script scanning
+      script_scan: false
+
+    # Web application discovery
+    web:
+      # Capture screenshots (requires gowitness/chromium)
+      screenshot: true
+      # Enable technology fingerprinting
+      tech_detect: true
+      # Follow HTTP redirects
+      follow_redirects: true
+      # Maximum redirects to follow
+      max_redirects: 5
+      # Screenshot timeout in seconds
+      screenshot_timeout: 30
+      # Custom User-Agent
+      user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+    # Cloud asset enumeration
+    cloud:
+      # Cloud providers to check: aws, azure, gcp
+      providers:
+        - aws
+        - azure
+        - gcp
+      # Enable name mutations/permutations
+      mutations: true
+      # Custom permutations wordlist
+      permutations_wordlist: ""
+
+  # Output settings
+  output:
+    # Base directory for results
+    directory: "./results"
+    # Output formats to generate
+    formats:
+      - json
+      - html
+    # Directory for screenshots
+    screenshots_dir: "./screenshots"
+    # Save raw HTTP responses
+    save_raw_responses: false
+
+  # Scope control
+  scope:
+    # IP addresses to exclude from scanning
+    exclude_ips: []
+    # Domains to exclude from enumeration
+    exclude_domains: []
+    # CIDR ranges to exclude
+    exclude_cidrs: []
+    # If set, only scan these CIDR ranges
+    include_only_cidrs: []
+    # Respect robots.txt for web crawling
+    respect_robots_txt: true
+
+  # External tools paths (optional)
+  # EASD will auto-detect tools in PATH if not specified
+  tools:
+    # subfinder: /usr/local/bin/subfinder
+    # masscan: /usr/local/bin/masscan
+    # nmap: /usr/local/bin/nmap
+    # gowitness: /usr/local/bin/gowitness

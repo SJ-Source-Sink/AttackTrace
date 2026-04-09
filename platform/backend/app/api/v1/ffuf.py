@@ -1,0 +1,478 @@
+"""
+ffuf web fuzzer API — runs ffuf and streams results via SSE.
+"""
+
+import asyncio
+import json
+import os
+import re
+import shutil
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Annotated, AsyncGenerator
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, field_validator
+
+from app.core.dependencies import get_current_user
+from app.models.db.user import User
+
+router = APIRouter(prefix="/ffuf", tags=["ffuf"])
+
+_scan_history: dict[str, dict] = {}
+
+# ---------------------------------------------------------------------------
+# Bundled wordlists (committed to the repo — always available)
+# This file lives at: {repo}/platform/backend/app/api/v1/ffuf.py
+# Repo root is 5 levels up.
+# ---------------------------------------------------------------------------
+_REPO_ROOT = Path(__file__).resolve().parents[5]
+_BUNDLED_DIR = _REPO_ROOT / "wordlists"
+
+# System/tool wordlist locations (resolved at runtime — only present if installed)
+_HOME = Path.home()
+_NUCLEI_WORDLISTS = _HOME / "nuclei-templates" / "helpers" / "wordlists"
+
+# SecLists standard locations across macOS (brew) and Linux
+_SECLISTS_ROOTS = [
+    Path("/opt/homebrew/share/seclists"),   # macOS brew (Apple Silicon)
+    Path("/usr/local/share/seclists"),       # macOS brew (Intel)
+    Path("/usr/share/seclists"),             # Debian/Kali
+    Path("/opt/SecLists"),                   # manual install
+    _HOME / "SecLists",                      # home directory install
+]
+
+def _seclists() -> Path | None:
+    for p in _SECLISTS_ROOTS:
+        if p.is_dir():
+            return p
+    return None
+
+
+def _w(label: str, rel: str, category: str, base: Path) -> tuple[str, str, str]:
+    """Build a (label, absolute_path, category) entry if the file exists."""
+    return (label, str(base / rel), category)
+
+
+def _build_known_wordlists() -> list[tuple[str, str, str]]:
+    """
+    Build the full candidate list at import time.
+    Paths are absolute; we check existence in list_wordlists() / _detect_wordlist().
+    """
+    entries: list[tuple[str, str, str]] = []
+
+    # ── Bundled wordlists (always in repo) ──────────────────────────────────
+    entries += [
+        ("Common Paths (bundled)",     str(_BUNDLED_DIR / "web"  / "common.txt"),      "Bundled"),
+        ("API Endpoints (bundled)",    str(_BUNDLED_DIR / "api"  / "endpoints.txt"),   "Bundled"),
+        ("Subdomains (bundled)",       str(_BUNDLED_DIR / "dns"  / "subdomains.txt"),  "Bundled"),
+    ]
+
+    # ── Nuclei helper wordlists (if nuclei-templates installed) ─────────────
+    if _NUCLEI_WORDLISTS.is_dir():
+        nuclei_entries = [
+            ("Adminer Paths",     "adminer-paths.txt",       "Web Content"),
+            ("Grafana Plugins",   "grafana-plugins.txt",     "Web Content"),
+            ("MDB Paths",         "mdb-paths.txt",           "Web Content"),
+            ("URL Params",        "params.txt",              "Fuzzing"),
+            ("WordPress Plugins", "wordpress-plugins.txt",   "Web Content"),
+            ("WordPress Themes",  "wordpress-themes.txt",    "Web Content"),
+            ("WP Users",          "wp-users.txt",            "Web Content"),
+            ("WP Passwords",      "wp-passwords.txt",        "Web Content"),
+            ("User List",         "user-list.txt",           "Fuzzing"),
+            ("Numbers",           "numbers.txt",             "Fuzzing"),
+        ]
+        for label, fname, cat in nuclei_entries:
+            entries.append(_w(f"{label} (nuclei)", fname, cat, _NUCLEI_WORDLISTS))
+
+    # ── SecLists (if installed via brew / apt / manual) ─────────────────────
+    sl = _seclists()
+    if sl:
+        seclists_entries = [
+            ("Common",                   "Discovery/Web-Content/common.txt",                              "Web Content"),
+            ("Big",                      "Discovery/Web-Content/big.txt",                                 "Web Content"),
+            ("Directory Medium",         "Discovery/Web-Content/directory-list-2.3-medium.txt",           "Web Content"),
+            ("Directory Small",          "Discovery/Web-Content/directory-list-2.3-small.txt",            "Web Content"),
+            ("Raft Medium Dirs",         "Discovery/Web-Content/raft-medium-directories.txt",             "Web Content"),
+            ("Raft Small Dirs",          "Discovery/Web-Content/raft-small-directories.txt",              "Web Content"),
+            ("Raft Medium Files",        "Discovery/Web-Content/raft-medium-files.txt",                   "Web Content"),
+            ("Raft Small Files",         "Discovery/Web-Content/raft-small-files.txt",                    "Web Content"),
+            ("Raft Medium Words",        "Discovery/Web-Content/raft-medium-words.txt",                   "Web Content"),
+            ("API Endpoints",            "Discovery/Web-Content/api/api-endpoints.txt",                   "API"),
+            ("API Objects",              "Discovery/Web-Content/api/objects.txt",                         "API"),
+            ("Subdomains Top 5000",      "Discovery/DNS/subdomains-top1million-5000.txt",                 "DNS"),
+            ("Subdomains Top 20000",     "Discovery/DNS/subdomains-top1million-20000.txt",                "DNS"),
+            ("Fuzz Bo0oM",               "Fuzzing/fuzz-Bo0oM.txt",                                       "Fuzzing"),
+            ("LFI Linux",                "Fuzzing/LFI/LFI-gracefulsecurity-linux.txt",                   "Fuzzing"),
+        ]
+        for label, rel, cat in seclists_entries:
+            entries.append(_w(f"{label} (SecLists)", rel, cat, sl))
+
+    # ── DirBuster / Dirb (Kali / Debian) ────────────────────────────────────
+    dirb_root = Path("/usr/share/wordlists")
+    if dirb_root.is_dir():
+        entries += [
+            _w("Directory Medium (DirBuster)", "dirbuster/directory-list-2.3-medium.txt", "Web Content", dirb_root),
+            _w("Directory Small (DirBuster)",  "dirbuster/directory-list-2.3-small.txt",  "Web Content", dirb_root),
+            _w("Common (Dirb)",                "dirb/common.txt",                         "Web Content", dirb_root),
+            _w("Big (Dirb)",                   "dirb/big.txt",                            "Web Content", dirb_root),
+        ]
+
+    return entries
+
+
+_KNOWN_WORDLISTS: list[tuple[str, str, str]] = _build_known_wordlists()
+
+
+def _discover_dynamic_wordlists() -> list[tuple[str, str, str]]:
+    """Scan home-directory locations for any .txt wordlists not already known."""
+    known_paths = {path for _, path, _ in _KNOWN_WORDLISTS}
+    extra: list[tuple[str, str, str]] = []
+    scan_dirs = [
+        str(_HOME / "wordlists"),
+        str(_HOME / "tools" / "wordlists"),
+        "/usr/local/share/wordlists",
+    ]
+    for d in scan_dirs:
+        if not os.path.isdir(d):
+            continue
+        import glob
+        for txt in glob.glob(os.path.join(d, "**", "*.txt"), recursive=True):
+            if txt not in known_paths and os.path.isfile(txt):
+                label = os.path.basename(txt).replace(".txt", "").replace("-", " ").replace("_", " ").title()
+                extra.append((f"{label} (custom)", txt, "Custom"))
+    return extra
+
+
+HTTP_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
+
+
+class FfufScanRequest(BaseModel):
+    url: str
+    wordlist: str | None = None
+    method: str = "GET"
+    headers: dict[str, str] | None = None
+    data: str | None = None
+    match_codes: list[int] | None = None
+    filter_codes: list[int] | None = None
+    match_size: list[int] | None = None
+    filter_size: list[int] | None = None
+    threads: int = 40
+    rate: int | None = None
+    timeout: int = 10
+    follow_redirects: bool = False
+    recursion: bool = False
+    recursion_depth: int = 2
+    extensions: list[str] | None = None
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("URL is required")
+        if re.search(r"[;&|`$(){}<>]", v):
+            raise ValueError("URL contains invalid characters")
+        if not re.match(r"^https?://", v, re.IGNORECASE):
+            raise ValueError("URL must start with http:// or https://")
+        return v
+
+    @field_validator("method")
+    @classmethod
+    def validate_method(cls, v: str) -> str:
+        v = v.upper()
+        if v not in HTTP_METHODS:
+            raise ValueError(f"Method must be one of {HTTP_METHODS}")
+        return v
+
+    @field_validator("threads")
+    @classmethod
+    def validate_threads(cls, v: int) -> int:
+        if not (1 <= v <= 200):
+            raise ValueError("Threads must be between 1 and 200")
+        return v
+
+
+def _detect_wordlist() -> str | None:
+    """Return the first available wordlist — bundled ones come first."""
+    for _, path, _ in _KNOWN_WORDLISTS:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _build_ffuf_cmd(req: FfufScanRequest, wordlist_path: str) -> list[str]:
+    ffuf_bin = shutil.which("ffuf") or "ffuf"
+    cmd = [
+        ffuf_bin,
+        "-u", req.url,
+        "-w", wordlist_path,
+        # ejson: each result on its own JSON line → real-time streaming
+        "-of", "ejson",
+        "-o", "-",
+        "-t", str(req.threads),
+        "-timeout", str(req.timeout),
+        "-X", req.method,
+        "-s",  # silent banner
+    ]
+
+    if req.match_codes:
+        cmd.extend(["-mc", ",".join(str(c) for c in req.match_codes)])
+    else:
+        cmd.extend(["-mc", "200,204,301,302,307,401,403,405"])
+
+    if req.filter_codes:
+        cmd.extend(["-fc", ",".join(str(c) for c in req.filter_codes)])
+
+    if req.match_size:
+        cmd.extend(["-ms", ",".join(str(s) for s in req.match_size)])
+
+    if req.filter_size:
+        cmd.extend(["-fs", ",".join(str(s) for s in req.filter_size)])
+
+    if req.rate:
+        cmd.extend(["-rate", str(req.rate)])
+
+    if req.follow_redirects:
+        cmd.append("-r")
+
+    if req.recursion:
+        cmd.extend(["-recursion", "-recursion-depth", str(req.recursion_depth)])
+
+    if req.extensions:
+        safe_exts = [e.lstrip(".") for e in req.extensions[:10] if re.match(r"^[a-zA-Z0-9]+$", e.lstrip("."))]
+        if safe_exts:
+            cmd.extend(["-e", ",".join(f".{e}" for e in safe_exts)])
+
+    if req.headers:
+        for key, value in list(req.headers.items())[:20]:
+            if re.match(r"^[\w\-]+$", key):
+                # strip CRLF from values to prevent header injection
+                safe_val = re.sub(r"[\r\n]", "", value)
+                cmd.extend(["-H", f"{key}: {safe_val}"])
+
+    if req.data and req.method in ("POST", "PUT", "PATCH"):
+        cmd.extend(["-d", req.data])
+
+    return cmd
+
+
+def _parse_ejson_line(line: str) -> dict | None:
+    """Parse a single ejson line from ffuf -of ejson output."""
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        r = json.loads(line)
+        # ejson lines can be individual results or the final summary object
+        # Individual results have a "url" key; summary has "results" array
+        if "results" in r:
+            return None  # final summary line — skip, we already have all results
+        if "url" not in r:
+            return None
+        return {
+            "url": r.get("url", ""),
+            "input": r.get("input", {}).get("FUZZ", ""),
+            "status": r.get("status", 0),
+            "length": r.get("length", 0),
+            "words": r.get("words", 0),
+            "lines": r.get("lines", 0),
+            "content_type": r.get("content-type", ""),
+            "redirect_location": r.get("redirectlocation", ""),
+            "duration": r.get("duration", 0),
+        }
+    except (json.JSONDecodeError, AttributeError):
+        return None
+
+
+async def _stream_ffuf(scan_id: str, req: FfufScanRequest, wordlist_path: str) -> AsyncGenerator[str, None]:
+    cmd = _build_ffuf_cmd(req, wordlist_path)
+
+    def _sse(event: str, data: dict) -> str:
+        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    yield _sse("start", {
+        "scan_id": scan_id,
+        "command": " ".join(cmd),
+        "url": req.url,
+        "wordlist": wordlist_path,
+        "wordlist_name": os.path.basename(wordlist_path),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    _scan_history[scan_id] = {
+        "id": scan_id,
+        "url": req.url,
+        "wordlist": wordlist_path,
+        "command": " ".join(cmd),
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "results": [],
+        "total": 0,
+    }
+
+    results: list[dict] = []
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        assert proc.stdout is not None
+        assert proc.stderr is not None
+
+        # Merge stdout (ejson results) and stderr (progress) via queue
+        queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue()
+
+        async def _drain_stdout() -> None:
+            async for chunk in proc.stdout:  # type: ignore[union-attr]
+                await queue.put(("out", chunk))
+            await queue.put(None)
+
+        async def _drain_stderr() -> None:
+            async for chunk in proc.stderr:  # type: ignore[union-attr]
+                await queue.put(("err", chunk))
+            await queue.put(None)
+
+        t1 = asyncio.create_task(_drain_stdout())
+        t2 = asyncio.create_task(_drain_stderr())
+
+        done_count = 0
+        while done_count < 2:
+            item = await queue.get()
+            if item is None:
+                done_count += 1
+                continue
+
+            kind, raw = item
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            if not line:
+                continue
+
+            if kind == "out":
+                result = _parse_ejson_line(line)
+                if result:
+                    results.append(result)
+                    _scan_history[scan_id]["results"] = results
+                    _scan_history[scan_id]["total"] = len(results)
+                    yield _sse("result", result)
+            else:
+                # stderr: ffuf progress lines
+                yield _sse("progress", {"message": line, "scan_id": scan_id})
+
+            await asyncio.sleep(0)
+
+        await asyncio.gather(t1, t2, return_exceptions=True)
+        await proc.wait()
+
+        _scan_history[scan_id].update({
+            "status": "completed" if proc.returncode == 0 else "failed",
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "results": results,
+            "total": len(results),
+            "exit_code": proc.returncode,
+        })
+
+        yield _sse("complete", {
+            "scan_id": scan_id,
+            "total": len(results),
+            "exit_code": proc.returncode,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+    except Exception as exc:
+        _scan_history[scan_id].update({"status": "failed", "error": str(exc)})
+        yield _sse("error", {"message": str(exc)})
+
+
+@router.get("/wordlists", summary="List available wordlists on this server")
+async def list_wordlists(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> list[dict]:
+    seen: set[str] = set()
+    result = []
+    all_lists = _KNOWN_WORDLISTS + _discover_dynamic_wordlists()
+    for label, path, category in all_lists:
+        if path in seen:
+            continue
+        if os.path.isfile(path):
+            seen.add(path)
+            try:
+                size = os.path.getsize(path)
+                with open(path, "rb") as f:
+                    lines = sum(1 for _ in f)
+            except Exception:
+                size = 0
+                lines = 0
+            result.append({
+                "label": label,
+                "path": path,
+                "category": category,
+                "size_bytes": size,
+                "line_count": lines,
+            })
+    return result
+
+
+@router.post("/scan", summary="Run an ffuf scan and stream results via SSE")
+async def run_ffuf_scan(
+    payload: FfufScanRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> StreamingResponse:
+    if not shutil.which("ffuf"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="ffuf is not installed. Run: brew install ffuf (macOS) or go install github.com/ffuf/ffuf/v2@latest",
+        )
+
+    wordlist = payload.wordlist
+    if wordlist:
+        # Resolve and validate path — must be an actual file (no directory traversal)
+        resolved = Path(wordlist).resolve()
+        if not resolved.is_file():
+            raise HTTPException(status_code=400, detail=f"Wordlist not found: {wordlist}")
+        wordlist = str(resolved)
+    else:
+        wordlist = _detect_wordlist()
+        if not wordlist:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "No wordlist found. The bundled wordlists should always be present — "
+                    "check that the repo's wordlists/ directory exists."
+                ),
+            )
+
+    scan_id = str(uuid.uuid4())
+    return StreamingResponse(
+        _stream_ffuf(scan_id, payload, wordlist),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/scans", summary="List ffuf scan history")
+async def list_ffuf_scans(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    scans = sorted(_scan_history.values(), key=lambda s: s.get("started_at", ""), reverse=True)
+    return {"items": scans, "total": len(scans)}
+
+
+@router.get("/scans/{scan_id}", summary="Get ffuf scan result")
+async def get_ffuf_scan(
+    scan_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    scan = _scan_history.get(scan_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return scan

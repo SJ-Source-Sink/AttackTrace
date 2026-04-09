@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: easd-config
+  namespace: attacktrace-platform
+  labels:
+    app.kubernetes.io/name: attacktrace-platform
+    app.kubernetes.io/component: config
+data:
+  # ── Application ─────────────────────────────────────────────────────────────
+  ENVIRONMENT: "production"
+  DEBUG: "false"
+  APP_NAME: "AttackTrace"
+  API_V1_PREFIX: "/api/v1"
+
+  # ── Database ─────────────────────────────────────────────────────────────────
+  # Host refers to the ClusterIP service defined in k8s/postgres.yaml
+  DATABASE_URL: "postgresql+asyncpg://attacktrace:attacktrace@postgres:5432/attacktrace"
+  SYNC_DATABASE_URL: "postgresql://attacktrace:attacktrace@postgres:5432/attacktrace"
+  DATABASE_POOL_SIZE: "10"
+  DATABASE_MAX_OVERFLOW: "20"
+  DATABASE_POOL_TIMEOUT: "30"
+
+  # ── Redis ────────────────────────────────────────────────────────────────────
+  REDIS_URL: "redis://redis:6379/0"
+  CELERY_BROKER_URL: "redis://redis:6379/1"
+  CELERY_RESULT_BACKEND: "redis://redis:6379/2"
+
+  # ── Token lifetimes ───────────────────────────────────────────────────────────
+  ACCESS_TOKEN_EXPIRE_MINUTES: "15"
+  REFRESH_TOKEN_EXPIRE_DAYS: "7"
+  ALGORITHM: "HS256"
+
+  # ── CORS ─────────────────────────────────────────────────────────────────────
+  # Comma-separated; parsed by the FastAPI CORS middleware
+  CORS_ORIGINS: "https://app.easd.io,https://easd.io"
+
+  # ── Celery task limits ────────────────────────────────────────────────────────
+  CELERY_TASK_SOFT_TIME_LIMIT: "7200"
+  CELERY_TASK_TIME_LIMIT: "7800"
+
+  # ── AttackTrace CLI ──────────────────────────────────────────────────────────────────
+  # Ephemeral scan workspace — use an emptyDir or PVC mount for this path
+  ATTACKTRACE_WORKSPACE_DIR: "/tmp/attacktrace_scans"
+
+  # ── AI ────────────────────────────────────────────────────────────────────────
+  AI_MODEL: "claude-haiku-4-5-20251001"
+  AI_MAX_TOKENS: "2048"
+
+  # ── Pagination ────────────────────────────────────────────────────────────────
+  DEFAULT_PAGE_SIZE: "50"
+  MAX_PAGE_SIZE: "200"
+  RATE_LIMIT_PER_MINUTE: "60"
+
+  # ── Frontend ──────────────────────────────────────────────────────────────────
+  NEXT_PUBLIC_API_URL: "https://app.easd.io/api/v1"

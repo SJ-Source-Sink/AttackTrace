@@ -1,0 +1,127 @@
+# ─── AttackTrace Frontend — Next.js 15 Deployment + Service ─────────────────────────
+#
+# Standalone Next.js output mode — the image contains a self-contained
+# Node.js server with no node_modules at runtime (~120 MB image).
+#
+# API calls from the browser go directly to /api/v1/* via the ingress.
+# Server-side API calls (SSR, RSC) use the internal ClusterIP backend service.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: attacktrace-platform
+  labels:
+    app.kubernetes.io/name: frontend
+    app.kubernetes.io/component: web
+    app.kubernetes.io/part-of: attacktrace-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: frontend
+        app.kubernetes.io/name: frontend
+        app.kubernetes.io/component: web
+    spec:
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: frontend
+      containers:
+        - name: frontend
+          # Replace with your registry: ghcr.io/yourorg/attacktrace-frontend:latest
+          image: attacktrace-frontend:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            # Public vars baked into the bundle at build time — these only
+            # affect runtime-injected values (not NEXT_PUBLIC_ at build).
+            # The real NEXT_PUBLIC_API_URL must be set at docker build time.
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "3000"
+            # Internal API URL used by Next.js server-side rendering
+            # Points to the backend ClusterIP service, not the public ingress
+            - name: INTERNAL_API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: easd-config
+                  key: DATABASE_URL
+                  optional: true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: nextjs-cache
+              mountPath: /app/.next/cache
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: nextjs-cache
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: attacktrace-platform
+  labels:
+    app.kubernetes.io/name: frontend
+    app.kubernetes.io/component: web
+spec:
+  type: ClusterIP
+  selector:
+    app: frontend
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+      protocol: TCP

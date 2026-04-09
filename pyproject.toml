@@ -1,0 +1,93 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "attacktrace"
+version = "0.1.0"
+description = "AttackTrace - A comprehensive tool for red team engagements"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Sai Jagadeesh"}
+]
+keywords = ["security", "reconnaissance", "attack-surface", "red-team", "pentest", "osint"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+dependencies = [
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "httpx>=0.25.0",
+    "dnspython>=2.4.0",
+    "python-whois>=0.8.0",
+    "shodan>=1.30.0",
+    "aiohttp>=3.9.0",
+    "aiofiles>=23.0.0",
+    "tinydb>=4.8.0",
+    "jinja2>=3.1.0",
+    "pyyaml>=6.0.0",
+    "tqdm>=4.66.0",
+    "asyncio-throttle>=1.0.0",
+    "netaddr>=0.9.0",
+    "validators>=0.22.0",
+]
+
+[project.optional-dependencies]
+screenshots = [
+    "playwright>=1.40.0",
+]
+all = [
+    "playwright>=1.40.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+
+[project.scripts]
+attacktrace = "attacktrace.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/Sai-Jagadeesh/AttackTrace"
+Documentation = "https://github.com/Sai-Jagadeesh/AttackTrace#readme"
+Repository = "https://github.com/Sai-Jagadeesh/AttackTrace"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["attacktrace*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "W", "I", "N", "B", "A", "C4", "SIM", "ARG"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

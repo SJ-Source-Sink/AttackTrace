@@ -1,0 +1,90 @@
+# ─── KEDA ScaledObject — Celery Worker Autoscaling ───────────────────────────
+#
+# KEDA (Kubernetes Event-Driven Autoscaling) scales the worker Deployment
+# based on the actual depth of Celery's Redis queues — a much more accurate
+# signal than CPU utilization for a scan workload.
+#
+# Prerequisites:
+#   kubectl apply -f https://github.com/kedacore/keda/releases/latest/download/keda.yaml
+#   (or Helm: helm install keda kedacore/keda -n keda --create-namespace)
+#
+# Scaling logic:
+#   - scans queue depth ≥ 1  → scale up immediately
+#   - 1 worker per 2 pending tasks (targetValue: 2)
+#   - min 1 worker always running (so first scan doesn't wait for cold start)
+#   - max 20 workers (safety ceiling; adjust based on Redis/Postgres capacity)
+#
+# Queue names and Redis DB numbers must match the Celery config:
+#   CELERY_BROKER_URL = redis://redis:6379/1
+#   queues: default, scans
+#
+# The Redis list key for a queue named "scans" is literally "scans" (Celery
+# uses LPUSH/BRPOP on the queue name as the list key).
+
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-scaledobject
+  namespace: attacktrace-platform
+  labels:
+    app.kubernetes.io/name: worker
+    app.kubernetes.io/component: celery-worker
+    app.kubernetes.io/part-of: attacktrace-platform
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker
+  # Keep at least 1 worker running at all times to avoid cold-start latency
+  minReplicaCount: 1
+  # Hard ceiling — each worker uses up to 2 CPU + 4 Gi RAM
+  maxReplicaCount: 20
+  # Wait 5 minutes before scaling down to avoid thrashing during bursts
+  cooldownPeriod: 300
+  # Poll Redis every 15 seconds
+  pollingInterval: 15
+  triggers:
+    # ── scans queue ───────────────────────────────────────────────────────────
+    # Scale 1 pod per 2 pending scan tasks.
+    # A full subdomain scan takes ~20-60 min; having 2 tasks/worker is fine
+    # since scans are mostly network-wait time.
+    - type: redis
+      metadata:
+        # Reference the Redis service by its ClusterIP service name
+        address: redis:6379
+        # Redis DB 1 is the Celery broker
+        db: "1"
+        # The Celery queue name is the Redis list key
+        listName: scans
+        listLength: "2"
+        # Activate scaling only when there is at least 1 task pending
+        activationListLength: "1"
+
+    # ── default queue ─────────────────────────────────────────────────────────
+    # Default queue handles lighter tasks (report generation, notifications).
+    # Scale more aggressively: 1 pod per 5 tasks.
+    - type: redis
+      metadata:
+        address: redis:6379
+        db: "1"
+        listName: default
+        listLength: "5"
+        activationListLength: "1"
+
+---
+# ─── TriggerAuthentication for Redis ─────────────────────────────────────────
+# If Redis is password-protected, uncomment and configure this block.
+# Reference it in the ScaledObject triggers with:
+#   authenticationRef:
+#     name: redis-trigger-auth
+#
+# apiVersion: keda.sh/v1alpha1
+# kind: TriggerAuthentication
+# metadata:
+#   name: redis-trigger-auth
+#   namespace: attacktrace-platform
+# spec:
+#   secretTargetRef:
+#     - parameter: password
+#       name: easd-secrets
+#       key: REDIS_PASSWORD

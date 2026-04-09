@@ -1,0 +1,113 @@
+# ─── AttackTrace Ingress — nginx ingress controller + cert-manager TLS ───────────────
+#
+# Prerequisites:
+#   - ingress-nginx controller installed (helm install ingress-nginx ...)
+#   - cert-manager installed with a ClusterIssuer named "letsencrypt-prod"
+#     (see https://cert-manager.io/docs/configuration/acme/http01/)
+#
+# Routing:
+#   /api/v1/*  → backend:8000   (FastAPI)
+#   /ws/*      → backend:8000   (WebSocket scan progress)
+#   /*         → frontend:3000  (Next.js)
+#
+# Rate limiting uses nginx's limit_req_zone.
+# Body size limit (50m) accommodates large scan target uploads.
+#
+# Replace `app.easd.io` with your actual domain.
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: easd-ingress
+  namespace: attacktrace-platform
+  labels:
+    app.kubernetes.io/name: easd-ingress
+    app.kubernetes.io/part-of: attacktrace-platform
+  annotations:
+    # ── Ingress class ──────────────────────────────────────────────────────────
+    kubernetes.io/ingress.class: "nginx"
+
+    # ── TLS — cert-manager will provision a Let's Encrypt certificate ─────────
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # Use ACME HTTP-01 challenge (simpler than DNS-01, works for public domains)
+    cert-manager.io/challenge-solver: "http01"
+
+    # ── Body size ─────────────────────────────────────────────────────────────
+    # 50 MB — allows bulk target import files
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+
+    # ── Timeouts — scans can trigger long-running SSE/WebSocket streams ───────
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+
+    # ── WebSocket support for /ws/* endpoints ─────────────────────────────────
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+
+    # ── Rate limiting ─────────────────────────────────────────────────────────
+    # Limit to 60 requests/minute per IP (matches FastAPI rate limiter)
+    nginx.ingress.kubernetes.io/limit-rps: "10"
+    nginx.ingress.kubernetes.io/limit-connections: "20"
+
+    # ── Security headers ──────────────────────────────────────────────────────
+    nginx.ingress.kubernetes.io/server-snippet: |
+      add_header X-Frame-Options "SAMEORIGIN" always;
+      add_header X-Content-Type-Options "nosniff" always;
+      add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+      add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+
+    # ── HSTS ──────────────────────────────────────────────────────────────────
+    nginx.ingress.kubernetes.io/hsts: "true"
+    nginx.ingress.kubernetes.io/hsts-max-age: "31536000"
+    nginx.ingress.kubernetes.io/hsts-include-subdomains: "true"
+
+    # ── SSL redirect ──────────────────────────────────────────────────────────
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - app.easd.io
+      # cert-manager will create this Secret with the TLS certificate
+      secretName: easd-tls-cert
+  rules:
+    - host: app.easd.io
+      http:
+        paths:
+          # API routes — must come before /* to avoid Next.js catching them
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  name: http
+          # WebSocket route for real-time scan progress
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  name: http
+          # Health check endpoint (backend)
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: backend
+                port:
+                  name: http
+          # All other routes → Next.js frontend
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  name: http

@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: attacktrace-platform
+  labels:
+    app.kubernetes.io/name: attacktrace-platform
+    app.kubernetes.io/managed-by: kubectl
+    # Pod Security Admission — enforce restricted baseline in production,
+    # relax to baseline if Playwright/Chromium workers need extra capabilities.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

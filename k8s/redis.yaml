@@ -1,0 +1,107 @@
+# ─── Redis 7 — Deployment + Service ──────────────────────────────────────────
+#
+# Redis is used for three purposes in AttackTrace:
+#   DB 0 — general cache + WebSocket pub/sub for scan progress events
+#   DB 1 — Celery task broker
+#   DB 2 — Celery result backend
+#
+# Single-replica Deployment (not StatefulSet) because:
+#   - Redis is a cache + queue; transient loss is acceptable (Celery will retry)
+#   - Simplifies operations; for HA use Redis Sentinel or Redis Cluster
+#
+# Production recommendation: use a managed Redis service (Elasticache, Cloud
+# Memorystore) or deploy the Bitnami Redis HA Helm chart with Sentinel.
+#
+# maxmemory-policy allkeys-lru: evict least-recently-used keys under pressure.
+# This is appropriate for the cache DB; the broker DB will have persistence.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: attacktrace-platform
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: cache
+    app.kubernetes.io/part-of: attacktrace-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/component: cache
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - redis-server
+            - "--appendonly"
+            - "yes"
+            - "--appendfsync"
+            - "everysec"
+            - "--maxmemory"
+            - "512mb"
+            - "--maxmemory-policy"
+            - "allkeys-lru"
+            - "--save"
+            - "60 1"
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "768Mi"
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+      volumes:
+        - name: redis-data
+          # For production, replace emptyDir with a PVC:
+          # persistentVolumeClaim:
+          #   claimName: redis-data
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: attacktrace-platform
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: cache
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+      protocol: TCP

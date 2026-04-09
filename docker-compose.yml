@@ -1,0 +1,206 @@
+# AttackTrace — Local Development Stack
+#
+# Usage:
+#   cp .env.example .env          # fill in secrets
+#   make up                       # start all services
+#   make logs                     # tail all logs
+#   make migrate                  # run DB migrations
+#
+# Service dependency chain:
+#   postgres + redis  →  backend + worker + worker-beat  →  frontend
+#
+# Celery queues:
+#   default  — lightweight API-triggered tasks
+#   scans    — long-running AttackTrace scan tasks (CPU/network heavy)
+
+version: "3.9"
+
+networks:
+  attacktrace-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+
+services:
+
+  # ─── Data layer ──────────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: attacktrace
+      POSTGRES_PASSWORD: attacktrace
+      POSTGRES_DB: attacktrace
+      # Tune shared_buffers for development — keep it modest on a laptop
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --locale=C"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - attacktrace-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U attacktrace -d attacktrace"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Persistence: AOF + RDB so queue state survives container restarts locally
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - attacktrace-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # ─── Backend API ─────────────────────────────────────────────────────────────
+
+  backend:
+    build:
+      context: .
+      dockerfile: platform/backend/Dockerfile
+      target: runtime
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Override localhost defaults from .env for in-container networking
+      DATABASE_URL: postgresql+asyncpg://attacktrace:attacktrace@postgres:5432/attacktrace
+      SYNC_DATABASE_URL: postgresql://attacktrace:attacktrace@postgres:5432/attacktrace
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    ports:
+      - "8000:8000"
+    # Mount source for hot-reload in development; uvicorn --reload watches /app
+    volumes:
+      - ./platform/backend/app:/app/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - attacktrace-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ─── Celery Workers ──────────────────────────────────────────────────────────
+
+  worker:
+    build:
+      context: .
+      dockerfile: platform/backend/Dockerfile
+      target: runtime
+    restart: unless-stopped
+    # Concurrency 2 locally — real scans are network/IO bound, prefork is fine
+    command: >
+      celery -A app.workers.celery_app worker
+      --loglevel=info
+      --queues=default,scans
+      --concurrency=2
+      --hostname=worker@%h
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://attacktrace:attacktrace@postgres:5432/attacktrace
+      SYNC_DATABASE_URL: postgresql://attacktrace:attacktrace@postgres:5432/attacktrace
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - attacktrace-network
+
+  worker-beat:
+    build:
+      context: .
+      dockerfile: platform/backend/Dockerfile
+      target: runtime
+    restart: unless-stopped
+    # Beat scheduler — only ONE instance should ever run to avoid duplicate jobs
+    command: >
+      celery -A app.workers.celery_app beat
+      --loglevel=info
+      --scheduler=redbeat.RedBeatScheduler
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://attacktrace:attacktrace@postgres:5432/attacktrace
+      SYNC_DATABASE_URL: postgresql://attacktrace:attacktrace@postgres:5432/attacktrace
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - attacktrace-network
+
+  # ─── Frontend ────────────────────────────────────────────────────────────────
+
+  frontend:
+    build:
+      context: platform/frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+      # Internal URL used by Next.js server-side for API rewrites
+      INTERNAL_API_URL: http://backend:8000/api/v1
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - attacktrace-network
+
+  # ─── Celery Monitoring ───────────────────────────────────────────────────────
+
+  flower:
+    image: mher/flower:2.0
+    restart: unless-stopped
+    command: >
+      celery flower
+      --broker=redis://redis:6379/1
+      --broker_api=redis://redis:6379/1
+      --port=5555
+      --url_prefix=flower
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/1
+    ports:
+      - "5555:5555"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - attacktrace-network

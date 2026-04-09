@@ -1,0 +1,148 @@
+# ─── PostgreSQL 16 — StatefulSet + Service ────────────────────────────────────
+#
+# StatefulSet is used (not Deployment) because:
+#   - Postgres needs a stable network identity for replication (future)
+#   - PVC lifecycle is tied to the pod identity, preventing accidental data loss
+#   - Ordered pod management ensures clean single-primary topology
+#
+# For production HA, consider:
+#   - CloudNativePG operator (recommended)
+#   - Bitnami PostgreSQL HA Helm chart with Patroni
+#   - A managed service (RDS, Cloud SQL, AlloyDB)
+#
+# Resource sizing: security scanning workload is write-heavy (scan results,
+# findings, screenshots).  512Mi memory covers the shared_buffers default.
+# Increase to 2Gi+ for production with >100 concurrent scans.
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: attacktrace-platform
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: attacktrace-platform
+spec:
+  serviceName: postgres-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/component: database
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        fsGroup: 999  # postgres group
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRES_USER
+              value: "attacktrace"
+            - name: POSTGRES_DB
+              value: "attacktrace"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: easd-secrets
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            # Tune for container — default 100 connections is fine for this workload
+            # with pgBouncer in front for connection pooling at scale
+            - name: POSTGRES_INITDB_ARGS
+              value: "--encoding=UTF-8 --locale=C"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - exec pg_isready -U easd -d easd -h 127.0.0.1
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - exec pg_isready -U easd -d easd -h 127.0.0.1
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+        labels:
+          app.kubernetes.io/name: postgres
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 50Gi
+        # Uncomment and set storageClassName for your cloud provider:
+        # storageClassName: gp3          # AWS EBS gp3
+        # storageClassName: premium-rwo  # GKE Balanced PD
+        # storageClassName: managed-csi  # AKS Premium SSD
+
+---
+# Headless service for StatefulSet DNS-based discovery (future read replicas)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-headless
+  namespace: attacktrace-platform
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+spec:
+  clusterIP: None
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+
+---
+# Regular ClusterIP service — what the backend/workers use
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: attacktrace-platform
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+spec:
+  type: ClusterIP
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      protocol: TCP

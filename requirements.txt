@@ -1,0 +1,47 @@
+# Core dependencies
+typer>=0.9.0
+rich>=13.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# HTTP & Networking
+httpx>=0.25.0
+aiohttp>=3.9.0
+aiofiles>=23.0.0
+
+# DNS
+dnspython>=2.4.0
+
+# WHOIS
+python-whois>=0.8.0
+
+# External APIs
+shodan>=1.30.0
+
+# Database
+tinydb>=4.8.0
+
+# Templates & Output
+jinja2>=3.1.0
+pyyaml>=6.0.0
+
+# Progress & UI
+tqdm>=4.66.0
+
+# Rate limiting
+asyncio-throttle>=1.0.0
+
+# Network utilities
+netaddr>=0.9.0
+validators>=0.22.0
+
+# Screenshots (optional but recommended)
+playwright>=1.40.0
+
+# Development dependencies (optional)
+# pytest>=7.0.0
+# pytest-asyncio>=0.21.0
+# pytest-cov>=4.0.0
+# black>=23.0.0
+# ruff>=0.1.0
+# mypy>=1.0.0

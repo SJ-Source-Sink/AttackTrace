@@ -1,0 +1,3 @@
+# Mark shell scripts as executable in git
+setup.sh                    eol=lf
+scripts/install-tools.sh    eol=lf
