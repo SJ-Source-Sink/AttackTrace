@@ -46,6 +46,15 @@ async def lifespan(app: FastAPI):
     _asyncio.create_task(preload_templates())
     logger.info("Nuclei template pre-loading started in background")
 
+    # On startup: recover scans that were PENDING or RUNNING when the server last died.
+    # This catches tasks lost during deployments or crashes without waiting for the watchdog.
+    try:
+        from app.workers.scan_worker import recover_stuck_scans
+        recover_stuck_scans.apply_async(queue="default")
+        logger.info("Startup scan recovery triggered")
+    except Exception as _e:
+        logger.warning(f"Could not trigger startup scan recovery: {_e}")
+
     yield
 
     logger.info("Shutting down AttackTrace")

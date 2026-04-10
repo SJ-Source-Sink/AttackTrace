@@ -11,6 +11,8 @@ const Checkbox = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <CheckboxPrimitive.Root
     ref={ref}
+    // Radix renders as <button>; without type="button" it submits the parent <form>
+    type="button"
     className={cn(
       "peer h-4 w-4 shrink-0 rounded-sm border border-zinc-600 shadow focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-blue-600 data-[state=checked]:border-blue-600 data-[state=checked]:text-white",
       className,

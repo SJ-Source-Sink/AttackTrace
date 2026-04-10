@@ -14,7 +14,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { PageHeader } from "@/components/shared/page-header";
 import { cn } from "@/lib/utils";
-import { getAccessToken } from "@/lib/auth";
+import { fetchWithAuth } from "@/lib/auth";
 import { toast } from "sonner";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
@@ -100,15 +100,11 @@ export default function NmapPage() {
     setScanCommand("");
 
     abortRef.current = new AbortController();
-    const token = getAccessToken();
 
     try {
-      const res = await fetch(`${API_BASE}/nmap/scan`, {
+      const res = await fetchWithAuth(`${API_BASE}/nmap/scan`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           target: target.trim(),
           scan_type: scanType,

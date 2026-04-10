@@ -1,9 +1,9 @@
 "use client";
 
-import React from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Bell, ChevronDown, LogOut, Settings, User, Plus, Search } from "lucide-react";
+import { Bell, ChevronDown, LogOut, Settings, User, Plus, Search, CheckCircle2, XCircle, Loader2, Clock } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,6 +16,123 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
+import { scansApi } from "@/lib/api";
+import type { Scan } from "@/types";
+
+const NOTIF_LS_KEY = "attacktrace:notif:last_seen";
+const POLL_INTERVAL_MS = 30_000;
+
+function relativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
+function NotificationIcon({ status }: { status: Scan["status"] }) {
+  if (status === "completed") return <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />;
+  if (status === "failed") return <XCircle className="h-4 w-4 text-red-400 shrink-0" />;
+  if (status === "running") return <Loader2 className="h-4 w-4 text-blue-400 shrink-0 animate-spin" />;
+  return <Clock className="h-4 w-4 text-zinc-400 shrink-0" />;
+}
+
+function NotificationPanel({ onOpen }: { onOpen: () => void }) {
+  const router = useRouter();
+  const [scans, setScans] = useState<Scan[]>([]);
+  const [loading, setLoading] = useState(true);
+  const hasFetched = useRef(false);
+
+  const fetchScans = useCallback(async () => {
+    try {
+      const res = await scansApi.list({ per_page: 15, page: 1 });
+      const items: Scan[] = res.items ?? res ?? [];
+      setScans(items.slice(0, 12));
+    } catch {
+      // silently fail
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!hasFetched.current) {
+      hasFetched.current = true;
+      fetchScans();
+      onOpen();
+    }
+  }, [fetchScans, onOpen]);
+
+  const handleClick = (scanId: string) => {
+    router.push(`/scans/${scanId}`);
+  };
+
+  return (
+    <div className="w-80">
+      <div className="px-3 py-2 border-b border-zinc-800 flex items-center justify-between">
+        <span className="text-sm font-semibold text-zinc-100">Notifications</span>
+        <span className="text-xs text-zinc-500">Recent scans</span>
+      </div>
+      <div className="max-h-[420px] overflow-y-auto">
+        {loading ? (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="h-5 w-5 text-zinc-500 animate-spin" />
+          </div>
+        ) : scans.length === 0 ? (
+          <div className="py-8 text-center text-sm text-zinc-500">No scans yet</div>
+        ) : (
+          scans.map((scan) => (
+            <button
+              key={scan.id}
+              type="button"
+              onClick={() => handleClick(scan.id)}
+              className="w-full text-left px-3 py-2.5 hover:bg-zinc-800/60 transition-colors border-b border-zinc-800/50 last:border-0"
+            >
+              <div className="flex items-start gap-2.5">
+                <div className="mt-0.5">
+                  <NotificationIcon status={scan.status} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-zinc-200 font-medium truncate">
+                    {scan.company_name || scan.target_domains?.[0] || "Scan"}
+                  </p>
+                  <p className="text-xs text-zinc-500 truncate">
+                    {scan.target_domains?.[0]}
+                  </p>
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    <span className={cn(
+                      "text-xs capitalize",
+                      scan.status === "completed" && "text-emerald-400",
+                      scan.status === "failed" && "text-red-400",
+                      scan.status === "running" && "text-blue-400",
+                      scan.status === "pending" && "text-zinc-400",
+                      scan.status === "cancelled" && "text-zinc-500",
+                    )}>
+                      {scan.status}
+                    </span>
+                    <span className="text-zinc-600">·</span>
+                    <span className="text-xs text-zinc-500">{relativeTime(scan.updated_at)}</span>
+                  </div>
+                </div>
+              </div>
+            </button>
+          ))
+        )}
+      </div>
+      <div className="px-3 py-2 border-t border-zinc-800">
+        <button
+          type="button"
+          onClick={() => router.push("/scans")}
+          className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
+        >
+          View all scans →
+        </button>
+      </div>
+    </div>
+  );
+}
 
 interface TopbarProps {
   className?: string;
@@ -33,6 +150,34 @@ function getInitials(name: string): string {
 export function Topbar({ className }: TopbarProps) {
   const { user, logout } = useAuth();
   const router = useRouter();
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  // Poll for unread count (scans completed/failed since last opened)
+  useEffect(() => {
+    const computeUnread = async () => {
+      try {
+        const lastSeen = parseInt(localStorage.getItem(NOTIF_LS_KEY) ?? "0", 10);
+        const res = await scansApi.list({ per_page: 15, page: 1 });
+        const items: Scan[] = res.items ?? res ?? [];
+        const count = items.filter((s) => {
+          const t = new Date(s.updated_at).getTime();
+          return t > lastSeen && (s.status === "completed" || s.status === "failed");
+        }).length;
+        setUnreadCount(count);
+      } catch {
+        // ignore
+      }
+    };
+    computeUnread();
+    const id = setInterval(computeUnread, POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  const handleNotifOpen = useCallback(() => {
+    localStorage.setItem(NOTIF_LS_KEY, Date.now().toString());
+    setUnreadCount(0);
+  }, []);
 
   const handleLogout = () => {
     logout();
@@ -71,10 +216,21 @@ export function Topbar({ className }: TopbarProps) {
         </Button>
 
         {/* Notifications */}
-        <Button variant="ghost" size="icon" className="relative h-8 w-8">
-          <Bell className="h-4 w-4 text-zinc-400" />
-          <span className="absolute top-1 right-1 h-2 w-2 rounded-full bg-red-500" />
-        </Button>
+        <DropdownMenu open={notifOpen} onOpenChange={setNotifOpen}>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon" className="relative h-8 w-8">
+              <Bell className="h-4 w-4 text-zinc-400" />
+              {unreadCount > 0 && (
+                <span className="absolute top-1 right-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[9px] font-bold text-white leading-none">
+                  {unreadCount > 9 ? "9+" : unreadCount}
+                </span>
+              )}
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="p-0 w-80" sideOffset={8}>
+            {notifOpen && <NotificationPanel onOpen={handleNotifOpen} />}
+          </DropdownMenuContent>
+        </DropdownMenu>
 
         {/* User menu */}
         <DropdownMenu>

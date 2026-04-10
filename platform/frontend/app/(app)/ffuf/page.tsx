@@ -13,7 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { PageHeader } from "@/components/shared/page-header";
 import { cn } from "@/lib/utils";
-import { getAccessToken } from "@/lib/auth";
+import { fetchWithAuth } from "@/lib/auth";
 import { toast } from "sonner";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
@@ -136,10 +136,7 @@ export default function FfufPage() {
 
   // Fetch available wordlists on mount
   useEffect(() => {
-    const token = getAccessToken();
-    fetch(`${API_BASE}/ffuf/wordlists`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
+    fetchWithAuth(`${API_BASE}/ffuf/wordlists`)
       .then((r) => r.json())
       .then((list: WordlistOption[]) => {
         setAvailableWordlists(list);
@@ -182,8 +179,6 @@ export default function FfufPage() {
     setStatusMsg("Starting scan…");
     setSelectedHistoryScan(null);
 
-    const token = getAccessToken();
-
     const headers: Record<string, string> = {};
     for (const h of extraHeaders) {
       if (h.key.trim()) headers[h.key.trim()] = h.value;
@@ -217,12 +212,9 @@ export default function FfufPage() {
     if (postData.trim() && ["POST", "PUT", "PATCH"].includes(method)) body.data = postData.trim();
 
     try {
-      const resp = await fetch(`${API_BASE}/ffuf/scan`, {
+      const resp = await fetchWithAuth(`${API_BASE}/ffuf/scan`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
 

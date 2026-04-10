@@ -3,10 +3,12 @@ ffuf web fuzzer API — runs ffuf and streams results via SSE.
 """
 
 import asyncio
+import base64
 import json
 import os
 import re
 import shutil
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -203,15 +205,17 @@ def _detect_wordlist() -> str | None:
     return None
 
 
-def _build_ffuf_cmd(req: FfufScanRequest, wordlist_path: str) -> list[str]:
+def _build_ffuf_cmd(req: FfufScanRequest, wordlist_path: str, output_file: str) -> list[str]:
     ffuf_bin = shutil.which("ffuf") or "ffuf"
     cmd = [
         ffuf_bin,
         "-u", req.url,
         "-w", wordlist_path,
-        # ejson: each result on its own JSON line → real-time streaming
+        # Write ejson to a temp file so we can read structured JSON results.
+        # ffuf with -of ejson and no -o writes plain text to stdout (not JSON),
+        # so we must use -o <file> to get JSON output.
         "-of", "ejson",
-        "-o", "-",
+        "-o", output_file,
         "-t", str(req.threads),
         "-timeout", str(req.timeout),
         "-X", req.method,
@@ -259,36 +263,57 @@ def _build_ffuf_cmd(req: FfufScanRequest, wordlist_path: str) -> list[str]:
     return cmd
 
 
-def _parse_ejson_line(line: str) -> dict | None:
-    """Parse a single ejson line from ffuf -of ejson output."""
-    line = line.strip()
-    if not line:
-        return None
+def _decode_b64(value: str) -> str:
+    """Decode a base64-encoded ffuf input value, falling back to the raw value."""
     try:
-        r = json.loads(line)
-        # ejson lines can be individual results or the final summary object
-        # Individual results have a "url" key; summary has "results" array
-        if "results" in r:
-            return None  # final summary line — skip, we already have all results
-        if "url" not in r:
-            return None
-        return {
-            "url": r.get("url", ""),
-            "input": r.get("input", {}).get("FUZZ", ""),
-            "status": r.get("status", 0),
-            "length": r.get("length", 0),
-            "words": r.get("words", 0),
-            "lines": r.get("lines", 0),
-            "content_type": r.get("content-type", ""),
-            "redirect_location": r.get("redirectlocation", ""),
-            "duration": r.get("duration", 0),
-        }
-    except (json.JSONDecodeError, AttributeError):
-        return None
+        return base64.b64decode(value).decode("utf-8", errors="replace")
+    except Exception:
+        return value
+
+
+def _parse_ejson_file(path: str) -> list[dict]:
+    """
+    Parse ffuf's ejson output file.
+
+    ffuf -of ejson -o <file> writes a single JSON object at scan completion:
+      {"commandline": "...", "results": [{...}, ...], ...}
+
+    Each result entry has base64-encoded "input" values.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read().strip()
+        if not content:
+            return []
+        data = json.loads(content)
+        raw_results = data.get("results") or []
+        parsed = []
+        for r in raw_results:
+            fuzz_raw = r.get("input", {}).get("FUZZ", "")
+            parsed.append({
+                "url": r.get("url", ""),
+                "input": _decode_b64(fuzz_raw) if fuzz_raw else "",
+                "status": r.get("status", 0),
+                "length": r.get("length", 0),
+                "words": r.get("words", 0),
+                "lines": r.get("lines", 0),
+                "content_type": r.get("content-type", ""),
+                "redirect_location": r.get("redirectlocation", ""),
+                "duration": r.get("duration", 0),
+            })
+        return parsed
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return []
 
 
 async def _stream_ffuf(scan_id: str, req: FfufScanRequest, wordlist_path: str) -> AsyncGenerator[str, None]:
-    cmd = _build_ffuf_cmd(req, wordlist_path)
+    # ffuf -of ejson -o <file> writes a single JSON object at exit (not streaming lines).
+    # Stdout receives plain-text matched paths in real-time — useful for live progress.
+    # We stream stdout as discovery events, then parse the JSON file for full results.
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".ejson", prefix="ffuf_")
+    os.close(tmp_fd)
+
+    cmd = _build_ffuf_cmd(req, wordlist_path, tmp_path)
 
     def _sse(event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
@@ -325,17 +350,22 @@ async def _stream_ffuf(scan_id: str, req: FfufScanRequest, wordlist_path: str) -
         assert proc.stdout is not None
         assert proc.stderr is not None
 
-        # Merge stdout (ejson results) and stderr (progress) via queue
-        queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue()
+        # Queue for SSE events: stdout plain-text paths + stderr progress
+        queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
 
         async def _drain_stdout() -> None:
+            """Stream plain-text matched paths from stdout for live discovery events."""
             async for chunk in proc.stdout:  # type: ignore[union-attr]
-                await queue.put(("out", chunk))
+                line = chunk.decode("utf-8", errors="replace").rstrip()
+                if line:
+                    await queue.put(("out", line))
             await queue.put(None)
 
         async def _drain_stderr() -> None:
             async for chunk in proc.stderr:  # type: ignore[union-attr]
-                await queue.put(("err", chunk))
+                line = chunk.decode("utf-8", errors="replace").rstrip()
+                if line:
+                    await queue.put(("err", line))
             await queue.put(None)
 
         t1 = asyncio.create_task(_drain_stdout())
@@ -348,26 +378,27 @@ async def _stream_ffuf(scan_id: str, req: FfufScanRequest, wordlist_path: str) -
                 done_count += 1
                 continue
 
-            kind, raw = item
-            line = raw.decode("utf-8", errors="replace").rstrip()
-            if not line:
-                continue
-
+            kind, line = item
             if kind == "out":
-                result = _parse_ejson_line(line)
-                if result:
-                    results.append(result)
-                    _scan_history[scan_id]["results"] = results
-                    _scan_history[scan_id]["total"] = len(results)
-                    yield _sse("result", result)
+                # stdout: plain-text path discovered — send as a live discovery hint
+                yield _sse("progress", {"message": f"Found: {line}", "scan_id": scan_id})
             else:
-                # stderr: ffuf progress lines
+                # stderr: ffuf progress / status bar lines
                 yield _sse("progress", {"message": line, "scan_id": scan_id})
 
             await asyncio.sleep(0)
 
         await asyncio.gather(t1, t2, return_exceptions=True)
         await proc.wait()
+
+        # Parse the ejson output file now that ffuf has written its complete results
+        results = _parse_ejson_file(tmp_path)
+        _scan_history[scan_id]["results"] = results
+        _scan_history[scan_id]["total"] = len(results)
+
+        # Emit all results
+        for result in results:
+            yield _sse("result", result)
 
         _scan_history[scan_id].update({
             "status": "completed" if proc.returncode == 0 else "failed",
@@ -387,6 +418,11 @@ async def _stream_ffuf(scan_id: str, req: FfufScanRequest, wordlist_path: str) -
     except Exception as exc:
         _scan_history[scan_id].update({"status": "failed", "error": str(exc)})
         yield _sse("error", {"message": str(exc)})
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 @router.get("/wordlists", summary="List available wordlists on this server")

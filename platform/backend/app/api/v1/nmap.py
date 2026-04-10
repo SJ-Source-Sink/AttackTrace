@@ -96,6 +96,8 @@ def _build_nmap_cmd(req: NmapScanRequest) -> list[str]:
     if req.ports:
         cmd.extend(["-p", req.ports])
 
+    # Use system DNS resolver — nmap's built-in resolver can fail in subprocess envs
+    cmd.append("--system-dns")
     cmd.append(req.target)
     return cmd
 

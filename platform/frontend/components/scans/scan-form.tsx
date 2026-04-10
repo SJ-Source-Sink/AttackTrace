@@ -27,7 +27,7 @@ import { cn } from "@/lib/utils";
 import type { ScanModule, ScanIntensity } from "@/types";
 
 const scanSchema = z.object({
-  company_name: z.string().min(2, "Company name is required"),
+  company_name: z.string().min(2, "Engagement name is required"),
   domains: z.array(z.string().min(1)).min(1, "At least one domain is required"),
   intensity: z.enum(["passive", "normal", "aggressive"]),
   skip_modules: z.array(z.string()),
@@ -239,18 +239,18 @@ export function ScanForm() {
         {currentStep === 1 && (
           <div className="space-y-6">
             <div>
-              <h2 className="text-xl font-bold text-zinc-100">Define Target</h2>
+              <h2 className="text-xl font-bold text-zinc-100">Define Engagement</h2>
               <p className="text-sm text-zinc-400 mt-1">
-                Enter the company name and domains to scan
+                Enter the engagement name and domains to scan
               </p>
             </div>
 
             <div className="space-y-4">
               <div className="space-y-1.5">
-                <Label htmlFor="company_name">Company Name</Label>
+                <Label htmlFor="company_name">Engagement Name</Label>
                 <Input
                   id="company_name"
-                  placeholder="Acme Corporation"
+                  placeholder="Q2 2026 Pentest"
                   {...register("company_name")}
                   className={cn(errors.company_name && "border-red-500")}
                 />
@@ -486,7 +486,7 @@ export function ScanForm() {
               <h3 className="text-sm font-medium text-zinc-300">Scan Summary</h3>
               <div className="space-y-1 text-sm">
                 <div className="flex justify-between">
-                  <span className="text-zinc-500">Company</span>
+                  <span className="text-zinc-500">Engagement</span>
                   <span className="text-zinc-300">{watch("company_name") || "—"}</span>
                 </div>
                 <div className="flex justify-between">

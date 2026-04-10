@@ -187,7 +187,8 @@ async def list_scans(
 async def stream_scan_events(scan_id: str) -> AsyncGenerator[str, None]:
     """
     Subscribe to the Redis pub/sub channel for a scan and yield SSE events.
-    Closes when a 'complete' or 'error' event is received.
+    Replays stored structural events first so reconnecting clients catch up
+    without seeing a false restart. Closes when 'complete' or 'error' is received.
     """
     r = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
     pubsub = r.pubsub()
@@ -196,6 +197,28 @@ async def stream_scan_events(scan_id: str) -> AsyncGenerator[str, None]:
     try:
         # Send initial ping
         yield f"data: {json.dumps({'event_type': 'connected', 'scan_id': scan_id, 'timestamp': datetime.now(timezone.utc).isoformat(), 'data': {}})}\n\n"
+
+        # Replay stored structural events (status_change, module_start, module_complete).
+        # This lets clients that navigated away and came back catch up immediately.
+        replay_key = f"scan:{scan_id}:events"
+        stored = await r.lrange(replay_key, 0, -1)
+        already_terminal = False
+        for raw in stored:
+            try:
+                payload = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            yield f"data: {json.dumps(payload)}\n\n"
+            event_type = payload.get("event_type")
+            if event_type in ("complete", "error"):
+                already_terminal = True
+                break
+            if event_type == "status_change" and payload.get("data", {}).get("status") == "cancelled":
+                already_terminal = True
+                break
+
+        if already_terminal:
+            return
 
         async for message in pubsub.listen():
             if message["type"] != "message":

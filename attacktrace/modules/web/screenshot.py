@@ -371,11 +371,12 @@ async def run(
         result.completed_at = datetime.utcnow()
         return result
 
-    # Get URLs to screenshot
+    # Get URLs to screenshot — include all live webapps regardless of status code
+    # (401/403/404/5xx pages are still worth screenshotting; Playwright follows redirects)
     urls = [
         webapp.final_url or webapp.url
         for webapp in session.web_applications
-        if webapp.is_alive and webapp.status_code in range(200, 400)
+        if webapp.is_alive
     ]
 
     if not urls:
@@ -426,7 +427,7 @@ async def run(
         tasks = [
             capture_with_semaphore(webapp)
             for webapp in session.web_applications
-            if webapp.is_alive and webapp.status_code in range(200, 400)
+            if webapp.is_alive
         ]
 
         updated_webapps = await asyncio.gather(*tasks, return_exceptions=True)

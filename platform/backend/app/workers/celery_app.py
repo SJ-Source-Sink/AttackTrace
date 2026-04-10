@@ -3,6 +3,7 @@ Celery application setup with Redis broker.
 """
 
 from celery import Celery
+from celery.schedules import crontab
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -25,11 +26,21 @@ celery_app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
+    # All scan tasks go to the "scans" queue; default catches everything else.
+    # Workers MUST be started with: -Q scans,default
     task_routes={
         "app.workers.scan_worker.run_scan": {"queue": "scans"},
+        "app.workers.scan_worker.recover_stuck_scans": {"queue": "default"},
         "app.workers.scan_worker.triage_scan_findings": {"queue": "ai"},
     },
     task_default_queue="default",
     broker_connection_retry_on_startup=True,
     result_expires=86400 * 7,  # Keep results for 7 days
+    # Periodic tasks
+    beat_schedule={
+        "recover-stuck-scans-every-5min": {
+            "task": "app.workers.scan_worker.recover_stuck_scans",
+            "schedule": 300,  # every 5 minutes
+        },
+    },
 )

@@ -106,12 +106,16 @@ class ScanJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Celery task ID for cancellation
     celery_task_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
-    # Relationships — lazy="raise" prevents accidental sync lazy loads in async context
+    # Relationships — lazy="raise" prevents accidental sync lazy loads in async context.
+    # passive_deletes=True tells SQLAlchemy to rely on the DB-level ondelete="CASCADE"
+    # rather than loading children in Python (which would fail with lazy="raise" in async).
     findings: Mapped[list["Finding"]] = relationship(  # type: ignore[name-defined]
-        "Finding", back_populates="scan_job", cascade="all, delete-orphan", lazy="raise"
+        "Finding", back_populates="scan_job", cascade="all, delete-orphan", lazy="raise",
+        passive_deletes=True,
     )
     assets: Mapped[list["Asset"]] = relationship(  # type: ignore[name-defined]
-        "Asset", back_populates="scan_job", cascade="all, delete-orphan", lazy="raise"
+        "Asset", back_populates="scan_job", cascade="all, delete-orphan", lazy="raise",
+        passive_deletes=True,
     )
     workspace: Mapped[Optional["Workspace"]] = relationship(  # type: ignore[name-defined]
         "Workspace", back_populates="scan_jobs", lazy="raise"

@@ -58,6 +58,13 @@ def _publish_event(r, scan_id: str, event_type: str, data: dict) -> None:
     })
     try:
         r.publish(f"scan:{scan_id}", payload)
+        # Persist structural events (not findings) in a replay list so clients that
+        # navigate away and come back can catch up without seeing a false restart.
+        # TTL 24 h — enough to cover any reasonable scan duration.
+        if event_type != "finding":
+            replay_key = f"scan:{scan_id}:events"
+            r.rpush(replay_key, payload)
+            r.expire(replay_key, 86_400)
     except Exception as e:
         logger.warning(f"Failed to publish event to Redis: {e}")
 
@@ -734,3 +741,81 @@ async def _async_notify_completion(org_id, scan_job_id, target_domains, findings
         )
     except Exception as e:
         logger.warning(f"notify_scan_completed failed: {e}")
+
+
+# --- Stuck scan watchdog ---
+
+@celery_app.task(name="app.workers.scan_worker.recover_stuck_scans")
+def recover_stuck_scans() -> dict:
+    """
+    Periodic watchdog: finds scans stuck in PENDING or RUNNING and recovers them.
+
+    PENDING > 5 min  → requeue (task was likely lost when a worker restarted)
+    RUNNING > 3 hours → mark FAILED (worker died mid-scan)
+
+    Safe to run concurrently — uses DB-level compare-and-set to avoid double-recovery.
+    """
+    from datetime import datetime, timezone, timedelta
+    from sqlalchemy import select, update
+    from app.models.db.scan import ScanJob, ScanStatus as DBScanStatus
+
+    engine = _get_sync_engine()
+    SessionFactory = _get_session_factory(engine)
+    r = _get_sync_redis()
+
+    now = datetime.now(timezone.utc)
+    pending_cutoff = now - timedelta(minutes=5)
+    running_cutoff = now - timedelta(hours=3)
+
+    requeued = 0
+    failed = 0
+
+    with SessionFactory() as db:
+        # --- Recover PENDING scans (task was lost) ---
+        stuck_pending = db.execute(
+            select(ScanJob).where(
+                ScanJob.status == DBScanStatus.PENDING,
+                ScanJob.created_at < pending_cutoff,
+            )
+        ).scalars().all()
+
+        for job in stuck_pending:
+            # Atomically flip PENDING → PENDING with new celery task; skip if already changed
+            try:
+                result = run_scan.apply_async(args=[str(job.id)], queue="scans")
+                job.celery_task_id = result.id
+                db.commit()
+                _publish_event(r, str(job.id), "status_change", {
+                    "status": "pending",
+                    "message": "Task requeued after worker restart",
+                })
+                logger.info(f"Requeued stuck PENDING scan {job.id} → task {result.id}")
+                requeued += 1
+            except Exception as exc:
+                logger.warning(f"Failed to requeue scan {job.id}: {exc}")
+                db.rollback()
+
+        # --- Recover RUNNING scans (worker died mid-scan) ---
+        stuck_running = db.execute(
+            select(ScanJob).where(
+                ScanJob.status == DBScanStatus.RUNNING,
+                ScanJob.started_at < running_cutoff,
+            )
+        ).scalars().all()
+
+        for job in stuck_running:
+            try:
+                job.status = DBScanStatus.FAILED
+                job.completed_at = now
+                db.commit()
+                _publish_event(r, str(job.id), "error", {
+                    "message": "Scan timed out — the worker processing this scan appears to have crashed. Please re-run the scan.",
+                })
+                _publish_event(r, str(job.id), "status_change", {"status": "failed"})
+                logger.warning(f"Marked timed-out RUNNING scan {job.id} as FAILED")
+                failed += 1
+            except Exception as exc:
+                logger.warning(f"Failed to fail scan {job.id}: {exc}")
+                db.rollback()
+
+    return {"requeued": requeued, "failed": failed}

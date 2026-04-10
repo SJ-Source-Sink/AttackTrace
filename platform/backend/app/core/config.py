@@ -4,6 +4,7 @@ All settings can be overridden via environment variables.
 """
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 from pydantic import field_validator
@@ -28,7 +29,7 @@ class Settings(BaseSettings):
     API_V1_PREFIX: str = "/api/v1"
     SECRET_KEY: str = "change-me-in-production-use-32-char-min"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 480  # 8 hours
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # Database
@@ -60,7 +61,7 @@ class Settings(BaseSettings):
     AI_MAX_TOKENS: int = 2048
 
     # AttackTrace CLI
-    ATTACKTRACE_WORKSPACE_DIR: str = "/tmp/attacktrace_scans"
+    ATTACKTRACE_WORKSPACE_DIR: str = str(Path.home() / ".attacktrace" / "scans")
 
     # Pagination defaults
     DEFAULT_PAGE_SIZE: int = 50

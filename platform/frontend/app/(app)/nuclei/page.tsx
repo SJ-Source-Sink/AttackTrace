@@ -16,7 +16,7 @@ import { Separator } from "@/components/ui/separator";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/shared/loading-skeleton";
 import { cn } from "@/lib/utils";
-import { getAccessToken } from "@/lib/auth";
+import { fetchWithAuth } from "@/lib/auth";
 import { toast } from "sonner";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
@@ -256,13 +256,10 @@ export default function NucleiPage() {
   const fetchTemplates = useCallback(async (search: string, sevFilter: string, page: number) => {
     setTemplatesLoading(true);
     try {
-      const token = getAccessToken();
       const params = new URLSearchParams({ page: String(page), per_page: "30" });
       if (search) params.set("search", search);
       if (sevFilter) params.set("severity", sevFilter);
-      const res = await fetch(`${API_BASE}/nuclei/templates?${params}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetchWithAuth(`${API_BASE}/nuclei/templates?${params}`);
       if (res.ok) {
         const data = await res.json();
         setTemplates(data.items ?? []);
@@ -296,7 +293,6 @@ export default function NucleiPage() {
     setRunningCmd("");
 
     abortRef.current = new AbortController();
-    const token = getAccessToken();
 
     const body: Record<string, unknown> = {
       target: target.trim(),
@@ -320,9 +316,9 @@ export default function NucleiPage() {
     const allCounts: Record<string, number> = {};
 
     try {
-      const res = await fetch(`${API_BASE}/nuclei/scan`, {
+      const res = await fetchWithAuth(`${API_BASE}/nuclei/scan`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
         signal: abortRef.current.signal,
       });
