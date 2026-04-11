@@ -20,6 +20,7 @@ import {
   Wind,
   Swords,
   BrainCircuit,
+  GitFork,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -90,6 +91,12 @@ const attackSuiteItems: NavItem[] = [
     href: "/ai-attack-suite",
     icon: BrainCircuit,
     badge: "AI",
+  },
+  {
+    label: "Takeover Checker",
+    href: "/takeover",
+    icon: GitFork,
+    badge: "New",
   },
 ];
 
