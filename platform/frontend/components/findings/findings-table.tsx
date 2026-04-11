@@ -100,6 +100,25 @@ export function FindingsTable({ findings, isLoading, onRowClick }: FindingsTable
       ),
     },
     {
+      accessorKey: "cvss_score",
+      header: "CVSS",
+      cell: ({ row }) => {
+        const score = row.original.cvss_score;
+        if (score == null) return <span className="text-xs text-zinc-600">—</span>;
+        const color =
+          score >= 9.0 ? "text-red-400 bg-red-500/10 border-red-500/30" :
+          score >= 7.0 ? "text-orange-400 bg-orange-500/10 border-orange-500/30" :
+          score >= 4.0 ? "text-yellow-400 bg-yellow-500/10 border-yellow-500/30" :
+                         "text-blue-400 bg-blue-500/10 border-blue-500/30";
+        return (
+          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-mono font-semibold border ${color}`}>
+            {score.toFixed(1)}
+          </span>
+        );
+      },
+      sortingFn: (a, b) => (a.original.cvss_score ?? -1) - (b.original.cvss_score ?? -1),
+    },
+    {
       accessorKey: "category",
       header: "Category",
       cell: ({ getValue }) => (

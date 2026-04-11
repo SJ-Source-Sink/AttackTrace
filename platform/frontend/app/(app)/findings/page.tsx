@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { ShieldAlert, Filter, ChevronLeft, ChevronRight, X } from "lucide-react";
+import { ShieldAlert, ChevronLeft, ChevronRight, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/shared/page-header";
 import { EmptyState } from "@/components/shared/empty-state";
@@ -51,7 +51,9 @@ export default function FindingsPage() {
   };
 
   const hasFilters =
-    (filters.severities?.length ?? 0) > 0 || (filters.statuses?.length ?? 0) > 0;
+    (filters.severities?.length ?? 0) > 0 ||
+    (filters.statuses?.length ?? 0) > 0 ||
+    !!filters.has_cve;
 
   const SEVERITY_COLORS: Record<FindingSeverity, string> = {
     critical: "text-red-500",
@@ -118,6 +120,25 @@ export default function FindingsPage() {
               </label>
             </div>
           ))}
+        </div>
+
+        <Separator />
+
+        <div className="space-y-2">
+          <Label className="text-xs uppercase tracking-wider text-zinc-500">CVE / CVSS</Label>
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="has-cve"
+              checked={!!filters.has_cve}
+              onCheckedChange={(checked) => {
+                setFilters((f) => ({ ...f, has_cve: checked ? true : undefined }));
+                setPage(1);
+              }}
+            />
+            <label htmlFor="has-cve" className="text-sm cursor-pointer text-zinc-300">
+              Has CVE ID
+            </label>
+          </div>
         </div>
       </div>
 

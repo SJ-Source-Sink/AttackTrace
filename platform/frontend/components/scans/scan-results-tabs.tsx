@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { FileDown, Loader2, Brain, TrendingDown, ChevronLeft, ChevronRight } from "lucide-react";
+import { FileDown, Loader2, Brain, TrendingDown, ChevronLeft, ChevronRight, GitBranch, ExternalLink, ChevronDown, ChevronRight as ChevronRightIcon } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -14,7 +14,7 @@ import { aiApi, reportsApi } from "@/lib/api";
 import { toast } from "sonner";
 
 import { severityBgColor, formatDate } from "@/lib/utils";
-import type { Scan, AISummarizeResponse, FindingSeverity } from "@/types";
+import type { Scan, AISummarizeResponse, FindingSeverity, Asset, Finding } from "@/types";
 
 interface ScanResultsTabsProps {
   scan: Scan;
@@ -230,6 +230,7 @@ function FindingsTab({ scanId }: { scanId: string }) {
             <tr className="border-b border-zinc-800 bg-zinc-900">
               <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-400 uppercase">Severity</th>
               <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-400 uppercase">Title</th>
+              <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-400 uppercase">CVE / CVSS</th>
               <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-400 uppercase">Asset</th>
               <th className="text-left px-4 py-3 text-xs font-semibold text-zinc-400 uppercase">Status</th>
             </tr>
@@ -238,7 +239,7 @@ function FindingsTab({ scanId }: { scanId: string }) {
             {isLoading
               ? Array.from({ length: 5 }).map((_, i) => (
                   <tr key={i}>
-                    {Array.from({ length: 4 }).map((_, j) => (
+                    {Array.from({ length: 5 }).map((_, j) => (
                       <td key={j} className="px-4 py-3">
                         <Skeleton className="h-4 w-full" />
                       </td>
@@ -256,6 +257,31 @@ function FindingsTab({ scanId }: { scanId: string }) {
                     </td>
                     <td className="px-4 py-3 text-sm text-zinc-300 max-w-xs truncate">
                       {finding.title}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-col gap-0.5">
+                        {finding.cve_id ? (
+                          <a
+                            href={`https://nvd.nist.gov/vuln/detail/${finding.cve_id}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="inline-flex items-center gap-0.5 text-[10px] text-blue-400 hover:underline"
+                          >
+                            {finding.cve_id}
+                            <ExternalLink className="h-2.5 w-2.5" />
+                          </a>
+                        ) : null}
+                        {finding.cvss_score != null ? (
+                          <span className={`text-[10px] font-mono font-semibold ${
+                            finding.cvss_score >= 9 ? "text-red-400" :
+                            finding.cvss_score >= 7 ? "text-orange-400" :
+                            finding.cvss_score >= 4 ? "text-yellow-400" : "text-blue-400"
+                          }`}>
+                            CVSS {finding.cvss_score.toFixed(1)}
+                          </span>
+                        ) : <span className="text-xs text-zinc-600">—</span>}
+                      </div>
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-zinc-500 max-w-xs truncate">
                       {finding.asset_value}
@@ -297,6 +323,241 @@ function FindingsTab({ scanId }: { scanId: string }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function AttackChainTab({ scan }: { scan: Scan }) {
+  const [expandedDomains, setExpandedDomains] = useState<Set<string>>(new Set());
+  const { data: assetsData, isLoading: assetsLoading } = useAssets({ scan_id: scan.id, per_page: 200, page: 1 });
+  const { data: findingsData, isLoading: findingsLoading } = useFindings({ scan_id: scan.id, per_page: 200, page: 1 });
+
+  const isLoading = assetsLoading || findingsLoading;
+
+  const chain = useMemo(() => {
+    const assets = assetsData?.items ?? [];
+    const findings = findingsData?.items ?? [];
+
+    // Group assets by type
+    const domains = assets.filter((a) => a.asset_type === "domain");
+    const subdomains = assets.filter((a) => a.asset_type === "subdomain");
+    const ips = assets.filter((a) => a.asset_type === "ip");
+    const webapps = assets.filter((a) => a.asset_type === "webapp");
+
+    // Map finding asset_value → findings
+    const findingsByAsset = new Map<string, Finding[]>();
+    for (const f of findings) {
+      const key = f.asset_value;
+      if (!key) continue;
+      if (!findingsByAsset.has(key)) findingsByAsset.set(key, []);
+      findingsByAsset.get(key)!.push(f);
+    }
+
+    // Build tree: domain → matching subdomains → ips → webapps
+    const rootDomains = domains.length > 0
+      ? domains
+      : [...new Set(subdomains.map((s) => {
+          const parts = s.value.split(".");
+          return parts.slice(-2).join(".");
+        }))].map((d) => ({ id: d, value: d, asset_type: "domain" } as Asset));
+
+    return rootDomains.map((domain) => {
+      const domainSubdomains = subdomains.filter(
+        (s) => s.value === domain.value || s.value.endsWith(`.${domain.value}`)
+      );
+      const domainIps = ips;
+      const domainWebapps = webapps.filter(
+        (w) => w.value.includes(domain.value)
+      );
+
+      const domainFindings = findingsByAsset.get(domain.value) ?? [];
+
+      return {
+        domain,
+        subdomains: domainSubdomains.map((sub) => ({
+          asset: sub,
+          findings: findingsByAsset.get(sub.value) ?? [],
+        })),
+        ips: domainIps.map((ip) => ({
+          asset: ip,
+          findings: findingsByAsset.get(ip.value) ?? [],
+        })),
+        webapps: domainWebapps.map((w) => ({
+          asset: w,
+          findings: findingsByAsset.get(w.value) ?? [],
+        })),
+        directFindings: domainFindings,
+        totalFindings: findings.length,
+      };
+    });
+  }, [assetsData, findingsData]);
+
+  const toggleDomain = (domainId: string) => {
+    setExpandedDomains((prev) => {
+      const next = new Set(prev);
+      if (next.has(domainId)) next.delete(domainId);
+      else next.add(domainId);
+      return next;
+    });
+  };
+
+  const SEV_COLOR: Record<string, string> = {
+    critical: "bg-red-500",
+    high: "bg-orange-500",
+    medium: "bg-yellow-500",
+    low: "bg-blue-400",
+    info: "bg-zinc-500",
+  };
+
+  const FindingDots = ({ findings }: { findings: Finding[] }) => {
+    if (!findings.length) return null;
+    const bySev = findings.reduce((acc, f) => {
+      acc[f.severity] = (acc[f.severity] ?? 0) + 1;
+      return acc;
+    }, {} as Record<string, number>);
+    return (
+      <div className="flex items-center gap-1">
+        {Object.entries(bySev).map(([sev, count]) => (
+          <span
+            key={sev}
+            className={`inline-flex items-center justify-center h-4 min-w-[16px] px-1 rounded-full text-[9px] font-bold text-white ${SEV_COLOR[sev] ?? "bg-zinc-500"}`}
+            title={`${count} ${sev}`}
+          >
+            {count}
+          </span>
+        ))}
+      </div>
+    );
+  };
+
+  if (isLoading) {
+    return (
+      <div className="space-y-3">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <Skeleton key={i} className="h-16 w-full" />
+        ))}
+      </div>
+    );
+  }
+
+  if (chain.length === 0) {
+    return (
+      <div className="py-12 text-center text-sm text-zinc-500">
+        No assets discovered yet. Run a scan to populate the attack chain.
+      </div>
+    );
+  }
+
+  const allFindings = findingsData?.items ?? [];
+  const criticalCount = allFindings.filter((f) => f.severity === "critical").length;
+  const highCount = allFindings.filter((f) => f.severity === "high").length;
+
+  return (
+    <div className="space-y-4">
+      {/* Stats bar */}
+      <div className="flex items-center gap-4 p-3 rounded-lg bg-zinc-900 border border-zinc-800 text-sm">
+        <div className="flex items-center gap-1.5">
+          <GitBranch className="h-4 w-4 text-blue-400" />
+          <span className="text-zinc-400">Attack Surface:</span>
+        </div>
+        <span className="text-zinc-300">{(assetsData?.items ?? []).length} assets</span>
+        <span className="text-zinc-600">·</span>
+        <span className="text-zinc-300">{allFindings.length} findings</span>
+        {criticalCount > 0 && (
+          <>
+            <span className="text-zinc-600">·</span>
+            <span className="text-red-400 font-semibold">{criticalCount} critical</span>
+          </>
+        )}
+        {highCount > 0 && (
+          <>
+            <span className="text-zinc-600">·</span>
+            <span className="text-orange-400 font-semibold">{highCount} high</span>
+          </>
+        )}
+      </div>
+
+      {/* Chain tree */}
+      <div className="space-y-2">
+        {chain.map(({ domain, subdomains, ips, webapps, directFindings }) => {
+          const isExpanded = expandedDomains.has(domain.id ?? domain.value);
+          const childCount = subdomains.length + ips.length + webapps.length;
+          const allChildFindings = [
+            ...directFindings,
+            ...subdomains.flatMap((s) => s.findings),
+            ...ips.flatMap((i) => i.findings),
+            ...webapps.flatMap((w) => w.findings),
+          ];
+
+          return (
+            <div key={domain.id ?? domain.value} className="rounded-lg border border-zinc-800 overflow-hidden">
+              {/* Domain row */}
+              <button
+                type="button"
+                className="w-full flex items-center gap-3 px-4 py-3 bg-zinc-900 hover:bg-zinc-800/60 transition-colors text-left"
+                onClick={() => toggleDomain(domain.id ?? domain.value)}
+              >
+                {isExpanded
+                  ? <ChevronDown className="h-4 w-4 text-zinc-500 shrink-0" />
+                  : <ChevronRightIcon className="h-4 w-4 text-zinc-500 shrink-0" />
+                }
+                <span className="font-mono text-sm font-semibold text-zinc-200">{domain.value}</span>
+                <Badge variant="secondary" className="text-[10px]">domain</Badge>
+                {childCount > 0 && (
+                  <span className="text-xs text-zinc-500">{childCount} child assets</span>
+                )}
+                <div className="ml-auto flex items-center gap-2">
+                  <FindingDots findings={allChildFindings} />
+                </div>
+              </button>
+
+              {/* Children */}
+              {isExpanded && (
+                <div className="border-t border-zinc-800 divide-y divide-zinc-800/60">
+                  {subdomains.map(({ asset, findings }) => (
+                    <div key={asset.id} className="flex items-center gap-3 px-4 py-2.5 pl-10 bg-zinc-950/40">
+                      <span className="text-xs text-zinc-500">└</span>
+                      <span className="font-mono text-xs text-zinc-300">{asset.value}</span>
+                      <Badge variant="secondary" className="text-[10px]">subdomain</Badge>
+                      {asset.risk_score > 0 && (
+                        <span className={`text-[10px] ${asset.risk_score >= 70 ? "text-red-400" : asset.risk_score >= 40 ? "text-yellow-400" : "text-zinc-500"}`}>
+                          risk {asset.risk_score}
+                        </span>
+                      )}
+                      <div className="ml-auto">
+                        <FindingDots findings={findings} />
+                      </div>
+                    </div>
+                  ))}
+                  {ips.map(({ asset, findings }) => (
+                    <div key={asset.id} className="flex items-center gap-3 px-4 py-2.5 pl-10 bg-zinc-950/40">
+                      <span className="text-xs text-zinc-500">└</span>
+                      <span className="font-mono text-xs text-zinc-300">{asset.value}</span>
+                      <Badge variant="secondary" className="text-[10px]">ip</Badge>
+                      <div className="ml-auto">
+                        <FindingDots findings={findings} />
+                      </div>
+                    </div>
+                  ))}
+                  {webapps.map(({ asset, findings }) => (
+                    <div key={asset.id} className="flex items-center gap-3 px-4 py-2.5 pl-10 bg-zinc-950/40">
+                      <span className="text-xs text-zinc-500">└</span>
+                      <span className="font-mono text-xs text-zinc-300 truncate max-w-[300px]">{asset.value}</span>
+                      <Badge variant="secondary" className="text-[10px]">webapp</Badge>
+                      <div className="ml-auto">
+                        <FindingDots findings={findings} />
+                      </div>
+                    </div>
+                  ))}
+                  {childCount === 0 && directFindings.length === 0 && (
+                    <div className="px-10 py-3 text-xs text-zinc-600">No child assets discovered</div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -407,6 +668,7 @@ export function ScanResultsTabs({ scan }: ScanResultsTabsProps) {
             </span>
           )}
         </TabsTrigger>
+        <TabsTrigger value="chain">Attack Chain</TabsTrigger>
         <TabsTrigger value="report">Report</TabsTrigger>
       </TabsList>
 
@@ -418,6 +680,9 @@ export function ScanResultsTabs({ scan }: ScanResultsTabsProps) {
       </TabsContent>
       <TabsContent value="findings">
         <FindingsTab scanId={scan.id} />
+      </TabsContent>
+      <TabsContent value="chain">
+        <AttackChainTab scan={scan} />
       </TabsContent>
       <TabsContent value="report">
         <ReportTab scanId={scan.id} />

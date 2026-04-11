@@ -11,12 +11,63 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, AsyncGenerator
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 
 from app.core.dependencies import get_current_user
 from app.models.db.user import User
+
+# Cache CVSS scores to avoid hammering NVD for duplicate CVEs across scans
+_cvss_cache: dict[str, float | None] = {}
+
+_CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
+
+async def _lookup_cvss(cve_id: str) -> float | None:
+    """Fetch CVSS v3 base score from NIST NVD (free tier, no API key required)."""
+    cve_upper = cve_id.upper()
+    if cve_upper in _cvss_cache:
+        return _cvss_cache[cve_upper]
+    try:
+        url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_upper}"
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=4.0, read=8.0, write=4.0, pool=4.0)) as client:
+            resp = await client.get(url, headers={"Accept": "application/json"})
+            if resp.status_code == 200:
+                data = resp.json()
+                vulns = data.get("vulnerabilities", [])
+                if vulns:
+                    metrics = vulns[0].get("cve", {}).get("metrics", {})
+                    # Try CVSS v3.1 first, then v3.0, then v2
+                    for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+                        entries = metrics.get(key, [])
+                        if entries:
+                            score = entries[0].get("cvssData", {}).get("baseScore")
+                            if score is not None:
+                                _cvss_cache[cve_upper] = float(score)
+                                return float(score)
+    except Exception:
+        pass
+    _cvss_cache[cve_upper] = None
+    return None
+
+
+def _extract_cves(finding: dict) -> list[str]:
+    """Extract CVE IDs from Nuclei finding tags and references."""
+    found: set[str] = set()
+    # Tags like ["cve", "cve-2021-44228"] or ["cve2021-44228"]
+    for tag in finding.get("tags", []):
+        matches = _CVE_PATTERN.findall(tag)
+        found.update(m.upper() for m in matches)
+    # References: URLs like https://nvd.nist.gov/vuln/detail/CVE-2021-44228
+    for ref in finding.get("reference", []):
+        matches = _CVE_PATTERN.findall(ref)
+        found.update(m.upper() for m in matches)
+    # Template ID: e.g. "CVE-2021-44228"
+    tid = finding.get("template_id", "")
+    matches = _CVE_PATTERN.findall(tid)
+    found.update(m.upper() for m in matches)
+    return sorted(found)
 
 router = APIRouter(prefix="/nuclei", tags=["Nuclei"])
 
@@ -149,20 +200,30 @@ def _parse_nuclei_line(line: str) -> dict | None:
         return None
     try:
         data = json.loads(line)
+        info = data.get("info", {}) or {}
+        tags = info.get("tags", []) or []
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",")]
+        references = info.get("reference", []) or []
+        if isinstance(references, str):
+            references = [references]
         return {
             "template_id": data.get("template-id", ""),
-            "name": data.get("info", {}).get("name", ""),
-            "severity": data.get("info", {}).get("severity", "info"),
+            "name": info.get("name", ""),
+            "description": info.get("description", ""),
+            "severity": info.get("severity", "info"),
             "matched_url": data.get("matched-at", data.get("host", "")),
             "extracted_results": data.get("extracted-results", []),
             "matcher_name": data.get("matcher-name", ""),
             "type": data.get("type", ""),
             "ip": data.get("ip", ""),
             "timestamp": data.get("timestamp", datetime.now(timezone.utc).isoformat()),
-            "tags": data.get("info", {}).get("tags", []),
-            "author": data.get("info", {}).get("authors", []),
-            "reference": data.get("info", {}).get("reference", []),
+            "tags": tags,
+            "author": info.get("authors", []) or [],
+            "reference": references,
             "curl_command": data.get("curl-command", ""),
+            "cve": [],        # populated async after parsing
+            "cvss_score": None,  # populated async after CVE lookup
             "raw": line,
         }
     except json.JSONDecodeError:
@@ -236,6 +297,12 @@ async def _stream_nuclei(scan_id: str, req: NucleiScanRequest) -> AsyncGenerator
             if kind == "out":
                 finding = _parse_nuclei_line(line)
                 if finding:
+                    # Extract CVE IDs synchronously; enrich CVSS async
+                    cves = _extract_cves(finding)
+                    finding["cve"] = cves
+                    if cves:
+                        cvss = await _lookup_cvss(cves[0])
+                        finding["cvss_score"] = cvss
                     findings.append(finding)
                     sev = finding.get("severity", "info").lower()
                     counts[sev] = counts.get(sev, 0) + 1
