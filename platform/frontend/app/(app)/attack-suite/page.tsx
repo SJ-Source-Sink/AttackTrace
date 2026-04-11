@@ -3,8 +3,9 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import {
   Swords, Play, Square, Download, ChevronDown, ChevronRight,
-  Shield, AlertTriangle, Info, CheckCircle2, XCircle,
-  History, Trash2, Plus, X, Loader2, ToggleLeft, ToggleRight,
+  Shield, AlertTriangle, CheckCircle2, XCircle,
+  History, Plus, X, Loader2, Globe, LogIn, Users, BrainCircuit,
+  Network, Search,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,21 +17,29 @@ import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import { PageHeader } from "@/components/shared/page-header";
 import { cn } from "@/lib/utils";
-import { fetchWithAuth } from "@/lib/auth";
+import { fetchWithAuth, getAccessToken } from "@/lib/auth";
 import { toast } from "sonner";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
 
 const MODULES = [
-  { id: "headers", label: "Security Headers", description: "Check for missing/misconfigured HTTP security headers (CSP, HSTS, X-Frame-Options, etc.)" },
-  { id: "redirect", label: "Open Redirect", description: "Test common redirect parameters for open redirect vulnerabilities" },
-  { id: "xss", label: "XSS Scanner", description: "Test for reflected Cross-Site Scripting in URL parameters" },
-  { id: "sqli", label: "SQL Injection", description: "Time-based and error-based SQL injection detection" },
-  { id: "ssrf", label: "SSRF Prober", description: "Test URL parameters for Server-Side Request Forgery to cloud metadata and internal services" },
-  { id: "graphql", label: "GraphQL Inspector", description: "Test for exposed GraphQL introspection and batch query abuse" },
-  { id: "jwt", label: "JWT Analyzer", description: "Analyze JWT tokens for alg:none bypass, weak secrets, and info exposure" },
-  { id: "auth_bypass", label: "Auth Bypass", description: "Test admin paths, HTTP method overrides, and header-based auth bypass" },
-  { id: "takeover", label: "Takeover Detection", description: "Check for subdomain/service takeover fingerprints" },
+  { id: "crawl",      label: "Web Crawler",          description: "BFS crawl: discovers all endpoints, forms, params, and IDs before testing" },
+  { id: "headers",    label: "Security Headers",      description: "Missing/misconfigured HTTP security headers (CSP, HSTS, CORS, X-Frame-Options)" },
+  { id: "cors",       label: "CORS Misconfiguration", description: "Reflected origin, null origin, subdomain bypass — #2 in dataset (1050 reports)" },
+  { id: "csrf",       label: "CSRF Bypass",           description: "SameSite bypass, missing tokens, login CSRF — #3 in dataset (660 reports)" },
+  { id: "xss",        label: "XSS Scanner",           description: "Reflected & stored XSS in discovered forms and URL params (611 stored XSS reports)" },
+  { id: "sqli",       label: "SQL Injection",         description: "Time-based blind and error-based SQLi across all discovered parameters" },
+  { id: "ssrf",       label: "SSRF Prober",           description: "Cloud metadata, internal services — 79 SSRF + 18 blind SSRF reports" },
+  { id: "idor",       label: "IDOR Scanner",          description: "Cross-account access on crawled endpoints — #1 in dataset (1854 reports)" },
+  { id: "privilege",  label: "Privilege Escalation",  description: "Mass assignment, role tampering, admin paths — 276 reports" },
+  { id: "account",    label: "Account Takeover",      description: "Password reset host injection, email change, OAuth flow — 167 reports" },
+  { id: "cache",      label: "Cache Poisoning",       description: "Unkeyed header injection (X-Forwarded-Host, X-Host) — 104 reports" },
+  { id: "race",       label: "Race Conditions",       description: "Parallel request attacks on state-changing endpoints — 39 reports" },
+  { id: "business",   label: "Business Logic",        description: "Negative price, quantity overflow, coupon stacking — 51 reports" },
+  { id: "graphql",    label: "GraphQL Inspector",     description: "Introspection, batch abuse, auth bypass — 175 reports" },
+  { id: "jwt",        label: "JWT Analyzer",          description: "alg:none, weak secrets, kid injection, claims exposure — 60 reports" },
+  { id: "redirect",   label: "Open Redirect",         description: "OAuth redirect_uri, redirect param bypass — 168 reports, chains to ATO" },
+  { id: "auth_bypass", label: "Auth Bypass",          description: "Admin paths, X-Forwarded-For, method override, sensitive file exposure" },
 ];
 
 const SEV_COLORS: Record<string, string> = {
@@ -62,6 +71,7 @@ interface AttackFinding {
   module: string;
   test_name: string;
   severity: "critical" | "high" | "medium" | "low" | "info";
+  confidence: string;
   title: string;
   description: string;
   evidence: string;
@@ -78,6 +88,13 @@ interface ScanCounts {
   info: number;
 }
 
+interface CrawlStats {
+  pages: number;
+  forms: number;
+  endpoints: number;
+  tech_stack: string[];
+}
+
 interface HistoryEntry {
   id: string;
   target: string;
@@ -86,11 +103,7 @@ interface HistoryEntry {
   status: string;
 }
 
-interface FindingCardProps {
-  finding: AttackFinding;
-}
-
-function FindingCard({ finding }: FindingCardProps) {
+function FindingCard({ finding }: { finding: AttackFinding }) {
   const [expanded, setExpanded] = useState(false);
   const [remExpanded, setRemExpanded] = useState(false);
   const sev = finding.severity ?? "info";
@@ -99,9 +112,9 @@ function FindingCard({ finding }: FindingCardProps) {
     <div className={cn(
       "rounded-lg border transition-colors",
       sev === "critical" ? "border-red-600/20 bg-red-600/5" :
-      sev === "high" ? "border-orange-500/20 bg-orange-500/5" :
-      sev === "medium" ? "border-yellow-500/20" :
-      "border-zinc-800"
+      sev === "high"     ? "border-orange-500/20 bg-orange-500/5" :
+      sev === "medium"   ? "border-yellow-500/20 bg-yellow-500/5" :
+                           "border-zinc-800"
     )}>
       <button
         className="w-full flex items-start gap-3 p-3 text-left"
@@ -117,6 +130,11 @@ function FindingCard({ finding }: FindingCardProps) {
             <Badge variant="outline" className="text-[10px] py-0 h-4 text-zinc-500">
               {finding.module}
             </Badge>
+            {finding.confidence && finding.confidence !== "medium" && (
+              <Badge variant="outline" className="text-[10px] py-0 h-4 text-zinc-600">
+                {finding.confidence} conf
+              </Badge>
+            )}
             {finding.is_vulnerable ? (
               <span className="inline-flex items-center gap-1 rounded-full bg-red-600/10 border border-red-600/30 px-2 py-0 text-[10px] text-red-400 h-4">
                 <XCircle className="h-2.5 w-2.5" /> Vulnerable
@@ -145,7 +163,6 @@ function FindingCard({ finding }: FindingCardProps) {
               <p className="text-xs text-zinc-300">{finding.description}</p>
             </div>
           )}
-
           {finding.evidence && (
             <div>
               <p className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">Evidence</p>
@@ -154,7 +171,6 @@ function FindingCard({ finding }: FindingCardProps) {
               </div>
             </div>
           )}
-
           {finding.remediation && (
             <div>
               <button
@@ -175,69 +191,138 @@ function FindingCard({ finding }: FindingCardProps) {
   );
 }
 
+// ─────────────────────────────────────────────────────────────
+// Section header used in config panel
+// ─────────────────────────────────────────────────────────────
+function SectionToggle({
+  icon, label, enabled, onToggle, children, badge,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  enabled: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+  badge?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="rounded-lg border border-zinc-800">
+      <div className="flex items-center gap-2 px-3 py-2">
+        <button
+          className="flex items-center gap-2 flex-1 text-left"
+          onClick={() => setOpen(!open)}
+        >
+          {open ? <ChevronDown className="h-3.5 w-3.5 text-zinc-500" /> : <ChevronRight className="h-3.5 w-3.5 text-zinc-500" />}
+          <span className="text-zinc-400">{icon}</span>
+          <span className="text-xs font-medium text-zinc-300">{label}</span>
+          {badge && <Badge variant="secondary" className="text-[10px] py-0 h-4">{badge}</Badge>}
+        </button>
+        <Switch checked={enabled} onCheckedChange={onToggle} />
+      </div>
+      {open && enabled && (
+        <div className="px-4 pb-4 pt-1 border-t border-zinc-800 space-y-3">
+          {children}
+        </div>
+      )}
+      {open && !enabled && (
+        <div className="px-4 pb-3 pt-1 border-t border-zinc-800">
+          <p className="text-[11px] text-zinc-600 italic">Enable to configure</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// Main page
+// ─────────────────────────────────────────────────────────────
 export default function AttackSuitePage() {
+  // Target + basic options
   const [target, setTarget] = useState("");
-  const [selectedModules, setSelectedModules] = useState<Set<string>>(new Set(MODULES.map((m) => m.id)));
+  const [followRedirects, setFollowRedirects] = useState(true);
+  const [timeout, setTimeoutVal] = useState(15);
+  const [aiAnalysis, setAiAnalysis] = useState(false);
+
+  // Modules
+  const [selectedModules, setSelectedModules] = useState<Set<string>>(
+    new Set(MODULES.map((m) => m.id))
+  );
+
+  // Auth headers (manual key-value)
   const [authHeaders, setAuthHeaders] = useState<{ key: string; value: string }[]>([]);
   const [showAuthHeaders, setShowAuthHeaders] = useState(false);
-  const [followRedirects, setFollowRedirects] = useState(true);
-  const [timeout, setTimeout] = useState(30);
+
+  // Crawler config
+  const [crawlerEnabled, setCrawlerEnabled] = useState(true);
+  const [crawlerDepth, setCrawlerDepth] = useState(3);
+  const [crawlerPages, setCrawlerPages] = useState(50);
+  const [crawlerRobots, setCrawlerRobots] = useState(true);
+
+  // Login config
+  const [loginEnabled, setLoginEnabled] = useState(false);
+  const [loginUrl, setLoginUrl] = useState("");
+  const [loginType, setLoginType] = useState<"form" | "bearer" | "basic" | "cookie">("form");
+  const [loginUsername, setLoginUsername] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginBearerToken, setLoginBearerToken] = useState("");
+  const [loginCookie, setLoginCookie] = useState("");
+  const [loginUsernameField, setLoginUsernameField] = useState("username");
+  const [loginPasswordField, setLoginPasswordField] = useState("password");
+
+  // Account 2 config (IDOR)
+  const [account2Enabled, setAccount2Enabled] = useState(false);
+  const [account2Bearer, setAccount2Bearer] = useState("");
+  const [account2Cookie, setAccount2Cookie] = useState("");
+
+  // Scan state
   const [isScanning, setIsScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState<"idle" | "running" | "completed" | "failed">("idle");
   const [progressMessages, setProgressMessages] = useState<{ module: string; message: string }[]>([]);
   const [showProgress, setShowProgress] = useState(true);
   const [findings, setFindings] = useState<AttackFinding[]>([]);
   const [counts, setCounts] = useState<ScanCounts>({ critical: 0, high: 0, medium: 0, low: 0, info: 0 });
+  const [crawlStats, setCrawlStats] = useState<CrawlStats | null>(null);
+  const [aiPlan, setAiPlan] = useState<string | null>(null);
+  const [scanId, setScanId] = useState<string | null>(null);
+
+  // History
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [showHistory, setShowHistory] = useState(false);
-  const [scanId, setScanId] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const progressEndRef = useRef<HTMLDivElement>(null);
 
-  // Load history on mount
   useEffect(() => {
     fetchWithAuth(`${API_BASE}/attack-suite/scans`)
       .then((r) => r.ok ? r.json() : [])
-      .then((data) => {
-        if (Array.isArray(data)) setHistory(data);
-      })
+      .then((data) => { if (Array.isArray(data)) setHistory(data); })
       .catch(() => {});
   }, []);
 
   const toggleModule = (id: string) => {
     setSelectedModules((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
   };
 
-  const selectAll = () => setSelectedModules(new Set(MODULES.map((m) => m.id)));
-  const deselectAll = () => setSelectedModules(new Set());
-
-  const addAuthHeader = () => setAuthHeaders((prev) => [...prev, { key: "", value: "" }]);
-  const removeAuthHeader = (i: number) => setAuthHeaders((prev) => prev.filter((_, idx) => idx !== i));
-  const updateAuthHeader = (i: number, field: "key" | "value", val: string) => {
-    setAuthHeaders((prev) => prev.map((h, idx) => idx === i ? { ...h, [field]: val } : h));
-  };
+  const addAuthHeader = () => setAuthHeaders((p) => [...p, { key: "", value: "" }]);
+  const removeAuthHeader = (i: number) => setAuthHeaders((p) => p.filter((_, idx) => idx !== i));
+  const updateAuthHeader = (i: number, field: "key" | "value", val: string) =>
+    setAuthHeaders((p) => p.map((h, idx) => idx === i ? { ...h, [field]: val } : h));
 
   const startScan = useCallback(async () => {
-    if (!target.trim()) {
-      toast.error("Please enter a target URL");
-      return;
-    }
-    if (selectedModules.size === 0) {
-      toast.error("Please select at least one module");
-      return;
-    }
+    if (!target.trim()) { toast.error("Please enter a target URL"); return; }
+    if (selectedModules.size === 0) { toast.error("Select at least one module"); return; }
 
     setIsScanning(true);
     setScanStatus("running");
     setProgressMessages([]);
     setFindings([]);
     setCounts({ critical: 0, high: 0, medium: 0, low: 0, info: 0 });
+    setCrawlStats(null);
+    setAiPlan(null);
     setScanId(null);
 
     abortRef.current = new AbortController();
@@ -247,17 +332,46 @@ export default function AttackSuitePage() {
       if (h.key.trim()) builtHeaders[h.key.trim()] = h.value;
     }
 
+    const body = {
+      target: target.trim(),
+      modules: Array.from(selectedModules),
+      auth_headers: builtHeaders,
+      follow_redirects: followRedirects,
+      timeout,
+      ai_analysis: aiAnalysis,
+      crawler: {
+        enabled: crawlerEnabled,
+        max_depth: crawlerDepth,
+        max_pages: crawlerPages,
+        respect_robots: crawlerRobots,
+      },
+      login: {
+        enabled: loginEnabled,
+        login_url: loginUrl,
+        login_type: loginType,
+        username: loginUsername,
+        password: loginPassword,
+        username_field: loginUsernameField,
+        password_field: loginPasswordField,
+        bearer_token: loginBearerToken,
+        cookie: loginCookie,
+      },
+      account2: {
+        enabled: account2Enabled,
+        bearer_token: account2Bearer,
+        cookie: account2Cookie,
+      },
+    };
+
     try {
-      const res = await fetchWithAuth(`${API_BASE}/attack-suite/scan`, {
+      const token = getAccessToken();
+      const res = await fetch(`${API_BASE}/attack-suite/scan`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          target: target.trim(),
-          modules: Array.from(selectedModules),
-          auth_headers: builtHeaders,
-          follow_redirects: followRedirects,
-          timeout,
-        }),
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(body),
         signal: abortRef.current.signal,
       });
 
@@ -285,15 +399,25 @@ export default function AttackSuitePage() {
 
           const event = eventMatch[1];
           let data: Record<string, unknown>;
-          try {
-            data = JSON.parse(dataMatch[1]);
-          } catch {
-            continue;
-          }
+          try { data = JSON.parse(dataMatch[1]); } catch { continue; }
 
           if (event === "start") {
             setScanId(data.scan_id as string);
             toast.success(`Scan started against ${data.target}`);
+          } else if (event === "crawl_complete") {
+            setCrawlStats({
+              pages: data.pages as number,
+              forms: data.forms as number,
+              endpoints: data.endpoints as number,
+              tech_stack: (data.tech_stack as string[]) ?? [],
+            });
+            setProgressMessages((p) => [...p, {
+              module: "crawl",
+              message: `Crawl complete — ${data.pages} pages, ${data.forms} forms, ${data.endpoints} endpoints`,
+            }]);
+          } else if (event === "ai_plan") {
+            setAiPlan(data.plan as string);
+            setProgressMessages((p) => [...p, { module: "ai", message: "AI strategy plan generated" }]);
           } else if (event === "progress") {
             setProgressMessages((prev) => {
               const next = [...prev, { module: (data.module as string) ?? "", message: data.message as string }];
@@ -304,10 +428,7 @@ export default function AttackSuitePage() {
             const f = data as unknown as AttackFinding;
             setFindings((prev) => [...prev, f]);
             if (f.is_vulnerable) {
-              setCounts((prev) => ({
-                ...prev,
-                [f.severity]: (prev[f.severity] ?? 0) + 1,
-              }));
+              setCounts((prev) => ({ ...prev, [f.severity]: (prev[f.severity] ?? 0) + 1 }));
             }
           } else if (event === "complete") {
             const completeCounts = data.counts as ScanCounts;
@@ -315,7 +436,6 @@ export default function AttackSuitePage() {
             setScanStatus("completed");
             setIsScanning(false);
             toast.success(`Scan complete — ${data.total_findings ?? 0} finding(s)`);
-            // Refresh history
             fetchWithAuth(`${API_BASE}/attack-suite/scans`)
               .then((r) => r.ok ? r.json() : [])
               .then((d) => { if (Array.isArray(d)) setHistory(d); })
@@ -334,7 +454,13 @@ export default function AttackSuitePage() {
       }
       setIsScanning(false);
     }
-  }, [target, selectedModules, authHeaders, followRedirects, timeout]);
+  }, [
+    target, selectedModules, authHeaders, followRedirects, timeout, aiAnalysis,
+    crawlerEnabled, crawlerDepth, crawlerPages, crawlerRobots,
+    loginEnabled, loginUrl, loginType, loginUsername, loginPassword,
+    loginUsernameField, loginPasswordField, loginBearerToken, loginCookie,
+    account2Enabled, account2Bearer, account2Cookie,
+  ]);
 
   const stopScan = () => {
     abortRef.current?.abort();
@@ -353,7 +479,6 @@ export default function AttackSuitePage() {
     a.click();
   };
 
-  // Group findings by module
   const findingsByModule = findings.reduce<Record<string, AttackFinding[]>>((acc, f) => {
     if (!acc[f.module]) acc[f.module] = [];
     acc[f.module].push(f);
@@ -364,7 +489,10 @@ export default function AttackSuitePage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Attack Suite" description="Run web security attack modules against a target URL">
+      <PageHeader
+        title="Attack Suite"
+        description="Adaptive web security scanner — crawler + pattern library from 5700+ bug bounty reports + AI planner"
+      >
         <div className="flex items-center gap-2">
           {findings.length > 0 && (
             <Button variant="outline" size="sm" onClick={exportJSON} className="gap-1.5">
@@ -372,8 +500,7 @@ export default function AttackSuitePage() {
             </Button>
           )}
           <Button
-            variant="outline"
-            size="sm"
+            variant="outline" size="sm"
             onClick={() => setShowHistory(!showHistory)}
             className="gap-1.5"
           >
@@ -383,8 +510,11 @@ export default function AttackSuitePage() {
       </PageHeader>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        {/* Config Panel */}
+
+        {/* ── Config Panel ── */}
         <div className="space-y-4">
+
+          {/* Target + run */}
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-sm font-semibold text-zinc-300 flex items-center gap-2">
@@ -393,7 +523,8 @@ export default function AttackSuitePage() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-5">
-              {/* Target */}
+
+              {/* Target URL */}
               <div className="space-y-1.5">
                 <Label className="text-xs text-zinc-400">Target URL</Label>
                 <Input
@@ -405,29 +536,25 @@ export default function AttackSuitePage() {
                 />
               </div>
 
-              {/* Modules */}
+              {/* Modules grid */}
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <Label className="text-xs text-zinc-400">Modules</Label>
+                  <Label className="text-xs text-zinc-400">Modules ({selectedModules.size}/{MODULES.length})</Label>
                   <div className="flex items-center gap-2">
                     <button
                       className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors"
-                      onClick={selectAll}
+                      onClick={() => setSelectedModules(new Set(MODULES.map((m) => m.id)))}
                       disabled={isScanning}
-                    >
-                      Select All
-                    </button>
+                    >All</button>
                     <span className="text-zinc-700 text-[10px]">/</span>
                     <button
                       className="text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors"
-                      onClick={deselectAll}
+                      onClick={() => setSelectedModules(new Set())}
                       disabled={isScanning}
-                    >
-                      Deselect All
-                    </button>
+                    >None</button>
                   </div>
                 </div>
-                <div className="grid grid-cols-1 gap-1.5">
+                <div className="grid grid-cols-1 gap-1">
                   {MODULES.map((mod) => (
                     <div
                       key={mod.id}
@@ -460,7 +587,9 @@ export default function AttackSuitePage() {
                   className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-200 transition-colors w-full"
                   onClick={() => setShowAuthHeaders(!showAuthHeaders)}
                 >
-                  {showAuthHeaders ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                  {showAuthHeaders
+                    ? <ChevronDown className="h-3 w-3" />
+                    : <ChevronRight className="h-3 w-3" />}
                   Auth Headers
                   {authHeaders.length > 0 && (
                     <Badge variant="secondary" className="text-[10px] py-0 h-4 ml-auto">{authHeaders.length}</Badge>
@@ -508,31 +637,22 @@ export default function AttackSuitePage() {
               {/* Follow Redirects */}
               <div className="flex items-center justify-between">
                 <Label className="text-xs text-zinc-400">Follow Redirects</Label>
-                <Switch
-                  checked={followRedirects}
-                  onCheckedChange={setFollowRedirects}
-                  disabled={isScanning}
-                />
+                <Switch checked={followRedirects} onCheckedChange={setFollowRedirects} disabled={isScanning} />
               </div>
 
               {/* Timeout */}
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <Label className="text-xs text-zinc-400">Timeout</Label>
+                  <Label className="text-xs text-zinc-400">Request Timeout</Label>
                   <span className="text-xs font-mono text-zinc-300">{timeout}s</span>
                 </div>
                 <Slider
-                  min={5}
-                  max={60}
-                  step={5}
-                  value={[timeout]}
-                  onValueChange={([v]) => setTimeout(v)}
-                  disabled={isScanning}
-                  className="w-full"
+                  min={5} max={60} step={5}
+                  value={[timeout]} onValueChange={([v]) => setTimeoutVal(v)}
+                  disabled={isScanning} className="w-full"
                 />
                 <div className="flex justify-between text-[10px] text-zinc-600">
-                  <span>5s</span>
-                  <span>60s</span>
+                  <span>5s</span><span>60s</span>
                 </div>
               </div>
 
@@ -543,8 +663,7 @@ export default function AttackSuitePage() {
                 </Button>
               ) : (
                 <Button
-                  onClick={startScan}
-                  className="w-full gap-2"
+                  onClick={startScan} className="w-full gap-2"
                   disabled={selectedModules.size === 0}
                 >
                   <Play className="h-4 w-4" /> Run Attack Suite
@@ -552,22 +671,257 @@ export default function AttackSuitePage() {
               )}
             </CardContent>
           </Card>
+
+          {/* Advanced config sections */}
+          <div className="space-y-2">
+
+            {/* Crawler */}
+            <SectionToggle
+              icon={<Globe className="h-3.5 w-3.5" />}
+              label="Web Crawler"
+              enabled={crawlerEnabled}
+              onToggle={() => setCrawlerEnabled(!crawlerEnabled)}
+              badge={crawlerEnabled ? "On" : undefined}
+            >
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-[11px] text-zinc-400">Max Depth</Label>
+                    <span className="text-[11px] font-mono text-zinc-300">{crawlerDepth}</span>
+                  </div>
+                  <Slider
+                    min={1} max={8} step={1}
+                    value={[crawlerDepth]} onValueChange={([v]) => setCrawlerDepth(v)}
+                    disabled={isScanning}
+                  />
+                  <div className="flex justify-between text-[10px] text-zinc-600"><span>1</span><span>8</span></div>
+                </div>
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-[11px] text-zinc-400">Max Pages</Label>
+                    <span className="text-[11px] font-mono text-zinc-300">{crawlerPages}</span>
+                  </div>
+                  <Slider
+                    min={10} max={300} step={10}
+                    value={[crawlerPages]} onValueChange={([v]) => setCrawlerPages(v)}
+                    disabled={isScanning}
+                  />
+                  <div className="flex justify-between text-[10px] text-zinc-600"><span>10</span><span>300</span></div>
+                </div>
+                <div className="flex items-center justify-between">
+                  <Label className="text-[11px] text-zinc-400">Respect robots.txt</Label>
+                  <Switch
+                    checked={crawlerRobots} onCheckedChange={setCrawlerRobots}
+                    disabled={isScanning}
+                  />
+                </div>
+              </div>
+            </SectionToggle>
+
+            {/* Login */}
+            <SectionToggle
+              icon={<LogIn className="h-3.5 w-3.5" />}
+              label="Login / Auth"
+              enabled={loginEnabled}
+              onToggle={() => setLoginEnabled(!loginEnabled)}
+              badge={loginEnabled ? "On" : undefined}
+            >
+              <div className="space-y-3">
+                {/* Login type selector */}
+                <div className="space-y-1.5">
+                  <Label className="text-[11px] text-zinc-400">Login Type</Label>
+                  <div className="grid grid-cols-2 gap-1">
+                    {(["form", "bearer", "basic", "cookie"] as const).map((t) => (
+                      <button
+                        key={t}
+                        className={cn(
+                          "rounded border px-2 py-1 text-[11px] capitalize transition-colors",
+                          loginType === t
+                            ? "border-blue-500/50 bg-blue-600/10 text-blue-300"
+                            : "border-zinc-700 text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
+                        )}
+                        onClick={() => setLoginType(t)}
+                        disabled={isScanning}
+                      >
+                        {t}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {loginType === "form" && (
+                  <>
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] text-zinc-400">Login URL</Label>
+                      <Input
+                        placeholder="https://example.com/login"
+                        value={loginUrl}
+                        onChange={(e) => setLoginUrl(e.target.value)}
+                        disabled={isScanning}
+                        className="font-mono text-xs h-7"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <Label className="text-[10px] text-zinc-400">Username field</Label>
+                        <Input
+                          placeholder="username"
+                          value={loginUsernameField}
+                          onChange={(e) => setLoginUsernameField(e.target.value)}
+                          disabled={isScanning}
+                          className="font-mono text-xs h-7"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-[10px] text-zinc-400">Password field</Label>
+                        <Input
+                          placeholder="password"
+                          value={loginPasswordField}
+                          onChange={(e) => setLoginPasswordField(e.target.value)}
+                          disabled={isScanning}
+                          className="font-mono text-xs h-7"
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] text-zinc-400">Username</Label>
+                      <Input
+                        placeholder="admin@example.com"
+                        value={loginUsername}
+                        onChange={(e) => setLoginUsername(e.target.value)}
+                        disabled={isScanning}
+                        className="text-xs h-7"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] text-zinc-400">Password</Label>
+                      <Input
+                        type="password"
+                        placeholder="••••••••"
+                        value={loginPassword}
+                        onChange={(e) => setLoginPassword(e.target.value)}
+                        disabled={isScanning}
+                        className="text-xs h-7"
+                      />
+                    </div>
+                  </>
+                )}
+
+                {loginType === "bearer" && (
+                  <div className="space-y-1.5">
+                    <Label className="text-[11px] text-zinc-400">Bearer Token</Label>
+                    <Input
+                      placeholder="eyJhbGci..."
+                      value={loginBearerToken}
+                      onChange={(e) => setLoginBearerToken(e.target.value)}
+                      disabled={isScanning}
+                      className="font-mono text-xs h-7"
+                    />
+                  </div>
+                )}
+
+                {loginType === "basic" && (
+                  <>
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] text-zinc-400">Username</Label>
+                      <Input
+                        value={loginUsername}
+                        onChange={(e) => setLoginUsername(e.target.value)}
+                        disabled={isScanning}
+                        className="text-xs h-7"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] text-zinc-400">Password</Label>
+                      <Input
+                        type="password"
+                        value={loginPassword}
+                        onChange={(e) => setLoginPassword(e.target.value)}
+                        disabled={isScanning}
+                        className="text-xs h-7"
+                      />
+                    </div>
+                  </>
+                )}
+
+                {loginType === "cookie" && (
+                  <div className="space-y-1.5">
+                    <Label className="text-[11px] text-zinc-400">Cookie String</Label>
+                    <Input
+                      placeholder="session=abc; csrf=xyz"
+                      value={loginCookie}
+                      onChange={(e) => setLoginCookie(e.target.value)}
+                      disabled={isScanning}
+                      className="font-mono text-xs h-7"
+                    />
+                  </div>
+                )}
+              </div>
+            </SectionToggle>
+
+            {/* Account 2 (IDOR) */}
+            <SectionToggle
+              icon={<Users className="h-3.5 w-3.5" />}
+              label="Account 2 (IDOR)"
+              enabled={account2Enabled}
+              onToggle={() => setAccount2Enabled(!account2Enabled)}
+              badge={account2Enabled ? "On" : undefined}
+            >
+              <div className="space-y-3">
+                <p className="text-[10px] text-zinc-500 leading-relaxed">
+                  Second session for cross-account IDOR testing. Account 2 will attempt to access resources discovered under Account 1.
+                </p>
+                <div className="space-y-1.5">
+                  <Label className="text-[11px] text-zinc-400">Bearer Token</Label>
+                  <Input
+                    placeholder="eyJhbGci..."
+                    value={account2Bearer}
+                    onChange={(e) => setAccount2Bearer(e.target.value)}
+                    disabled={isScanning}
+                    className="font-mono text-xs h-7"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-[11px] text-zinc-400">Cookie String (alternative)</Label>
+                  <Input
+                    placeholder="session=xyz"
+                    value={account2Cookie}
+                    onChange={(e) => setAccount2Cookie(e.target.value)}
+                    disabled={isScanning}
+                    className="font-mono text-xs h-7"
+                  />
+                </div>
+              </div>
+            </SectionToggle>
+
+            {/* AI Analysis */}
+            <div className="rounded-lg border border-zinc-800 px-3 py-2.5 flex items-start gap-3">
+              <BrainCircuit className="h-4 w-4 text-purple-400 mt-0.5 shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <p className="text-xs font-medium text-zinc-300">AI Strategy Planner</p>
+                    <p className="text-[10px] text-zinc-500 mt-0.5 leading-relaxed">
+                      Claude fingerprints the target, plans a prioritised attack strategy, and analyses interesting responses.
+                      Requires <span className="font-mono text-zinc-400">ANTHROPIC_API_KEY</span>.
+                    </p>
+                  </div>
+                  <Switch checked={aiAnalysis} onCheckedChange={setAiAnalysis} disabled={isScanning} />
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
-        {/* Results Panel */}
+        {/* ── Results Panel ── */}
         <div className="lg:col-span-2 space-y-4">
-          {/* Severity counts status bar */}
+
+          {/* Status bar */}
           {(scanStatus !== "idle" || findings.length > 0) && (
             <div className="flex items-center gap-2 flex-wrap rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3">
-              {isScanning && (
-                <Loader2 className="h-4 w-4 text-blue-400 animate-spin shrink-0" />
-              )}
-              {!isScanning && scanStatus === "completed" && (
-                <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
-              )}
-              {!isScanning && scanStatus === "failed" && (
-                <AlertTriangle className="h-4 w-4 text-red-400 shrink-0" />
-              )}
+              {isScanning && <Loader2 className="h-4 w-4 text-blue-400 animate-spin shrink-0" />}
+              {!isScanning && scanStatus === "completed" && <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />}
+              {!isScanning && scanStatus === "failed" && <AlertTriangle className="h-4 w-4 text-red-400 shrink-0" />}
               <span className="text-xs text-zinc-400 mr-2">
                 {isScanning ? "Scanning…" : scanStatus === "completed" ? `${totalVulnerable} vulnerable` : "Scan failed"}
               </span>
@@ -581,6 +935,50 @@ export default function AttackSuitePage() {
             </div>
           )}
 
+          {/* Crawl Stats */}
+          {crawlStats && (
+            <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3">
+              <div className="flex items-center gap-2 mb-3">
+                <Network className="h-4 w-4 text-blue-400" />
+                <span className="text-xs font-semibold text-zinc-300">Crawl Results</span>
+              </div>
+              <div className="grid grid-cols-3 gap-3 mb-3">
+                {[
+                  { label: "Pages", value: crawlStats.pages },
+                  { label: "Forms", value: crawlStats.forms },
+                  { label: "Endpoints", value: crawlStats.endpoints },
+                ].map((stat) => (
+                  <div key={stat.label} className="text-center rounded-md border border-zinc-800 bg-zinc-900 py-2">
+                    <p className="text-lg font-bold text-blue-400">{stat.value}</p>
+                    <p className="text-[10px] text-zinc-500">{stat.label}</p>
+                  </div>
+                ))}
+              </div>
+              {crawlStats.tech_stack.length > 0 && (
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <Search className="h-3 w-3 text-zinc-500" />
+                  <span className="text-[10px] text-zinc-500">Tech:</span>
+                  {crawlStats.tech_stack.map((t) => (
+                    <Badge key={t} variant="secondary" className="text-[10px] py-0 h-4">{t}</Badge>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* AI Strategy Plan */}
+          {aiPlan && (
+            <div className="rounded-lg border border-purple-600/30 bg-purple-600/5">
+              <div className="flex items-center gap-2 px-4 py-2.5 border-b border-purple-600/20">
+                <BrainCircuit className="h-4 w-4 text-purple-400" />
+                <span className="text-xs font-semibold text-purple-300">AI Attack Strategy</span>
+              </div>
+              <div className="px-4 py-3 max-h-[220px] overflow-y-auto">
+                <pre className="text-xs text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed">{aiPlan}</pre>
+              </div>
+            </div>
+          )}
+
           {/* Progress log */}
           {progressMessages.length > 0 && (
             <div className="rounded-lg border border-zinc-800">
@@ -588,15 +986,26 @@ export default function AttackSuitePage() {
                 className="w-full flex items-center justify-between px-3 py-2 border-b border-zinc-800 hover:bg-zinc-800/30 transition-colors"
                 onClick={() => setShowProgress(!showProgress)}
               >
-                <span className="text-xs text-zinc-500 font-mono">progress log ({progressMessages.length})</span>
-                {showProgress ? <ChevronDown className="h-3.5 w-3.5 text-zinc-500" /> : <ChevronRight className="h-3.5 w-3.5 text-zinc-500" />}
+                <span className="text-xs text-zinc-500 font-mono">
+                  progress log ({progressMessages.length})
+                </span>
+                {showProgress
+                  ? <ChevronDown className="h-3.5 w-3.5 text-zinc-500" />
+                  : <ChevronRight className="h-3.5 w-3.5 text-zinc-500" />}
               </button>
               {showProgress && (
                 <div className="h-[180px] overflow-y-auto bg-zinc-950 rounded-b-lg p-3 space-y-0.5 font-mono">
                   {progressMessages.map((msg, i) => (
                     <div key={i} className="text-xs leading-5 flex items-start gap-2">
                       {msg.module && (
-                        <span className="text-blue-400 shrink-0">[{msg.module}]</span>
+                        <span className={cn(
+                          "shrink-0",
+                          msg.module === "crawl" ? "text-blue-400" :
+                          msg.module === "ai" ? "text-purple-400" :
+                          "text-emerald-400"
+                        )}>
+                          [{msg.module}]
+                        </span>
                       )}
                       <span className="text-zinc-400">{msg.message}</span>
                     </div>
@@ -639,7 +1048,10 @@ export default function AttackSuitePage() {
             !isScanning && scanStatus === "idle" && (
               <div className="flex flex-col items-center justify-center py-20 text-zinc-600 space-y-3">
                 <Swords className="h-12 w-12" />
-                <p className="text-sm">No findings yet — run a scan to discover vulnerabilities</p>
+                <p className="text-sm">Run a scan to discover vulnerabilities</p>
+                <p className="text-xs text-zinc-700">
+                  17 modules · patterns from 5700+ bug bounty reports · crawler + login support
+                </p>
               </div>
             )
           )}
@@ -647,27 +1059,27 @@ export default function AttackSuitePage() {
           {isScanning && findings.length === 0 && (
             <div className="flex flex-col items-center justify-center py-16 text-zinc-500 space-y-3">
               <Loader2 className="h-8 w-8 animate-spin text-blue-400" />
-              <p className="text-sm">Running attack modules against {target}…</p>
+              <p className="text-sm">
+                {crawlStats ? `Attacking ${crawlStats.endpoints} discovered endpoints…` : `Crawling ${target}…`}
+              </p>
               <p className="text-xs">{progressMessages.length} events received</p>
             </div>
           )}
         </div>
       </div>
 
-      {/* History Panel */}
+      {/* History */}
       {showHistory && (
         <Card>
           <CardHeader className="pb-3">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-sm font-semibold text-zinc-300 flex items-center gap-2">
-                <History className="h-4 w-4 text-zinc-400" />
-                Scan History
-              </CardTitle>
-            </div>
+            <CardTitle className="text-sm font-semibold text-zinc-300 flex items-center gap-2">
+              <History className="h-4 w-4 text-zinc-400" />
+              Scan History
+            </CardTitle>
           </CardHeader>
           <CardContent>
             {history.length === 0 ? (
-              <p className="text-sm text-zinc-600 py-4 text-center">No past scans found</p>
+              <p className="text-sm text-zinc-600 py-4 text-center">No past scans</p>
             ) : (
               <div className="space-y-2">
                 {history.map((entry) => (
@@ -678,21 +1090,17 @@ export default function AttackSuitePage() {
                     <div className={cn(
                       "h-2 w-2 rounded-full shrink-0",
                       entry.status === "completed" ? "bg-emerald-400" :
-                      entry.status === "failed" ? "bg-red-400" :
-                      "bg-zinc-500"
+                      entry.status === "failed" ? "bg-red-400" : "bg-zinc-500"
                     )} />
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-mono text-zinc-200 truncate">{entry.target}</p>
-                      <p className="text-[10px] text-zinc-500">
-                        {new Date(entry.started_at).toLocaleString()}
-                      </p>
+                      <p className="text-[10px] text-zinc-500">{new Date(entry.started_at).toLocaleString()}</p>
                     </div>
                     <div className="text-right shrink-0">
                       <p className="text-xs text-zinc-400">{entry.total_findings} findings</p>
                       <p className={cn("text-[10px] capitalize",
                         entry.status === "completed" ? "text-emerald-400" :
-                        entry.status === "failed" ? "text-red-400" :
-                        "text-zinc-500"
+                        entry.status === "failed" ? "text-red-400" : "text-zinc-500"
                       )}>{entry.status}</p>
                     </div>
                   </div>

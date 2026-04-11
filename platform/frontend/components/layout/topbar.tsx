@@ -47,8 +47,8 @@ function NotificationPanel({ onOpen }: { onOpen: () => void }) {
 
   const fetchScans = useCallback(async () => {
     try {
-      const res = await scansApi.list({ per_page: 15, page: 1 });
-      const items: Scan[] = res.items ?? res ?? [];
+      const res = await scansApi.list({ per_page: 15, page: 1 }) as { items?: Scan[] } | Scan[];
+      const items: Scan[] = (res as { items?: Scan[] }).items ?? (res as Scan[]) ?? [];
       setScans(items.slice(0, 12));
     } catch {
       // silently fail
@@ -158,8 +158,8 @@ export function Topbar({ className }: TopbarProps) {
     const computeUnread = async () => {
       try {
         const lastSeen = parseInt(localStorage.getItem(NOTIF_LS_KEY) ?? "0", 10);
-        const res = await scansApi.list({ per_page: 15, page: 1 });
-        const items: Scan[] = res.items ?? res ?? [];
+        const res = await scansApi.list({ per_page: 15, page: 1 }) as { items?: Scan[] } | Scan[];
+        const items: Scan[] = (res as { items?: Scan[] }).items ?? (res as Scan[]) ?? [];
         const count = items.filter((s) => {
           const t = new Date(s.updated_at).getTime();
           return t > lastSeen && (s.status === "completed" || s.status === "failed");
