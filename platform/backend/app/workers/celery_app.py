@@ -44,3 +44,10 @@ celery_app.conf.update(
         },
     },
 )
+
+# Optionally switch to redbeat for HA beat scheduler
+# Set CELERY_BEAT_USE_REDBEAT=true in env to enable
+import os
+if os.getenv("CELERY_BEAT_USE_REDBEAT", "false").lower() == "true":
+    celery_app.conf.beat_scheduler = "redbeat.schedulers:RedBeatScheduler"
+    celery_app.conf.redbeat_redis_url = settings.REDIS_URL

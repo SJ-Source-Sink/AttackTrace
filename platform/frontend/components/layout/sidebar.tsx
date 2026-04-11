@@ -18,6 +18,8 @@ import {
   Network,
   Crosshair,
   Wind,
+  Swords,
+  BrainCircuit,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -73,6 +75,21 @@ const navItems: NavItem[] = [
     href: "/ffuf",
     icon: Wind,
     badge: "Tool",
+  },
+];
+
+const attackSuiteItems: NavItem[] = [
+  {
+    label: "Attack Suite",
+    href: "/attack-suite",
+    icon: Swords,
+    badge: "New",
+  },
+  {
+    label: "AI Attack Suite",
+    href: "/ai-attack-suite",
+    icon: BrainCircuit,
+    badge: "AI",
   },
 ];
 
@@ -169,6 +186,19 @@ export function Sidebar({ className }: SidebarProps) {
           </div>
           <div className="space-y-0.5">
             {navItems.map((item) => (
+              <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
+            ))}
+          </div>
+        </div>
+
+        <div className="mb-4">
+          <div className="px-3 pb-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+              Attack Suites
+            </p>
+          </div>
+          <div className="space-y-0.5">
+            {attackSuiteItems.map((item) => (
               <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
             ))}
           </div>

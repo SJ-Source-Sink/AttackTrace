@@ -15,6 +15,8 @@ from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.nmap import router as nmap_router
 from app.api.v1.nuclei import router as nuclei_router
 from app.api.v1.ffuf import router as ffuf_router
+from app.api.v1.attack_suite import router as attack_suite_router
+from app.api.v1.ai_attack_suite import router as ai_attack_suite_router
 
 api_router = APIRouter()
 
@@ -30,3 +32,5 @@ api_router.include_router(dashboard_router)
 api_router.include_router(nmap_router)
 api_router.include_router(nuclei_router)
 api_router.include_router(ffuf_router)
+api_router.include_router(attack_suite_router)
+api_router.include_router(ai_attack_suite_router)

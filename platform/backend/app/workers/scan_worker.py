@@ -8,6 +8,8 @@ to Redis pub/sub for SSE streaming, and persists results to the database.
 import asyncio
 import json
 import logging
+import os
+import signal
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +24,25 @@ from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# Track running subprocess PIDs so they can be cleaned up on SIGTERM
+_running_pids: dict[str, int] = {}  # scan_id -> subprocess PID
+
+
+def _handle_sigterm(signum, frame):
+    """Gracefully kill any running scan subprocesses on worker shutdown."""
+    for scan_id, pid in list(_running_pids.items()):
+        try:
+            os.kill(pid, signal.SIGTERM)
+            logger.info(f"Sent SIGTERM to scan subprocess PID {pid} (scan {scan_id})")
+        except ProcessLookupError:
+            pass
+    # Re-raise to let Celery handle shutdown
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+signal.signal(signal.SIGTERM, _handle_sigterm)
 
 # Ensure AttackTrace root is on sys.path (repo root, 5 levels up from this file)
 _ATTACKTRACE_ROOT = Path(__file__).parents[5]
