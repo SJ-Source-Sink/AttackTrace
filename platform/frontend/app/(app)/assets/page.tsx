@@ -122,6 +122,7 @@ export default function AssetsPage() {
               onBulkTag={(ids) => console.log("bulk tag", ids)}
               onBulkAssign={(ids) => console.log("bulk assign", ids)}
               onExport={() => console.log("export")}
+              onCheckTakeover={(values) => router.push(`/takeover?hosts=${values.join(",")}`)}
             />
           )}
 

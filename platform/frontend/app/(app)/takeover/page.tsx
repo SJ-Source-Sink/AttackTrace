@@ -4,7 +4,8 @@ import React, { useState, useRef, useCallback, useEffect } from "react";
 import {
   GitFork, Play, Square, Download, ChevronDown, ChevronRight,
   CheckCircle2, XCircle, AlertTriangle, Info, Loader2,
-  History, Plus, X, Globe, Shield, Copy, Database,
+  History, Plus, X, Globe, Shield, Copy, Database, PackageSearch,
+  Search, Check,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -16,6 +17,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { cn } from "@/lib/utils";
 import { getAccessToken } from "@/lib/auth";
 import { toast } from "sonner";
+import { useSearchParams } from "next/navigation";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
 
@@ -218,10 +220,222 @@ function ResultRow({ result }: { result: TakeoverResult }) {
   );
 }
 
+// ─── Asset Import Panel ───────────────────────────────────────────────────────
+
+interface AssetItem { id: string; value: string; asset_type: string; risk_score: number }
+
+function AssetImportPanel({ onImport }: { onImport: (hosts: string[]) => void }) {
+  const [open, setOpen] = useState(false);
+  const [assets, setAssets] = useState<AssetItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [typeFilter, setTypeFilter] = useState<"all" | "subdomain" | "domain">("all");
+
+  const loadAssets = useCallback(async () => {
+    if (assets.length > 0) return; // already loaded
+    setLoading(true);
+    try {
+      const token = getAccessToken();
+      // Fetch subdomains + domains only (takeover-relevant)
+      const params = new URLSearchParams({ per_page: "500", page: "1" });
+      const res = await fetch(`${API_BASE}/assets?${params}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) throw new Error("Failed to load assets");
+      const data = await res.json();
+      const items: AssetItem[] = (data.items ?? []).filter(
+        (a: AssetItem) => a.asset_type === "subdomain" || a.asset_type === "domain"
+      );
+      setAssets(items);
+    } catch {
+      toast.error("Could not load assets");
+    } finally {
+      setLoading(false);
+    }
+  }, [assets.length]);
+
+  const toggleOpen = () => {
+    if (!open) loadAssets();
+    setOpen((v) => !v);
+    setSelected(new Set());
+  };
+
+  const filtered = assets.filter((a) => {
+    if (typeFilter !== "all" && a.asset_type !== typeFilter) return false;
+    if (search && !a.value.toLowerCase().includes(search.toLowerCase())) return false;
+    return true;
+  });
+
+  const toggleAll = () => {
+    if (selected.size === filtered.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(filtered.map((a) => a.value)));
+    }
+  };
+
+  const handleImport = () => {
+    if (selected.size === 0) { toast.error("Select at least one asset"); return; }
+    onImport(Array.from(selected));
+    setOpen(false);
+    setSelected(new Set());
+    toast.success(`Imported ${selected.size} asset${selected.size > 1 ? "s" : ""}`);
+  };
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={toggleOpen}
+        className="flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 transition-colors"
+      >
+        <PackageSearch className="h-3.5 w-3.5" />
+        Import from Assets
+        {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+      </button>
+
+      {open && (
+        <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-950 overflow-hidden">
+          {/* Search + type filter */}
+          <div className="p-2 border-b border-zinc-800 space-y-2">
+            <div className="relative">
+              <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-zinc-500" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Filter assets..."
+                className="w-full pl-7 pr-3 py-1.5 text-xs bg-zinc-900 border border-zinc-800 rounded text-zinc-300 placeholder:text-zinc-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            </div>
+            <div className="flex items-center gap-1">
+              {(["all", "subdomain", "domain"] as const).map((t) => (
+                <button
+                  key={t}
+                  onClick={() => setTypeFilter(t)}
+                  className={cn(
+                    "px-2 py-0.5 rounded text-[10px] capitalize border transition-colors",
+                    typeFilter === t
+                      ? "bg-blue-600/20 text-blue-400 border-blue-600/40"
+                      : "bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300"
+                  )}
+                >
+                  {t}
+                </button>
+              ))}
+              <span className="ml-auto text-[10px] text-zinc-600">{filtered.length} assets</span>
+            </div>
+          </div>
+
+          {/* Asset list */}
+          <div className="max-h-[220px] overflow-y-auto">
+            {loading ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 className="h-4 w-4 text-zinc-500 animate-spin" />
+              </div>
+            ) : filtered.length === 0 ? (
+              <p className="py-6 text-center text-xs text-zinc-600">No matching assets found</p>
+            ) : (
+              <>
+                {/* Select all row */}
+                <button
+                  type="button"
+                  onClick={toggleAll}
+                  className="w-full flex items-center gap-2 px-3 py-2 hover:bg-zinc-800/50 transition-colors border-b border-zinc-800/50 text-left"
+                >
+                  <div className={cn(
+                    "h-3.5 w-3.5 rounded border flex items-center justify-center shrink-0",
+                    selected.size === filtered.length && filtered.length > 0
+                      ? "bg-blue-600 border-blue-600"
+                      : "border-zinc-600"
+                  )}>
+                    {selected.size === filtered.length && filtered.length > 0 && (
+                      <Check className="h-2.5 w-2.5 text-white" />
+                    )}
+                  </div>
+                  <span className="text-[11px] text-zinc-400 font-medium">
+                    {selected.size === filtered.length && filtered.length > 0 ? "Deselect all" : `Select all (${filtered.length})`}
+                  </span>
+                </button>
+
+                {filtered.map((asset) => (
+                  <button
+                    key={asset.id}
+                    type="button"
+                    onClick={() => setSelected((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(asset.value)) next.delete(asset.value);
+                      else next.add(asset.value);
+                      return next;
+                    })}
+                    className="w-full flex items-center gap-2 px-3 py-2 hover:bg-zinc-800/50 transition-colors border-b border-zinc-800/30 last:border-0 text-left"
+                  >
+                    <div className={cn(
+                      "h-3.5 w-3.5 rounded border flex items-center justify-center shrink-0",
+                      selected.has(asset.value) ? "bg-blue-600 border-blue-600" : "border-zinc-700"
+                    )}>
+                      {selected.has(asset.value) && <Check className="h-2.5 w-2.5 text-white" />}
+                    </div>
+                    <span className="font-mono text-[11px] text-zinc-300 flex-1 truncate">{asset.value}</span>
+                    <Badge variant="secondary" className="text-[9px] py-0 h-3.5 shrink-0">
+                      {asset.asset_type}
+                    </Badge>
+                    {asset.risk_score > 0 && (
+                      <span className={cn(
+                        "text-[9px] shrink-0",
+                        asset.risk_score >= 70 ? "text-red-400" : asset.risk_score >= 40 ? "text-yellow-400" : "text-zinc-600"
+                      )}>
+                        {asset.risk_score}
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </>
+            )}
+          </div>
+
+          {/* Import action */}
+          <div className="p-2 border-t border-zinc-800 flex items-center justify-between">
+            <span className="text-[10px] text-zinc-500">
+              {selected.size > 0 ? `${selected.size} selected` : "Select assets above"}
+            </span>
+            <div className="flex gap-1.5">
+              <button
+                type="button"
+                onClick={() => { setOpen(false); setSelected(new Set()); }}
+                className="px-2 py-1 text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleImport}
+                disabled={selected.size === 0}
+                className="px-3 py-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-[10px] rounded transition-colors"
+              >
+                Add {selected.size > 0 ? selected.size : ""} to Scan
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function TakeoverPage() {
-  const [targetsText, setTargetsText] = useState("");
+  const searchParams = useSearchParams();
+  const [targetsText, setTargetsText] = useState(() => {
+    // Pre-populate from URL ?hosts= param (e.g. navigating from Assets page)
+    if (typeof window !== "undefined") {
+      const hosts = new URLSearchParams(window.location.search).get("hosts");
+      if (hosts) return hosts.split(",").join("\n");
+    }
+    return "";
+  });
   const [checkCname, setCheckCname] = useState(true);
   const [checkNs, setCheckNs] = useState(true);
   const [checkMx, setCheckMx] = useState(false);
@@ -235,6 +449,22 @@ export default function TakeoverPage() {
   const [services, setServices] = useState<{ service: string; count: number }[]>([]);
 
   const abortRef = useRef<AbortController | null>(null);
+
+  // Handle hosts from URL params (e.g. from Assets page "Check Takeover" action)
+  useEffect(() => {
+    const hosts = searchParams.get("hosts");
+    if (hosts && !targetsText) {
+      setTargetsText(hosts.split(",").join("\n"));
+    }
+  }, [searchParams]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleAssetImport = useCallback((hosts: string[]) => {
+    setTargetsText((prev) => {
+      const existing = prev.split(/[\n,]/).map((t) => t.trim()).filter(Boolean);
+      const newHosts = hosts.filter((h) => !existing.includes(h));
+      return [...existing, ...newHosts].join("\n");
+    });
+  }, []);
 
   // Load known services from fingerprint DB
   useEffect(() => {
@@ -468,12 +698,16 @@ export default function TakeoverPage() {
                   value={targetsText}
                   onChange={(e) => setTargetsText(e.target.value)}
                   disabled={isScanning}
-                  rows={10}
+                  rows={8}
                   className="font-mono text-xs resize-none"
                 />
                 <p className="text-[10px] text-zinc-600">
                   One per line, or comma-separated. Up to 500 targets.
                 </p>
+                {/* Import from asset inventory */}
+                {!isScanning && (
+                  <AssetImportPanel onImport={handleAssetImport} />
+                )}
               </div>
 
               {/* Detection options */}

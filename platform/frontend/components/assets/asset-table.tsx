@@ -28,6 +28,7 @@ import {
   CheckSquare,
   Camera,
   X,
+  GitFork,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -112,6 +113,7 @@ interface AssetTableProps {
   onBulkTag?: (ids: string[]) => void;
   onBulkAssign?: (ids: string[]) => void;
   onExport?: () => void;
+  onCheckTakeover?: (values: string[]) => void;
 }
 
 export function AssetTable({
@@ -120,6 +122,7 @@ export function AssetTable({
   onBulkTag,
   onBulkAssign,
   onExport,
+  onCheckTakeover,
 }: AssetTableProps) {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [rowSelection, setRowSelection] = useState<Record<string, boolean>>({});
@@ -274,6 +277,13 @@ export function AssetTable({
   });
 
   const selectedIds = Object.keys(rowSelection).filter((k) => rowSelection[k]);
+  // Map row indices to asset values for takeover check
+  const selectedAssets = selectedIds
+    .map((k) => {
+      const idx = parseInt(k, 10);
+      return isNaN(idx) ? null : assets[idx];
+    })
+    .filter((a): a is Asset => a != null && (a.asset_type === "subdomain" || a.asset_type === "domain"));
 
   return (
     <div className="space-y-3">
@@ -303,6 +313,17 @@ export function AssetTable({
               <UserCircle className="h-3 w-3" />
               Assign Owner
             </Button>
+            {selectedAssets.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs gap-1 border-purple-500/40 text-purple-400 hover:bg-purple-500/10 hover:text-purple-300"
+                onClick={() => onCheckTakeover?.(selectedAssets.map((a) => a.value))}
+              >
+                <GitFork className="h-3 w-3" />
+                Check Takeover ({selectedAssets.length})
+              </Button>
+            )}
             <Button
               variant="outline"
               size="sm"
