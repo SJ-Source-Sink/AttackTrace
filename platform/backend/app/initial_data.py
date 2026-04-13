@@ -95,16 +95,20 @@ async def seed() -> None:
         db.add(member)
 
         # ── open invite code so others can register ──────────────────────────
-        invite = InviteCode(
-            org_id=org.id,
-            created_by=user.id,
-            code="ATTACKTRACE",
-            role=MemberRole.ANALYST.value,
-            email=None,          # open — anyone can use it
-            expires_at=None,     # never expires
-            is_revoked=False,
+        existing_invite = await db.execute(
+            select(InviteCode).where(InviteCode.code == "ATTACKTRACE")
         )
-        db.add(invite)
+        if not existing_invite.scalar_one_or_none():
+            invite = InviteCode(
+                org_id=org.id,
+                created_by=user.id,
+                code="ATTACKTRACE",
+                role=MemberRole.ANALYST.value,
+                email=None,          # open — anyone can use it
+                expires_at=None,     # never expires
+                is_revoked=False,
+            )
+            db.add(invite)
 
         await db.commit()
 
