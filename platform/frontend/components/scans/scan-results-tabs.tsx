@@ -14,6 +14,8 @@ import { aiApi, reportsApi } from "@/lib/api";
 import { toast } from "sonner";
 
 import { severityBgColor, formatDate } from "@/lib/utils";
+import { KevBadge } from "@/components/findings/kev-badge";
+import { ConfidenceBadge } from "@/components/findings/confidence-badge";
 import type { Scan, AISummarizeResponse, FindingSeverity, Asset, Finding } from "@/types";
 
 interface ScanResultsTabsProps {
@@ -217,13 +219,93 @@ function AssetsTab({ scanId }: { scanId: string }) {
 
 function FindingsTab({ scanId }: { scanId: string }) {
   const [page, setPage] = useState(1);
+  const [viewMode, setViewMode] = useState<'active' | 'suppressed'>('active');
+  const [kevOnly, setKevOnly] = useState(false);
+  const [confidenceFilter, setConfidenceFilter] = useState("");
   const PER_PAGE = 20;
-  const { data, isLoading } = useFindings({ scan_id: scanId, page, per_page: PER_PAGE });
+
+  const queryFilters = viewMode === 'active'
+    ? {
+        scan_id: scanId,
+        suppressed: false,
+        kev_only: kevOnly || undefined,
+        confidence: confidenceFilter || undefined,
+        page,
+        per_page: PER_PAGE,
+      }
+    : { scan_id: scanId, suppressed: true, page, per_page: PER_PAGE };
+
+  const { data, isLoading } = useFindings(queryFilters);
+  const { data: suppressedData } = useFindings({ scan_id: scanId, suppressed: true, per_page: 1, page: 1 });
+  const suppressedCount = suppressedData?.total ?? 0;
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
 
+  const handleViewModeChange = (mode: 'active' | 'suppressed') => {
+    setViewMode(mode);
+    setPage(1);
+  };
+
   return (
     <div className="space-y-3">
+      {/* Active / Suppressed tab bar */}
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div className="flex gap-1 rounded-lg bg-zinc-800/50 p-1 w-fit">
+          <button
+            onClick={() => handleViewModeChange('active')}
+            className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+              viewMode === 'active'
+                ? 'bg-zinc-700 text-white'
+                : 'text-zinc-400 hover:text-white'
+            }`}
+          >
+            Active
+          </button>
+          <button
+            onClick={() => handleViewModeChange('suppressed')}
+            className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+              viewMode === 'suppressed'
+                ? 'bg-zinc-700 text-white'
+                : 'text-zinc-400 hover:text-white'
+            }`}
+          >
+            Suppressed
+            {suppressedCount > 0 && (
+              <span className="ml-1 rounded-full bg-zinc-600 px-1.5 py-0.5 text-[10px]">
+                {suppressedCount}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {/* Filters — only in active mode */}
+        {viewMode === 'active' && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={() => { setKevOnly(!kevOnly); setPage(1); }}
+              className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                kevOnly
+                  ? 'bg-red-900/50 border-red-500/50 text-red-300'
+                  : 'border-zinc-600 text-zinc-400 hover:border-red-500/50 hover:text-red-300'
+              }`}
+            >
+              <span className={`h-2 w-2 rounded-full ${kevOnly ? 'bg-red-400 animate-pulse' : 'bg-zinc-600'}`} />
+              KEV Only
+            </button>
+            <select
+              value={confidenceFilter}
+              onChange={(e) => { setConfidenceFilter(e.target.value); setPage(1); }}
+              className="rounded-lg border border-zinc-600 bg-zinc-800 px-3 py-1 text-xs text-zinc-300"
+            >
+              <option value="">All Confidence</option>
+              <option value="certain">Certain</option>
+              <option value="firm">Firm</option>
+              <option value="tentative">Tentative</option>
+            </select>
+          </div>
+        )}
+      </div>
+
       <div className="rounded-lg border border-zinc-800 overflow-hidden">
         <table className="w-full text-sm">
           <thead>
@@ -249,14 +331,25 @@ function FindingsTab({ scanId }: { scanId: string }) {
               : data?.items.map((finding) => (
                   <tr key={finding.id} className="hover:bg-zinc-800/40 transition-colors">
                     <td className="px-4 py-3">
-                      <Badge
-                        className={`text-[10px] capitalize border ${severityBgColor(finding.severity as FindingSeverity)}`}
-                      >
-                        {finding.severity}
-                      </Badge>
+                      <div className="flex flex-col gap-1">
+                        <Badge
+                          className={`text-[10px] capitalize border ${severityBgColor(finding.severity as FindingSeverity)}`}
+                        >
+                          {finding.severity}
+                        </Badge>
+                        <ConfidenceBadge confidence={finding.confidence} />
+                      </div>
                     </td>
-                    <td className="px-4 py-3 text-sm text-zinc-300 max-w-xs truncate">
-                      {finding.title}
+                    <td className="px-4 py-3 max-w-xs">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-sm text-zinc-300 line-clamp-2">{finding.title}</span>
+                        <KevBadge kev_status={finding.kev_status} epss_score={finding.epss_score} />
+                        {viewMode === 'suppressed' && finding.suppressed_reason && (
+                          <span className="text-[10px] text-zinc-500 italic">
+                            Reason: {finding.suppressed_reason}
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex flex-col gap-0.5">
@@ -280,7 +373,12 @@ function FindingsTab({ scanId }: { scanId: string }) {
                           }`}>
                             CVSS {finding.cvss_score.toFixed(1)}
                           </span>
-                        ) : <span className="text-xs text-zinc-600">—</span>}
+                        ) : null}
+                        {finding.epss_score != null ? (
+                          <span className="text-[10px] text-orange-300">
+                            EPSS {(finding.epss_score * 100).toFixed(1)}%
+                          </span>
+                        ) : (!finding.cvss_score && !finding.cve_id ? <span className="text-xs text-zinc-600">—</span> : null)}
                       </div>
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-zinc-500 max-w-xs truncate">

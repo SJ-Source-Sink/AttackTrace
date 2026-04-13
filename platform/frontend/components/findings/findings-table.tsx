@@ -19,6 +19,8 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/shared/loading-skeleton";
 import { StatusWorkflow } from "@/components/findings/status-workflow";
 import { SeverityBadge } from "@/components/findings/severity-badge";
+import { KevBadge } from "@/components/findings/kev-badge";
+import { ConfidenceBadge } from "@/components/findings/confidence-badge";
 import { formatRelativeTime, capitalize } from "@/lib/utils";
 import type { Finding, FindingSeverity } from "@/types";
 
@@ -26,6 +28,7 @@ interface FindingsTableProps {
   findings: Finding[];
   isLoading?: boolean;
   onRowClick?: (finding: Finding) => void;
+  showSuppressedReason?: boolean;
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -36,7 +39,7 @@ const STATUS_COLORS: Record<string, string> = {
   false_positive: "border-zinc-500/30 bg-zinc-500/10 text-zinc-400",
 };
 
-export function FindingsTable({ findings, isLoading, onRowClick }: FindingsTableProps) {
+export function FindingsTable({ findings, isLoading, onRowClick, showSuppressedReason }: FindingsTableProps) {
   const [sorting, setSorting] = useState<SortingState>([
     { id: "severity", desc: true },
   ]);
@@ -53,8 +56,11 @@ export function FindingsTable({ findings, isLoading, onRowClick }: FindingsTable
     {
       accessorKey: "severity",
       header: "Severity",
-      cell: ({ getValue }) => (
-        <SeverityBadge severity={getValue<FindingSeverity>()} />
+      cell: ({ row }) => (
+        <div className="flex flex-col gap-1">
+          <SeverityBadge severity={row.original.severity} />
+          <ConfidenceBadge confidence={row.original.confidence} />
+        </div>
       ),
       sortingFn: (a, b) => {
         const aVal = SEVERITY_ORDER[a.original.severity] ?? 0;
@@ -81,6 +87,15 @@ export function FindingsTable({ findings, isLoading, onRowClick }: FindingsTable
               {row.original.cve_id}
               <ExternalLink className="h-2.5 w-2.5" />
             </a>
+          )}
+          <KevBadge
+            kev_status={row.original.kev_status}
+            epss_score={row.original.epss_score}
+          />
+          {showSuppressedReason && row.original.suppressed_reason && (
+            <span className="text-[10px] text-zinc-500 italic">
+              Reason: {row.original.suppressed_reason}
+            </span>
           )}
         </div>
       ),

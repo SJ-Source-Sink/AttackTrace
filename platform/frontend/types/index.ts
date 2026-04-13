@@ -305,6 +305,14 @@ export interface Finding {
   age_days: number;
   assigned_to?: string;
   tags: string[];
+  // KEV / EPSS / confidence enrichment fields
+  confidence?: 'certain' | 'firm' | 'tentative' | null;
+  kev_status?: boolean;
+  epss_score?: number | null;
+  priority_score?: number | null;
+  suppressed?: boolean;
+  suppressed_reason?: string | null;
+  false_positive?: boolean;
 }
 
 export interface FindingListResponse {
@@ -325,6 +333,10 @@ export interface FindingFilters {
   age_min?: number;
   age_max?: number;
   assigned_to?: string;
+  // KEV / confidence / suppressed filters
+  kev_only?: boolean;
+  confidence?: string;
+  suppressed?: boolean;
 }
 
 export interface UpdateFindingRequest {

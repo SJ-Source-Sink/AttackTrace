@@ -30,6 +30,9 @@ function filtersToParams(
   if (filters.age_min !== undefined) params.age_min = filters.age_min;
   if (filters.age_max !== undefined) params.age_max = filters.age_max;
   if (filters.assigned_to) params.assigned_to = filters.assigned_to;
+  if (filters.kev_only !== undefined) params.kev_only = String(filters.kev_only);
+  if (filters.confidence) params.confidence = filters.confidence;
+  if (filters.suppressed !== undefined) params.suppressed = String(filters.suppressed);
 
   return params;
 }
