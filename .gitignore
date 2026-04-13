@@ -58,8 +58,9 @@ Thumbs.db
 *.pem
 *.key
 
-# Claude
-.claude/
+# Claude (ignore settings/worktrees but track memory)
+.claude/settings.local.json
+.claude/worktrees/
 
 # Node / Frontend build artifacts
 node_modules/
