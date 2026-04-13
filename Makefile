@@ -20,7 +20,7 @@ WORKER_CONTAINER  ?= worker
 
 # Phony targets never correspond to real files
 .PHONY: up down restart build logs ps \
-        setup migrate seed backend-shell worker-logs flower-open \
+        setup update migrate seed backend-shell worker-logs flower-open \
         test-backend lint format \
         install-tools \
         k8s-apply k8s-delete k8s-status \
@@ -34,6 +34,10 @@ WORKER_CONTAINER  ?= worker
 ## setup: Full first-time setup — generates .env, builds images, starts services, migrates, seeds
 setup:
 	@bash setup.sh
+
+## update: Pull latest changes from GitHub and hot-update the running platform
+update:
+	@bash update.sh
 
 ## install-tools: Install all required external tools (ffuf, nuclei, gowitness, SecLists, Playwright)
 install-tools:
