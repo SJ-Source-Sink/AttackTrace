@@ -11,7 +11,7 @@ export const metadata: Metadata = {
     template: "%s | AttackTrace",
   },
   description:
-    "Enterprise Attack Surface & Management Platform — discover, monitor, and remediate your external attack surface.",
+    "Attack Surface Management — discover, monitor, and remediate your external attack surface.",
   keywords: ["attack surface management", "security", "recon", "vulnerability management"],
 };
 

@@ -84,7 +84,7 @@ export default function RegisterPage() {
         <div>
           <h2 className="text-3xl font-bold text-white leading-tight">
             You&apos;re invited to<br />
-            <span className="text-blue-400">AttackTrace Enterprise</span>
+            <span className="text-blue-400">AttackTrace</span>
           </h2>
           <p className="text-zinc-400 mt-3 text-sm leading-relaxed max-w-sm">
             Complete your account setup to start monitoring your organization&apos;s external attack surface.
@@ -98,7 +98,7 @@ export default function RegisterPage() {
             ))}
           </div>
         </div>
-        <p className="text-xs text-zinc-600">Enterprise AttackTrace Platform</p>
+        <p className="text-xs text-zinc-600">AttackTrace</p>
       </div>
 
       {/* Right panel */}

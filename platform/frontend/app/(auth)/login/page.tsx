@@ -14,8 +14,8 @@ import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 
 const loginSchema = z.object({
-  email: z.string().email("Please enter a valid email address"),
-  password: z.string().min(6, "Password must be at least 6 characters"),
+  email: z.string().min(1, "Please enter your email or username"),
+  password: z.string().min(1, "Please enter your password"),
 });
 
 type LoginFormData = z.infer<typeof loginSchema>;
@@ -101,7 +101,7 @@ export default function LoginPage() {
 
         <div className="relative z-10 mt-auto pt-8 border-t border-zinc-800">
           <p className="text-xs text-zinc-600">
-            Enterprise AttackTrace Platform
+            AttackTrace
           </p>
         </div>
       </div>
@@ -132,12 +132,12 @@ export default function LoginPage() {
 
           <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
             <div className="space-y-1.5">
-              <Label htmlFor="email">Email address</Label>
+              <Label htmlFor="email">Email or username</Label>
               <Input
                 id="email"
-                type="email"
-                placeholder="you@company.com"
-                autoComplete="email"
+                type="text"
+                placeholder="admin or you@company.com"
+                autoComplete="username"
                 {...register("email")}
                 className={cn(errors.email && "border-red-500 focus-visible:ring-red-500")}
               />

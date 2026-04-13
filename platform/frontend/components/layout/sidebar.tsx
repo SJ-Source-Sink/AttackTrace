@@ -228,7 +228,7 @@ export function Sidebar({ className }: SidebarProps) {
       {/* Footer */}
       <div className="border-t border-zinc-800 p-3">
         <div className="rounded-md bg-zinc-900 p-3">
-          <p className="text-xs font-medium text-zinc-300">AttackTrace Enterprise</p>
+          <p className="text-xs font-medium text-zinc-300">AttackTrace</p>
           <p className="text-xs text-zinc-500 mt-0.5">Attack Surface Management</p>
           <div className="mt-2 flex items-center gap-1.5">
             <div className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
