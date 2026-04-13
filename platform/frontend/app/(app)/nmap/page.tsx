@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useState, useRef, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import React, { useState, useRef, useCallback, useEffect } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Network, Play, Square, Download, RotateCcw, ChevronDown, ChevronUp,
   Terminal, Table2, Clock, Wifi, WifiOff, AlertCircle, CheckCircle2,
@@ -89,7 +89,13 @@ const PORT_SUGGESTIONS: PortSuggestion[] = [
 
 export default function NmapPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [target, setTarget] = useState("");
+
+  useEffect(() => {
+    const t = searchParams.get("target");
+    if (t) setTarget(decodeURIComponent(t));
+  }, [searchParams]);
   const [scanType, setScanType] = useState("quick");
   const [ports, setPorts] = useState("");
   const [timing, setTiming] = useState("T4");

@@ -465,10 +465,11 @@ export default function TakeoverPage() {
     fetch(`${API_BASE}/takeover/fingerprints`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     })
-      .then((r) => r.ok ? r.json() : [])
-      .then((data: { service: string }[]) => {
+      .then((r) => r.ok ? r.json() : { fingerprints: [] })
+      .then((data: { fingerprints: { service: string }[] }) => {
+        const fps = Array.isArray(data) ? data : (data?.fingerprints ?? []);
         const counts = new Map<string, number>();
-        data.forEach((d) => counts.set(d.service, (counts.get(d.service) || 0) + 1));
+        fps.forEach((d: { service: string }) => counts.set(d.service, (counts.get(d.service) || 0) + 1));
         setServices(Array.from(counts.entries()).map(([service, count]) => ({ service, count })));
       })
       .catch(() => {});

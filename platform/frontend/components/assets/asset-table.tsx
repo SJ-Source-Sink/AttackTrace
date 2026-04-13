@@ -280,13 +280,13 @@ export function AssetTable({
         const isWebapp = asset.asset_type === "webapp";
         const isDomainLike = asset.asset_type === "subdomain" || asset.asset_type === "domain";
         return (
+          <div onClick={(e) => e.stopPropagation()}>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
                 variant="ghost"
                 size="sm"
                 className="h-7 w-7 p-0 text-zinc-500 hover:text-zinc-300"
-                onClick={(e) => e.stopPropagation()}
               >
                 <MoreHorizontal className="h-4 w-4" />
               </Button>
@@ -311,13 +311,14 @@ export function AssetTable({
               )}
               {isWebapp && (
                 <DropdownMenuItem
-                  onClick={(e) => { e.stopPropagation(); router.push(`/ffuf?target=${encodeURIComponent(`${asset.value}/FUZZ`)}`); }}
+                  onClick={(e) => { e.stopPropagation(); router.push(`/ffuf?target=${encodeURIComponent(asset.value + "/FUZZ")}`); }}
                 >
                   Fuzz Paths
                 </DropdownMenuItem>
               )}
             </DropdownMenuContent>
           </DropdownMenu>
+          </div>
         );
       },
     },
@@ -404,7 +405,7 @@ export function AssetTable({
                   {headerGroup.headers.map((header) => (
                     <th
                       key={header.id}
-                      className="px-4 py-3 text-left text-xs font-semibold text-zinc-400 uppercase tracking-wider whitespace-nowrap"
+                      className={`px-4 py-3 text-left text-xs font-semibold text-zinc-400 uppercase tracking-wider whitespace-nowrap${header.id === "actions" ? " sticky right-0 bg-zinc-900 z-10" : ""}`}
                       style={{ width: header.getSize() }}
                     >
                       {header.isPlaceholder ? null : (
@@ -452,7 +453,7 @@ export function AssetTable({
                       }`}
                     >
                       {row.getVisibleCells().map((cell) => (
-                        <td key={cell.id} className="px-4 py-3">
+                        <td key={cell.id} className={`px-4 py-3${cell.column.id === "actions" ? " sticky right-0 bg-zinc-950 z-10" : ""}`}>
                           {flexRender(cell.column.columnDef.cell, cell.getContext())}
                         </td>
                       ))}
