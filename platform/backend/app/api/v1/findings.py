@@ -21,6 +21,7 @@ from app.models.db.finding import (
     FindingStatus,
     FindingSuppression,
 )
+from app.models.db.suppression_rule import ScanSuppressionRule
 from app.models.db.user import User
 from app.models.schemas.finding import (
     FindingCommentCreate,
@@ -62,6 +63,8 @@ async def list_findings(
     suppressed: Optional[bool] = None,
     has_cve: Optional[bool] = None,
     min_cvss: Optional[float] = None,
+    kev_only: Optional[bool] = None,
+    confidence: Optional[str] = None,
     page: int = 1,
     per_page: int = 50,
 ) -> dict:
@@ -125,6 +128,12 @@ async def list_findings(
 
     if min_cvss is not None:
         query = query.where(Finding.cvss_score >= min_cvss)
+
+    if kev_only:
+        query = query.where(Finding.kev_status == True)
+
+    if confidence:
+        query = query.where(Finding.confidence == confidence)
 
     # Count
     count_query = select(func.count()).select_from(query.subquery())
@@ -205,6 +214,31 @@ async def finding_severity_summary(
 
 
 @router.get(
+    "/summary/kev",
+    summary="Get count of KEV (CISA Known Exploited Vulnerabilities) findings for the org",
+)
+async def kev_summary(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    scan_job_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    query = select(func.count(Finding.id)).where(
+        Finding.org_id == org_id,
+        Finding.kev_status == True,
+        Finding.suppressed == False,
+        Finding.false_positive == False,
+    )
+    if scan_job_id:
+        try:
+            query = query.where(Finding.scan_job_id == UUID(scan_job_id))
+        except ValueError:
+            pass
+    total_kev = (await db.execute(query)).scalar_one()
+    return {"kev_findings": total_kev}
+
+
+@router.get(
     "/{finding_id}",
     response_model=FindingResponse,
     summary="Get a single finding with full detail",
@@ -267,6 +301,31 @@ async def update_finding(
         finding.false_positive = payload.false_positive
         if payload.false_positive:
             finding.status = FindingStatus.FALSE_POSITIVE
+
+    # Auto-create suppression rule when marking false positive or accepted risk
+    _auto_rule_action: Optional[str] = None
+    if payload.false_positive is True:
+        _auto_rule_action = "false_positive"
+    elif payload.status == "accepted_risk":
+        _auto_rule_action = "accepted_risk"
+
+    if _auto_rule_action:
+        existing_rule_result = await db.execute(
+            select(ScanSuppressionRule).where(
+                ScanSuppressionRule.org_id == org_id,
+                ScanSuppressionRule.finding_title == finding.title,
+                ScanSuppressionRule.affected_asset_pattern == finding.affected_asset,
+            )
+        )
+        if not existing_rule_result.scalar_one_or_none():
+            new_rule = ScanSuppressionRule(
+                org_id=org_id,
+                finding_title=finding.title,
+                affected_asset_pattern=finding.affected_asset,
+                action=_auto_rule_action,
+                created_by=current_user.id,
+            )
+            db.add(new_rule)
 
     if payload.suppressed is not None:
         old_suppressed = finding.suppressed

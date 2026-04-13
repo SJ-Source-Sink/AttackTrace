@@ -18,6 +18,7 @@ from app.api.v1.ffuf import router as ffuf_router
 from app.api.v1.attack_suite import router as attack_suite_router
 from app.api.v1.ai_attack_suite import router as ai_attack_suite_router
 from app.api.v1.takeover import router as takeover_router
+from app.api.v1.suppression_rules import router as suppression_rules_router
 
 api_router = APIRouter()
 
@@ -36,3 +37,4 @@ api_router.include_router(ffuf_router)
 api_router.include_router(attack_suite_router)
 api_router.include_router(ai_attack_suite_router)
 api_router.include_router(takeover_router)
+api_router.include_router(suppression_rules_router)

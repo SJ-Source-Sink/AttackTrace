@@ -452,12 +452,27 @@ function AttackChainTab({ scan }: { scan: Scan }) {
     }
 
     // Build tree: domain → matching subdomains → ips → webapps
+    // Extract a root domain from a URL or hostname string
+    const extractRootDomain = (val: string): string => {
+      try {
+        const host = val.includes("://") ? new URL(val).hostname : val;
+        const parts = host.split(".");
+        return parts.length >= 2 ? parts.slice(-2).join(".") : host;
+      } catch {
+        return val;
+      }
+    };
+
     const rootDomains = domains.length > 0
       ? domains
-      : [...new Set(subdomains.map((s) => {
-          const parts = s.value.split(".");
-          return parts.slice(-2).join(".");
-        }))].map((d) => ({ id: d, value: d, asset_type: "domain" } as Asset));
+      : subdomains.length > 0
+        ? [...new Set(subdomains.map((s) => extractRootDomain(s.value)))].map(
+            (d) => ({ id: d, value: d, asset_type: "domain" } as Asset)
+          )
+        // Fallback: derive root domains from webapp URLs
+        : [...new Set(webapps.map((w) => extractRootDomain(w.value)))].map(
+            (d) => ({ id: d, value: d, asset_type: "domain" } as Asset)
+          );
 
     return rootDomains.map((domain) => {
       const domainSubdomains = subdomains.filter(
@@ -465,7 +480,7 @@ function AttackChainTab({ scan }: { scan: Scan }) {
       );
       const domainIps = ips;
       const domainWebapps = webapps.filter(
-        (w) => w.value.includes(domain.value)
+        (w) => extractRootDomain(w.value) === domain.value
       );
 
       const domainFindings = findingsByAsset.get(domain.value) ?? [];

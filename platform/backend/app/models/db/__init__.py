@@ -9,6 +9,7 @@ from app.models.db.user import User, OrgMember, MemberRole
 from app.models.db.scan import ScanJob, ScanStatus, ScanIntensity
 from app.models.db.asset import Asset, AssetType
 from app.models.db.finding import Finding, FindingComment, FindingSuppression, FindingSeverity, FindingStatus
+from app.models.db.suppression_rule import ScanSuppressionRule
 from app.models.db.audit import AuditLog
 
 __all__ = [
@@ -33,5 +34,6 @@ __all__ = [
     "FindingSuppression",
     "FindingSeverity",
     "FindingStatus",
+    "ScanSuppressionRule",
     "AuditLog",
 ]

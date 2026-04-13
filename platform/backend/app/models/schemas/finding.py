@@ -60,6 +60,12 @@ class FindingResponse(BaseModel):
     created_at: str
     updated_at: str
 
+    # KEV / EPSS / confidence
+    confidence: Optional[str] = None
+    kev_status: bool = False
+    epss_score: Optional[float] = None
+    priority_score: Optional[float] = None
+
     # Frontend-compatible aliases
     scan_id: str = ""
     organization_id: str = ""
@@ -127,6 +133,11 @@ class FindingResponse(BaseModel):
             comment_count=comment_count,
             created_at=created_at_str,
             updated_at=finding.updated_at.isoformat(),
+            # KEV / EPSS / confidence
+            confidence=getattr(finding, "confidence", None),
+            kev_status=getattr(finding, "kev_status", False) or False,
+            epss_score=getattr(finding, "epss_score", None),
+            priority_score=getattr(finding, "priority_score", None),
             # Frontend-compatible aliases
             scan_id=str(finding.scan_job_id),
             organization_id=str(finding.org_id),

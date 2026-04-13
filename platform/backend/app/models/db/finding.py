@@ -106,6 +106,15 @@ class Finding(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     suppressed_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # KEV / EPSS enrichment
+    confidence: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    kev_status: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    epss_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    priority_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    # Cross-scan deduplication
+    dedup_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+
     # Ticketing integration
     ticket_ref: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
 

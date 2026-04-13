@@ -6,6 +6,7 @@ to Redis pub/sub for SSE streaming, and persists results to the database.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -133,6 +134,15 @@ async def _combined_seed_module(session, config, orchestrator):
     if asn_result:
         result.ip_addresses.extend(asn_result.ip_addresses)
         result.findings.extend(asn_result.findings)
+
+    # Email security checks (DNS-based, always safe to run)
+    try:
+        from attacktrace.modules.seed.email_security import run as email_security_run
+        email_result = await email_security_run(session, config, orchestrator)
+        if email_result:
+            result.findings.extend(email_result.findings)
+    except Exception as e:
+        logger.warning(f"Email security module skipped: {e}")
 
     result.items_discovered = len(result.domains) + len(result.subdomains) + len(result.ip_addresses)
     return result
@@ -320,12 +330,193 @@ async def _combined_web_module(session, config, orchestrator):
 
 # --- Asset/Finding persistence ---
 
+def _compute_dedup_hash(org_id: UUID, title: str, affected_asset: str) -> str:
+    """Compute a stable dedup hash for a finding (org + title + asset)."""
+    key = f"{str(org_id)}|{title}|{affected_asset}"
+    return hashlib.sha256(key.encode()).hexdigest()[:32]
+
+
+def _load_suppression_rules(db_session, org_id: UUID) -> list:
+    """Load all active (non-expired) suppression rules for the org."""
+    from app.models.db.suppression_rule import ScanSuppressionRule
+    from sqlalchemy import select as sync_select, or_
+    now = datetime.now(timezone.utc)
+    try:
+        rules = db_session.execute(
+            sync_select(ScanSuppressionRule).where(
+                ScanSuppressionRule.org_id == org_id,
+                or_(
+                    ScanSuppressionRule.expires_at == None,
+                    ScanSuppressionRule.expires_at > now,
+                ),
+            )
+        ).scalars().all()
+        return list(rules)
+    except Exception as e:
+        logger.warning(f"Failed to load suppression rules: {e}")
+        return []
+
+
+def _matches_suppression_rule(finding_title: str, affected_asset: str, rules: list):
+    """Return the first matching rule or None."""
+    for rule in rules:
+        if rule.finding_title == finding_title and rule.affected_asset_pattern == affected_asset:
+            return rule
+    return None
+
+
+def _enrich_kev_epss(db_session, scan_job_id_str: str) -> None:
+    """
+    Enrich all findings for this scan that have CVEs with KEV/EPSS data.
+    Runs synchronously using httpx. Called after _persist_session_results.
+    """
+    from app.models.db.finding import Finding as DBFinding
+    from app.services.kev_epss_sync import load_kev, get_epss_sync, compute_priority_score
+    from sqlalchemy import select as sync_select
+
+    try:
+        scan_uuid = UUID(scan_job_id_str)
+    except ValueError:
+        return
+
+    try:
+        kev_set = load_kev()
+
+        findings_with_cves = db_session.execute(
+            sync_select(DBFinding).where(
+                DBFinding.scan_job_id == scan_uuid,
+                DBFinding.cve != None,
+            )
+        ).scalars().all()
+
+        enriched = 0
+        for finding in findings_with_cves:
+            cve_list = finding.cve or []
+            if not cve_list:
+                continue
+            kev_status = any(cve in kev_set for cve in cve_list)
+            epss_score = get_epss_sync(cve_list[0])
+            priority = compute_priority_score(finding.cvss_score, epss_score, kev_status)
+            finding.kev_status = kev_status
+            finding.epss_score = epss_score
+            finding.priority_score = priority
+            db_session.add(finding)
+            enriched += 1
+
+        if enriched:
+            db_session.flush()
+            logger.info(f"KEV/EPSS enriched {enriched} findings for scan {scan_job_id_str}")
+    except Exception as e:
+        logger.warning(f"KEV/EPSS enrichment failed for scan {scan_job_id_str}: {e}")
+
+
+def _persist_module_results_partial(
+    db_session, scan_job_id_str: str, org_id: UUID, module_name: str, module_result
+) -> None:
+    """
+    Persist results from a single module immediately after it completes.
+    Idempotent: skips findings/assets that already exist for this scan+dedup_hash.
+    """
+    from app.models.db.asset import Asset, AssetType
+    from app.models.db.finding import Finding as DBFinding, FindingSeverity, FindingStatus
+    from app.models.db.suppression_rule import ScanSuppressionRule
+    from sqlalchemy import select as sync_select
+
+    try:
+        scan_job_uuid = UUID(scan_job_id_str)
+    except ValueError:
+        return
+
+    suppression_rules = _load_suppression_rules(db_session, org_id)
+
+    try:
+        # Persist domains
+        for domain in getattr(module_result, "domains", []):
+            try:
+                db_session.add(Asset(
+                    org_id=org_id,
+                    scan_job_id=scan_job_uuid,
+                    asset_type=AssetType.DOMAIN,
+                    value=domain.fqdn,
+                    metadata_={
+                        "registrar": getattr(domain, "registrar", ""),
+                        "source": getattr(domain, "source", module_name),
+                        "module": module_name,
+                    },
+                ))
+            except Exception as e:
+                logger.debug(f"Partial persist domain skipped [{module_name}]: {e}")
+
+        # Persist findings (with dedup check)
+        for f in getattr(module_result, "findings", []):
+            sev_value = f.severity.value if hasattr(f.severity, "value") else f.severity
+            dedup_hash = _compute_dedup_hash(org_id, f.title, f.affected_asset)
+
+            # Check for existing finding with same dedup hash
+            existing = db_session.execute(
+                sync_select(DBFinding).where(
+                    DBFinding.org_id == org_id,
+                    DBFinding.dedup_hash == dedup_hash,
+                )
+            ).scalar_one_or_none()
+
+            if existing:
+                logger.debug(f"Dedup skip (partial) [{module_name}]: {f.title} / {f.affected_asset}")
+                continue
+
+            # Check suppression rules
+            matched_rule = _matches_suppression_rule(f.title, f.affected_asset, suppression_rules)
+
+            try:
+                new_finding = DBFinding(
+                    org_id=org_id,
+                    scan_job_id=scan_job_uuid,
+                    title=(f.title or "")[:1000],
+                    description=f.description,
+                    severity=FindingSeverity(sev_value),
+                    category=f.category,
+                    affected_asset=(f.affected_asset or "")[:2000],
+                    evidence={"raw": f.evidence} if isinstance(f.evidence, str) else (f.evidence or {}),
+                    remediation=f.remediation,
+                    references=getattr(f, "references", []) or [],
+                    cve=f.cve or [],
+                    cvss_score=f.cvss_score,
+                    false_positive=f.false_positive,
+                    status=FindingStatus.OPEN,
+                    confidence=getattr(f, "confidence", "firm"),
+                    dedup_hash=dedup_hash,
+                )
+                if matched_rule:
+                    new_finding.suppressed = True
+                    new_finding.suppressed_reason = f"Auto-suppressed by rule: {matched_rule.action}"
+                    if matched_rule.action == "false_positive":
+                        new_finding.status = FindingStatus.FALSE_POSITIVE
+                        new_finding.false_positive = True
+                    elif matched_rule.action == "accepted_risk":
+                        new_finding.status = FindingStatus.ACCEPTED_RISK
+                db_session.add(new_finding)
+            except Exception as e:
+                logger.warning(f"Partial persist finding failed [{module_name}]: {e}")
+
+        db_session.flush()
+        logger.debug(
+            f"Partial persist: {module_name} → "
+            f"{len(getattr(module_result, 'findings', []))} findings"
+        )
+    except Exception as e:
+        logger.warning(f"Partial persist failed for module {module_name}: {e}")
+
+
 def _persist_session_results(db_session, scan_job, attacktrace_session, org_id: UUID) -> tuple:
     from app.models.db.asset import Asset, AssetType
     from app.models.db.finding import Finding as DBFinding, FindingSeverity, FindingStatus
+    from sqlalchemy import select as sync_select
 
     assets_created = 0
     findings_count = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+
+    # Load suppression rules once for the whole session
+    suppression_rules = _load_suppression_rules(db_session, org_id)
 
     for domain in attacktrace_session.domains:
         db_session.add(Asset(
@@ -418,16 +609,36 @@ def _persist_session_results(db_session, scan_job, attacktrace_session, org_id: 
 
     for f in attacktrace_session.findings:
         sev_value = f.severity.value
+        dedup_hash = _compute_dedup_hash(org_id, f.title, f.affected_asset)
+
+        # Idempotent: skip if already persisted (e.g., by partial persist callback)
+        existing = db_session.execute(
+            sync_select(DBFinding).where(
+                DBFinding.org_id == org_id,
+                DBFinding.dedup_hash == dedup_hash,
+                DBFinding.scan_job_id == scan_job.id,
+            )
+        ).scalar_one_or_none()
+
+        if existing:
+            # Still count it in findings_count
+            findings_count[sev_value] = findings_count.get(sev_value, 0) + 1
+            continue
+
         findings_count[sev_value] = findings_count.get(sev_value, 0) + 1
+
+        # Check suppression rules
+        matched_rule = _matches_suppression_rule(f.title, f.affected_asset, suppression_rules)
+
         try:
-            db_session.add(DBFinding(
+            new_finding = DBFinding(
                 org_id=org_id,
                 scan_job_id=scan_job.id,
-                title=f.title,
+                title=(f.title or "")[:1000],
                 description=f.description,
                 severity=FindingSeverity(sev_value),
                 category=f.category,
-                affected_asset=f.affected_asset,
+                affected_asset=(f.affected_asset or "")[:2000],
                 evidence={"raw": f.evidence} if isinstance(f.evidence, str) else (f.evidence or {}),
                 remediation=f.remediation,
                 references=getattr(f, "references", []) or [],
@@ -435,7 +646,18 @@ def _persist_session_results(db_session, scan_job, attacktrace_session, org_id: 
                 cvss_score=f.cvss_score,
                 false_positive=f.false_positive,
                 status=FindingStatus.OPEN,
-            ))
+                confidence=getattr(f, "confidence", "firm"),
+                dedup_hash=dedup_hash,
+            )
+            if matched_rule:
+                new_finding.suppressed = True
+                new_finding.suppressed_reason = f"Auto-suppressed by rule: {matched_rule.action}"
+                if matched_rule.action == "false_positive":
+                    new_finding.status = FindingStatus.FALSE_POSITIVE
+                    new_finding.false_positive = True
+                elif matched_rule.action == "accepted_risk":
+                    new_finding.status = FindingStatus.ACCEPTED_RISK
+            db_session.add(new_finding)
         except Exception as e:
             logger.error(f"Failed to persist finding '{f.title}': {e}")
 
@@ -570,6 +792,19 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
                 _publish_event(r, scan_job_id, "module_start", {"module": module_name})
 
             def on_module_complete(module_name: str, result) -> None:
+                # Partial persist: write this module's results immediately
+                try:
+                    _persist_module_results_partial(
+                        db, scan_job_id, job.org_id, module_name, result
+                    )
+                    db.commit()
+                except Exception as _partial_err:
+                    logger.warning(f"Partial persist commit failed [{module_name}]: {_partial_err}")
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+
                 _publish_event(r, scan_job_id, "module_complete", {
                     "module": module_name,
                     "success": result.success,
@@ -592,10 +827,16 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
             # Run the pipeline
             completed_session = asyncio.run(orchestrator.run())
 
-            # Persist results
+            # Persist results (final pass — idempotent, skips already-persisted)
             results_summary, findings_count = _persist_session_results(
                 db, job, completed_session, job.org_id
             )
+
+            # KEV/EPSS enrichment for findings with CVEs
+            try:
+                _enrich_kev_epss(db, scan_job_id)
+            except Exception as _kev_err:
+                logger.warning(f"KEV/EPSS enrichment skipped: {_kev_err}")
 
             job.status = DBScanStatus.COMPLETED
             job.completed_at = datetime.now(timezone.utc)

@@ -231,6 +231,8 @@ class Finding(BaseAsset):
     cve: list[str] = Field(default_factory=list)
     cvss_score: Optional[float] = None
     false_positive: bool = False
+    # Confidence in the finding: 'certain' | 'firm' | 'tentative'
+    confidence: str = "firm"
 
 
 class ModuleResult(BaseModel):
