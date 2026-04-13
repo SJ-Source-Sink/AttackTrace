@@ -43,6 +43,11 @@ easd.yaml
 
 # Logs
 *.log
+logs/
+
+# Native process management
+.pids/
+celerybeat-schedule.db
 
 # OS
 .DS_Store

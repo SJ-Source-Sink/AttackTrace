@@ -20,7 +20,7 @@ WORKER_CONTAINER  ?= worker
 
 # Phony targets never correspond to real files
 .PHONY: up down restart build logs ps \
-        setup update migrate seed backend-shell worker-logs flower-open \
+        setup update start stop migrate seed backend-shell worker-logs flower-open \
         test-backend lint format \
         install-tools \
         k8s-apply k8s-delete k8s-status \
@@ -38,6 +38,14 @@ setup:
 ## update: Pull latest changes from GitHub and hot-update the running platform
 update:
 	@bash update.sh
+
+## start: Start all services natively (no Docker) — Python venv + npm dev
+start:
+	@bash start.sh
+
+## stop: Stop all native services started by start.sh
+stop:
+	@bash stop.sh
 
 ## install-tools: Install all required external tools (ffuf, nuclei, gowitness, SecLists, Playwright)
 install-tools:

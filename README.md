@@ -80,49 +80,81 @@
 
 ## Installation
 
-### Prerequisites
-
-- [Docker Desktop](https://docs.docker.com/get-docker/) (includes Docker Compose)
-- Git
-
-That's it. Everything else runs inside containers.
+Choose the method that works for your environment.
 
 ---
 
-### 1. Clone the repository
+### Option A — Without Docker (recommended for most users)
+
+**Prerequisites:** Python 3.11+, Node.js 18+, PostgreSQL, Redis
+
+Install prerequisites on macOS:
+```bash
+brew install python@3.11 node postgresql@16 redis
+brew services start postgresql@16
+brew services start redis
+```
+
+Install prerequisites on Ubuntu/Debian:
+```bash
+sudo apt update && sudo apt install -y python3.11 python3.11-venv nodejs npm postgresql redis-server
+sudo systemctl start postgresql redis-server
+```
+
+**Then:**
 
 ```bash
 git clone https://github.com/BaymaxPop23/AttackTrace.git
 cd AttackTrace
+chmod +x start.sh && ./start.sh
 ```
 
-### 2. Run setup
+Or using Make:
+```bash
+make start
+```
+
+The script will:
+1. Create a Python virtual environment and install all dependencies
+2. Install frontend Node modules
+3. Generate a `.env` with random secrets
+4. Create the PostgreSQL database and user
+5. Run database migrations
+6. Create the default admin account
+7. Start backend, Celery worker, Celery beat, and Next.js
+
+**Stop all services:**
+```bash
+./stop.sh   # or: make stop
+```
+
+---
+
+### Option B — With Docker
+
+**Prerequisites:** [Docker Desktop](https://docs.docker.com/get-docker/) (includes Compose)
 
 ```bash
+git clone https://github.com/BaymaxPop23/AttackTrace.git
+cd AttackTrace
 chmod +x setup.sh && ./setup.sh
 ```
 
 Or using Make:
-
 ```bash
 make setup
 ```
 
-The setup script will:
-1. Generate a `.env` file with random secrets
-2. Build all Docker images
-3. Start PostgreSQL and Redis
-4. Run database migrations
-5. Create the default admin account and invite code
-6. Start all services
-
-**First run takes 3–5 minutes** (downloading base images and compiling dependencies). Subsequent runs are fast.
+**Stop:**
+```bash
+make down
+```
 
 ---
 
-### 3. Log in
+### Log in
 
-Once setup completes, open **http://localhost:3000**
+Once running, open **http://localhost:3000**
 
 | Field | Value |
 |---|---|
@@ -131,7 +163,7 @@ Once setup completes, open **http://localhost:3000**
 
 ---
 
-### 4. Install scanning tools (optional but recommended)
+### Install scanning tools (optional but recommended)
 
 To use Nuclei, ffuf, Nmap, and other scanners:
 
@@ -139,54 +171,47 @@ To use Nuclei, ffuf, Nmap, and other scanners:
 make install-tools
 ```
 
-This installs: `nuclei`, `ffuf`, `nmap`, `gowitness`, `SecLists`, `nuclei-templates`, and Playwright browsers.
+Installs: `nuclei`, `ffuf`, `nmap`, `gowitness`, `SecLists`, `nuclei-templates`, and Playwright browsers.
 
 ---
 
 ## Updating
 
-When new changes are pushed to GitHub, update your running instance with a single command:
+Pull the latest changes from GitHub and restart:
 
+**Without Docker:**
+```bash
+git pull && ./start.sh
+```
+
+**With Docker:**
 ```bash
 make update
 ```
 
-Or directly:
-
-```bash
-./update.sh
-```
-
-This will:
-- Pull the latest code from GitHub
-- Rebuild only the images that changed (backend or frontend)
-- Run any new database migrations automatically
-- Restart only the affected services
-
-**Your data is never touched** — Postgres and Redis volumes are preserved.
+Both automatically run new database migrations before restarting.
 
 ---
 
 ## Useful Commands
 
 ```bash
-make setup          # First-time setup
-make update         # Pull latest changes and hot-update
+# Native (no Docker)
+make start          # Start all services
+make stop           # Stop all services
 
-make up             # Start all services
-make down           # Stop all services
-make restart        # Stop then start
-make logs           # Tail all service logs
-make ps             # Show container status
+# Docker
+make setup          # First-time Docker setup
+make update         # Pull + rebuild + restart (Docker)
+make up             # Start containers
+make down           # Stop containers
+make logs           # Tail all container logs
+make ps             # Container status
 
-make migrate        # Run database migrations manually
+# Both modes
+make migrate        # Run database migrations
 make seed           # Re-run initial data seed
 make install-tools  # Install nuclei, ffuf, nmap, etc.
-
-make backend-logs   # Backend logs only
-make worker-logs    # Celery worker logs
-make db-shell       # PostgreSQL interactive shell
-make redis-cli      # Redis CLI
 ```
 
 ---
