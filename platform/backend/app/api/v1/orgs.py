@@ -708,6 +708,49 @@ async def list_current_org_members(
     return {"items": items, "total": total, "page": page, "per_page": per_page}
 
 
+@org_router.patch("/members/{user_id}", summary="Update member role in current org")
+async def update_current_org_member_role(
+    user_id: UUID,
+    payload: MemberUpdate,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    await _require_org_role(db, current_user.id, org_id, [MemberRole.OWNER, MemberRole.ADMIN])
+    result = await db.execute(
+        select(OrgMember).where(OrgMember.user_id == user_id, OrgMember.org_id == org_id)
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=404, detail={"error": {"code": "MEMBER_NOT_FOUND", "message": "Member not found"}})
+    member.role = MemberRole(payload.role)
+    db.add(member)
+    user_result = await db.execute(select(User).where(User.id == user_id))
+    user = user_result.scalar_one()
+    await db.flush()
+    return {"user_id": str(user_id), "email": user.email, "full_name": user.full_name, "role": member.role.value, "joined_at": member.joined_at.isoformat()}
+
+
+@org_router.delete("/members/{user_id}", summary="Remove member from current org", status_code=204)
+async def remove_current_org_member(
+    user_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    await _require_org_role(db, current_user.id, org_id, [MemberRole.OWNER, MemberRole.ADMIN])
+    result = await db.execute(
+        select(OrgMember).where(OrgMember.user_id == user_id, OrgMember.org_id == org_id)
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=404, detail={"error": {"code": "MEMBER_NOT_FOUND", "message": "Member not found"}})
+    if member.role == MemberRole.OWNER and str(user_id) == str(current_user.id):
+        raise HTTPException(status_code=400, detail={"error": {"code": "CANNOT_REMOVE_OWNER", "message": "Owners cannot remove themselves"}})
+    await db.delete(member)
+    await db.flush()
+
+
 @org_router.post("/members/invite", summary="Invite member to current org")
 async def invite_member_to_current_org(
     payload: MemberInvite,

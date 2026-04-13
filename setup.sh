@@ -107,8 +107,8 @@ else
 fi
 
 # Read credentials from .env for the summary at the end
-ADMIN_EMAIL=$(grep -E '^FIRST_SUPERUSER_EMAIL=' .env | cut -d= -f2 | tr -d '"' || echo "admin@attacktrace.local")
-ADMIN_PASS=$(grep -E '^FIRST_SUPERUSER_PASSWORD=' .env | cut -d= -f2 | tr -d '"' || echo "changeme123!")
+ADMIN_EMAIL=$(grep -E '^FIRST_SUPERUSER_EMAIL=' .env | cut -d= -f2 | tr -d '"' || echo "admin")
+ADMIN_PASS=$(grep -E '^FIRST_SUPERUSER_PASSWORD=' .env | cut -d= -f2 | tr -d '"' || echo "Ihate13\$")
 
 # ─── 3. Build Docker images ───────────────────────────────────────────────────
 header "Building Docker images"
@@ -195,7 +195,7 @@ echo -e "${BOLD}${GREEN}║   API Docs  →  http://localhost:8000/api/v1/docs  
 echo -e "${BOLD}${GREEN}║   Flower    →  http://localhost:5555/flower        ║${NC}"
 echo -e "${BOLD}${GREEN}║                                                    ║${NC}"
 echo -e "${BOLD}${GREEN}║   Login credentials:                               ║${NC}"
-printf  "${BOLD}${GREEN}║     Email:    %-36s║${NC}\n" "$ADMIN_EMAIL"
+printf  "${BOLD}${GREEN}║     Username: %-36s║${NC}\n" "$ADMIN_EMAIL"
 printf  "${BOLD}${GREEN}║     Password: %-36s║${NC}\n" "$ADMIN_PASS"
 echo -e "${BOLD}${GREEN}║                                                    ║${NC}"
 echo -e "${BOLD}${GREEN}║   Invite code for new users: ATTACKTRACE           ║${NC}"

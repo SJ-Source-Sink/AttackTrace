@@ -260,20 +260,20 @@ export default function MembersPage() {
               </div>
             ))
           : members?.map((member) => {
-              const roleConfig = ROLE_CONFIG[member.role];
+              const roleConfig = ROLE_CONFIG[member.role] ?? ROLE_CONFIG.analyst;
               const RoleIcon = roleConfig.icon;
 
               return (
                 <div
-                  key={member.id}
+                  key={member.user_id}
                   className="flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900 p-4 hover:border-zinc-700 transition-colors"
                 >
                   <Avatar className="h-10 w-10">
-                    <AvatarFallback>{getInitials(member.user.full_name)}</AvatarFallback>
+                    <AvatarFallback>{getInitials(member.full_name)}</AvatarFallback>
                   </Avatar>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-zinc-200">{member.user.full_name}</p>
-                    <p className="text-xs text-zinc-500">{member.user.email}</p>
+                    <p className="text-sm font-medium text-zinc-200">{member.full_name}</p>
+                    <p className="text-xs text-zinc-500">{member.email}</p>
                   </div>
                   <div className="flex items-center gap-3">
                     <div className={`flex items-center gap-1 text-xs font-medium ${roleConfig.color}`}>
@@ -294,24 +294,24 @@ export default function MembersPage() {
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
                         <DropdownMenuItem
-                          onClick={() => updateRoleMutation.mutate({ userId: member.user.id, role: "admin" })}
+                          onClick={() => updateRoleMutation.mutate({ userId: member.user_id, role: "admin" })}
                         >
                           Make Admin
                         </DropdownMenuItem>
                         <DropdownMenuItem
-                          onClick={() => updateRoleMutation.mutate({ userId: member.user.id, role: "analyst" })}
+                          onClick={() => updateRoleMutation.mutate({ userId: member.user_id, role: "analyst" })}
                         >
                           Make Analyst
                         </DropdownMenuItem>
                         <DropdownMenuItem
-                          onClick={() => updateRoleMutation.mutate({ userId: member.user.id, role: "viewer" })}
+                          onClick={() => updateRoleMutation.mutate({ userId: member.user_id, role: "viewer" })}
                         >
                           Make Viewer
                         </DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem
                           className="text-red-400 focus:text-red-400 focus:bg-red-400/10"
-                          onClick={() => removeMutation.mutate(member.user.id)}
+                          onClick={() => removeMutation.mutate(member.user_id)}
                         >
                           <Trash2 className="h-4 w-4 mr-2" />
                           Remove from team

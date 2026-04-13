@@ -49,11 +49,11 @@ export interface Organization {
 }
 
 export interface OrgMember {
-  id: string;
-  user: User;
+  user_id: string;
+  email: string;
+  full_name: string;
   role: UserRole;
   joined_at: string;
-  invited_by?: string;
 }
 
 export interface ApiKey {
