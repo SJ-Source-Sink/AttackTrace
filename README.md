@@ -281,6 +281,55 @@ All credentials are encrypted with AES-256-GCM before storage.
 
 ## Troubleshooting
 
+### Native (no Docker)
+
+**Backend fails to start — `SettingsError: error parsing CORS_ORIGINS`**
+
+Remove the `CORS_ORIGINS` line from `platform/backend/.env` — the default in `config.py` already covers `localhost:3000`:
+```bash
+sed -i '' '/^CORS_ORIGINS=/d' platform/backend/.env
+```
+
+**Backend fails to start — `ValueError: password cannot be longer than 72 bytes`**
+
+This is a bcrypt 5.x / passlib incompatibility. Reinstall the pinned version:
+```bash
+platform/backend/.venv/bin/pip install 'bcrypt==4.0.1'
+```
+
+**`psql` not found on macOS**
+
+Homebrew PostgreSQL isn't in PATH. Add it:
+```bash
+export PATH="/opt/homebrew/opt/postgresql@16/bin:$PATH"
+```
+Or re-run `start.sh` — it patches PATH automatically.
+
+**`npm ci` fails with lock file error (Node 25+)**
+
+Use `npm install` instead — `start.sh` does this by default.
+
+**Backend port 8000 already in use**
+```bash
+lsof -ti :8000 | xargs kill -9
+```
+
+**Scanning tools not found (nuclei / ffuf / nmap)**
+```bash
+make install-tools
+```
+
+**View logs**
+```bash
+tail -f logs/backend.log
+tail -f logs/worker.log
+tail -f logs/frontend.log
+```
+
+---
+
+### Docker
+
 **Containers won't start**
 ```bash
 make logs          # Check what's failing
@@ -298,16 +347,18 @@ make backend-logs  # Check for errors
 make restart
 ```
 
-**Scanning tools not found (nuclei / ffuf / nmap)**
-```bash
-make install-tools
-```
+---
+
+### Both modes
 
 **Forgot the admin password**
 
 Reset it directly in the database:
 ```bash
+# Docker:
 make db-shell
+# Native:
+psql -U attacktrace -d attacktrace
 # Inside psql:
 UPDATE users SET hashed_password = '<new-bcrypt-hash>' WHERE email = 'admin';
 ```
