@@ -23,6 +23,34 @@ router = APIRouter(prefix="/nmap", tags=["Nmap"])
 # In-memory scan history (per process lifetime — good enough for a scanner tool)
 _scan_history: dict[str, dict] = {}
 
+# ── Nuclei tag suggestions per open port ──────────────────────────────────────
+
+PORT_TO_NUCLEI_TAGS: dict[int, list[str]] = {
+    22: ["ssh"],
+    25: ["smtp"],
+    80: ["http", "web"],
+    443: ["ssl", "tls", "https"],
+    3306: ["mysql", "databases"],
+    5432: ["postgresql", "databases"],
+    6379: ["redis", "network"],
+    27017: ["mongodb", "databases"],
+    8080: ["http", "web"],
+    8443: ["ssl", "tls"],
+    9200: ["elasticsearch", "network"],
+}
+
+
+def _suggest_nuclei_tags(hosts: list[dict]) -> list[str]:
+    """Return a deduplicated, sorted list of nuclei tags for all open ports found."""
+    tags: set[str] = set()
+    for host in hosts:
+        for port_info in host.get("ports", []):
+            if port_info.get("state") == "open":
+                port_num = port_info.get("port")
+                if port_num in PORT_TO_NUCLEI_TAGS:
+                    tags.update(PORT_TO_NUCLEI_TAGS[port_num])
+    return sorted(tags)
+
 SCAN_PRESETS: dict[str, list[str]] = {
     "quick": ["-T4", "-F"],
     "full_port": ["-T4", "-p-"],
@@ -194,12 +222,15 @@ async def _stream_nmap(scan_id: str, req: NmapScanRequest) -> AsyncGenerator[str
         raw = "\n".join(raw_output)
         hosts = _parse_nmap_output(raw)
 
+        suggested_tags = _suggest_nuclei_tags(hosts)
+
         _scan_history[scan_id].update({
             "status": "completed" if proc.returncode == 0 else "failed",
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "raw": raw,
             "hosts": hosts,
             "exit_code": proc.returncode,
+            "suggested_nuclei_tags": suggested_tags,
         })
 
         yield _sse("complete", {
@@ -207,6 +238,7 @@ async def _stream_nmap(scan_id: str, req: NmapScanRequest) -> AsyncGenerator[str
             "hosts": hosts,
             "exit_code": proc.returncode,
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "suggested_nuclei_tags": suggested_tags,
         })
 
     except Exception as exc:

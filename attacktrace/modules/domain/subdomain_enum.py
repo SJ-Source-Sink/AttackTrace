@@ -8,6 +8,9 @@ Discovers subdomains using multiple techniques:
 """
 
 import asyncio
+import random
+import socket
+import string
 import subprocess
 import shutil
 from datetime import datetime
@@ -22,6 +25,45 @@ from attacktrace.core.models import (
     Subdomain,
     ScanSession,
 )
+
+
+def _random_label(n: int = 12) -> str:
+    """Generate a random DNS label for wildcard detection."""
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=n))
+
+
+def _resolve_ips(fqdn: str) -> set[str]:
+    """Synchronously resolve a hostname to a set of IPv4/IPv6 addresses."""
+    try:
+        results = socket.getaddrinfo(fqdn, None)
+        return {r[4][0] for r in results}
+    except Exception:
+        return set()
+
+
+async def detect_wildcard(domain: str) -> set[str]:
+    """
+    Detect wildcard DNS for a domain.
+
+    Queries two random non-existent labels. If both resolve, their common
+    IPs are treated as wildcard IPs that should be filtered.
+
+    Returns a set of wildcard IPs (empty set if no wildcard detected).
+    """
+    loop = asyncio.get_event_loop()
+
+    label1 = _random_label()
+    label2 = _random_label()
+
+    ips1 = await loop.run_in_executor(None, _resolve_ips, f"{label1}.{domain}")
+    ips2 = await loop.run_in_executor(None, _resolve_ips, f"{label2}.{domain}")
+
+    if ips1 and ips2:
+        # Wildcard confirmed — use the union so we catch all wildcard IPs
+        wildcard_ips = ips1 | ips2
+        return wildcard_ips
+
+    return set()
 
 
 # Common subdomain wordlist (minimal built-in)
@@ -237,6 +279,14 @@ async def run(
     for domain in session.target_domains:
         domain_subdomains: set[str] = set()
 
+        # Detect wildcard DNS before enumeration
+        wildcard_ips = await detect_wildcard(domain)
+        if wildcard_ips:
+            print(
+                f"[WILDCARD] {domain} has wildcard DNS: {wildcard_ips} "
+                f"— filtering false positives"
+            )
+
         # Run passive enumeration sources concurrently
         passive_tasks = [
             query_hackertarget(domain, config.scan.timeout),
@@ -280,12 +330,24 @@ async def run(
         # Add domain itself
         domain_subdomains.add(domain)
 
-        # Filter to valid subdomains of this domain
+        # Filter to valid subdomains of this domain, excluding wildcard matches
+        loop = asyncio.get_event_loop()
         for fqdn in domain_subdomains:
             fqdn = fqdn.lower().strip()
-            if fqdn and (fqdn.endswith(f".{domain}") or fqdn == domain):
-                if fqdn not in existing:
-                    all_subdomains.add(fqdn)
+            if not fqdn:
+                continue
+            if not (fqdn.endswith(f".{domain}") or fqdn == domain):
+                continue
+            if fqdn in existing:
+                continue
+
+            # Skip if resolved IPs are a subset of wildcard IPs
+            if wildcard_ips:
+                resolved = await loop.run_in_executor(None, _resolve_ips, fqdn)
+                if resolved and resolved.issubset(wildcard_ips):
+                    continue
+
+            all_subdomains.add(fqdn)
 
     # Create Subdomain objects
     for fqdn in all_subdomains:

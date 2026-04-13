@@ -1315,7 +1315,7 @@ def _register_modules(orchestrator: Orchestrator) -> None:
     orchestrator.register_module("seed", _combined_seed_module)
     orchestrator.register_module("domain", subdomain_run)
     orchestrator.register_module("dns", dns_run)
-    orchestrator.register_module("infrastructure", port_scan_run)
+    orchestrator.register_module("infrastructure", _combined_infrastructure_module)
     orchestrator.register_module("enrichment", _combined_enrichment_module)
     orchestrator.register_module("intel", _combined_intel_module)
     orchestrator.register_module("osint", _combined_osint_module)
@@ -1324,11 +1324,39 @@ def _register_modules(orchestrator: Orchestrator) -> None:
     orchestrator.register_module("correlation", correlator_run)
 
 
+async def _combined_infrastructure_module(session, config, orchestrator):
+    """Combined infrastructure module that runs port scanning and SSL/TLS analysis."""
+    from attacktrace.modules.infrastructure.port_scanner import run as port_scan_run
+    from attacktrace.modules.infrastructure.ssl_checker import run as ssl_checker_run
+    from attacktrace.core.models import ModuleResult
+
+    result = ModuleResult(module_name="infrastructure")
+
+    # Run port scanner
+    port_result = await port_scan_run(session, config, orchestrator)
+    if port_result:
+        result.ip_addresses.extend(port_result.ip_addresses)
+        result.findings.extend(port_result.findings)
+        result.subdomains.extend(port_result.subdomains)
+
+    # Run SSL/TLS checker (uses web_applications already in the session)
+    ssl_result = await ssl_checker_run(session, config, orchestrator)
+    if ssl_result:
+        result.findings.extend(ssl_result.findings)
+
+    result.items_discovered = (
+        len(result.ip_addresses) + len(result.findings)
+    )
+    result.success = True
+    return result
+
+
 async def _combined_seed_module(session, config, orchestrator):
-    """Combined seed module that runs WHOIS, cert transparency, and ASN discovery."""
+    """Combined seed module that runs WHOIS, cert transparency, ASN discovery, and email security."""
     from attacktrace.modules.seed.cert_transparency import run as cert_run
     from attacktrace.modules.seed.whois_lookup import run as whois_run
     from attacktrace.modules.seed.asn_discovery import run as asn_run
+    from attacktrace.modules.seed.email_security import run as email_security_run
     from attacktrace.core.models import ModuleResult
 
     result = ModuleResult(module_name="seed")
@@ -1349,6 +1377,11 @@ async def _combined_seed_module(session, config, orchestrator):
     if asn_result:
         result.ip_addresses.extend(asn_result.ip_addresses)
         result.findings.extend(asn_result.findings)
+
+    # Run email security checks (SPF, DKIM, DMARC, BIMI)
+    email_result = await email_security_run(session, config, orchestrator)
+    if email_result:
+        result.findings.extend(email_result.findings)
 
     result.items_discovered = len(result.domains) + len(result.subdomains) + len(result.ip_addresses)
     return result

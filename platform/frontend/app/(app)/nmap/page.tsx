@@ -1,10 +1,11 @@
 "use client";
 
 import React, { useState, useRef, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import {
   Network, Play, Square, Download, RotateCcw, ChevronDown, ChevronUp,
   Terminal, Table2, Clock, Wifi, WifiOff, AlertCircle, CheckCircle2,
-  History, Trash2,
+  History, Trash2, ArrowRight, ShieldAlert,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -69,7 +70,25 @@ const STATE_COLOR: Record<string, string> = {
   filtered: "text-yellow-400",
 };
 
+interface PortSuggestion {
+  port: number;
+  title: string;
+  description: string;
+  href: (host: string) => string;
+}
+
+const PORT_SUGGESTIONS: PortSuggestion[] = [
+  { port: 22,   title: "SSH Audit",           description: "Run Nuclei SSH templates",         href: (h) => `/nuclei?target=${encodeURIComponent(h)}&tags=ssh` },
+  { port: 80,   title: "Web Fuzzing",          description: "Discover paths with ffuf",         href: (h) => `/ffuf?target=${encodeURIComponent(`http://${h}/FUZZ`)}` },
+  { port: 443,  title: "SSL/TLS Analysis",     description: "Run Nuclei SSL templates",         href: (h) => `/nuclei?target=${encodeURIComponent(`https://${h}`)}&tags=ssl` },
+  { port: 3306, title: "Database Exposure",    description: "Run Nuclei database templates",    href: (h) => `/nuclei?target=${encodeURIComponent(h)}&tags=databases` },
+  { port: 5432, title: "PostgreSQL Exposure",  description: "Run Nuclei database templates",    href: (h) => `/nuclei?target=${encodeURIComponent(h)}&tags=databases` },
+  { port: 6379, title: "Redis Exposure",       description: "Run Nuclei network templates",     href: (h) => `/nuclei?target=${encodeURIComponent(h)}&tags=network` },
+  { port: 8443, title: "SSL/TLS Analysis",     description: "Run Nuclei SSL templates",         href: (h) => `/nuclei?target=${encodeURIComponent(`https://${h}`)}&tags=ssl` },
+];
+
 export default function NmapPage() {
+  const router = useRouter();
   const [target, setTarget] = useState("");
   const [scanType, setScanType] = useState("quick");
   const [ports, setPorts] = useState("");
@@ -472,6 +491,55 @@ export default function NmapPage() {
               ))}
             </div>
           )}
+
+          {/* Suggested next steps */}
+          {!showRaw && scanStatus === "completed" && hosts.length > 0 && (() => {
+            const suggestions: Array<{ suggestion: PortSuggestion; host: string }> = [];
+            for (const host of hosts) {
+              const openPorts = new Set(
+                host.ports.filter((p) => p.state === "open").map((p) => p.port)
+              );
+              for (const s of PORT_SUGGESTIONS) {
+                if (openPorts.has(s.port)) {
+                  // Avoid duplicate title+host combos
+                  if (!suggestions.some((x) => x.host === host.host && x.suggestion.title === s.title)) {
+                    suggestions.push({ suggestion: s, host: host.host });
+                  }
+                }
+              }
+            }
+            if (suggestions.length === 0) return null;
+            return (
+              <div className="space-y-3">
+                <h3 className="text-sm font-semibold text-zinc-300 flex items-center gap-2">
+                  <ShieldAlert className="h-4 w-4 text-blue-400" />
+                  Suggested Next Steps
+                </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {suggestions.map(({ suggestion, host }, i) => (
+                    <div
+                      key={i}
+                      className="flex items-start justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-3"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-zinc-200">{suggestion.title}</p>
+                        <p className="text-xs text-zinc-500 mt-0.5">{suggestion.description}</p>
+                        <p className="text-[10px] text-zinc-600 font-mono mt-1">{host}</p>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="shrink-0 h-7 text-xs gap-1"
+                        onClick={() => router.push(suggestion.href(host))}
+                      >
+                        Run <ArrowRight className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Empty state while scanning */}
           {isScanning && !showRaw && rawLines.length > 0 && hosts.length === 0 && (

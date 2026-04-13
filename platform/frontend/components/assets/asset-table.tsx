@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   useReactTable,
   getCoreRowModel,
@@ -29,6 +30,7 @@ import {
   Camera,
   X,
   GitFork,
+  MoreHorizontal,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -42,6 +44,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { formatDate, riskScoreBarColor } from "@/lib/utils";
 import type { Asset, AssetType } from "@/types";
+
+const stripProtocol = (val: string) => val.replace(/^https?:\/\//, "");
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL?.replace("/api/v1", "") ?? "http://localhost:8000";
 
@@ -124,6 +128,7 @@ export function AssetTable({
   onExport,
   onCheckTakeover,
 }: AssetTableProps) {
+  const router = useRouter();
   const [sorting, setSorting] = useState<SortingState>([]);
   const [rowSelection, setRowSelection] = useState<Record<string, boolean>>({});
   const [screenshotModal, setScreenshotModal] = useState<{ url: string; value: string } | null>(null);
@@ -261,6 +266,58 @@ export function AssetTable({
           <Badge variant="secondary" className="text-xs text-emerald-400 border-emerald-400/30">Active</Badge>
         ) : (
           <Badge variant="secondary" className="text-xs text-zinc-500">Inactive</Badge>
+        );
+      },
+    },
+    {
+      id: "actions",
+      header: "",
+      enableSorting: false,
+      size: 40,
+      cell: ({ row }) => {
+        const asset = row.original;
+        const bare = stripProtocol(asset.value);
+        const isWebapp = asset.asset_type === "webapp";
+        const isDomainLike = asset.asset_type === "subdomain" || asset.asset_type === "domain";
+        return (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 w-7 p-0 text-zinc-500 hover:text-zinc-300"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="text-xs w-44">
+              <DropdownMenuItem
+                onClick={(e) => { e.stopPropagation(); router.push(`/nmap?target=${encodeURIComponent(bare)}`); }}
+              >
+                Port Scan
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={(e) => { e.stopPropagation(); router.push(`/nuclei?target=${encodeURIComponent(asset.value)}`); }}
+              >
+                Scan with Nuclei
+              </DropdownMenuItem>
+              {isDomainLike && (
+                <DropdownMenuItem
+                  onClick={(e) => { e.stopPropagation(); router.push(`/takeover?hosts=${encodeURIComponent(bare)}`); }}
+                >
+                  Check Takeover
+                </DropdownMenuItem>
+              )}
+              {isWebapp && (
+                <DropdownMenuItem
+                  onClick={(e) => { e.stopPropagation(); router.push(`/ffuf?target=${encodeURIComponent(`${asset.value}/FUZZ`)}`); }}
+                >
+                  Fuzz Paths
+                </DropdownMenuItem>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         );
       },
     },

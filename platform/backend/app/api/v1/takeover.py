@@ -12,6 +12,7 @@ Detection layers:
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import time
 import uuid
@@ -31,6 +32,43 @@ from app.models.db.user import User
 router = APIRouter(prefix="/takeover", tags=["Takeover"])
 
 _scan_history: dict[str, dict] = {}
+
+# ── Cloud IP Ranges ────────────────────────────────────────────────────────────
+
+CLOUD_IP_RANGES: dict[str, list[str]] = {
+    "AWS": ["3.0.0.0/8", "18.0.0.0/8", "52.0.0.0/6", "54.0.0.0/8"],
+    "GCP": ["34.0.0.0/8", "35.0.0.0/8", "104.196.0.0/14"],
+    "Azure": ["13.64.0.0/11", "20.0.0.0/8", "40.64.0.0/10"],
+    "Cloudflare": ["104.16.0.0/12", "172.64.0.0/13", "198.41.128.0/17"],
+    "Fastly": ["151.101.0.0/16", "199.27.72.0/21"],
+    "GitHub": ["185.199.108.0/22"],
+}
+
+# Pre-compile networks for efficient lookups
+_CLOUD_NETWORKS: list[tuple[str, ipaddress.IPv4Network]] = [
+    (provider, ipaddress.IPv4Network(cidr))
+    for provider, cidrs in CLOUD_IP_RANGES.items()
+    for cidr in cidrs
+]
+
+
+def _is_cloud_ip(ip: str) -> tuple[bool, str]:
+    """Check whether an IP belongs to a known cloud provider's address range.
+
+    Returns:
+        (True, provider_name) if matched, (False, "") otherwise.
+    """
+    try:
+        addr = ipaddress.IPv4Address(ip)
+    except ValueError:
+        return False, ""
+
+    for provider, network in _CLOUD_NETWORKS:
+        if addr in network:
+            return True, provider
+
+    return False, ""
+
 
 # ── Fingerprint Database ───────────────────────────────────────────────────────
 
@@ -413,6 +451,70 @@ FINGERPRINT_DB: list[dict] = [
         "description": "CNAME points to an unclaimed or deleted Launchrock landing page.",
         "remediation": "Remove the CNAME record or recreate the Launchrock page and assign the custom domain.",
     },
+    # ── Additional services (appended) ────────────────────────────────────────
+    {
+        "service": "Webflow",
+        "fingerprints": ["This page is reserved", "webflow.io"],
+        "cname_patterns": ["proxy.webflow.com", "webflow.io"],
+        "severity": "high",
+        "confidence": "confirmed",
+        "description": "Webflow project is unclaimed",
+        "remediation": "Claim the project in Webflow dashboard or update DNS",
+    },
+    {
+        "service": "Readme.io",
+        "fingerprints": ["Project doesnt exist", "readme.io"],
+        "cname_patterns": ["readme.io", "readmessl.com"],
+        "severity": "high",
+        "confidence": "confirmed",
+        "description": "Readme.io documentation site is unclaimed",
+        "remediation": "Create a project at readme.io or remove DNS record",
+    },
+    {
+        "service": "Fly.io",
+        "fingerprints": ["404 Not Found", "fly.io"],
+        "cname_patterns": ["fly.dev", "fly.io"],
+        "severity": "high",
+        "confidence": "potential",
+        "description": "Fly.io app may be unclaimed",
+        "remediation": "Deploy an app to this hostname or remove DNS record",
+    },
+    {
+        "service": "Vercel",
+        "fingerprints": ["The deployment could not be found", "vercel.com"],
+        "cname_patterns": ["vercel.app", "vercel-dns.com", "now.sh"],
+        "severity": "critical",
+        "confidence": "confirmed",
+        "description": "Vercel deployment is unclaimed — anyone can deploy to this hostname",
+        "remediation": "Add this domain to a Vercel project or remove DNS record",
+    },
+    {
+        "service": "Netlify",
+        "fingerprints": ["Not Found", "netlify.app", "netlify.com"],
+        "cname_patterns": ["netlify.app", "netlify.com"],
+        "severity": "critical",
+        "confidence": "confirmed",
+        "description": "Netlify site is unclaimed",
+        "remediation": "Create a Netlify site with this subdomain or remove DNS record",
+    },
+    {
+        "service": "Railway",
+        "fingerprints": ["Application not found", "railway.app"],
+        "cname_patterns": ["railway.app", "up.railway.app"],
+        "severity": "high",
+        "confidence": "confirmed",
+        "description": "Railway application is unclaimed",
+        "remediation": "Create a Railway project for this subdomain or update DNS",
+    },
+    {
+        "service": "Render",
+        "fingerprints": ["not found", "render.com"],
+        "cname_patterns": ["render.com", "onrender.com"],
+        "severity": "high",
+        "confidence": "confirmed",
+        "description": "Render service is unclaimed",
+        "remediation": "Create a Render service for this hostname or remove DNS record",
+    },
 ]
 
 # Known NS providers that support dangling delegation detection
@@ -460,12 +562,22 @@ class TakeoverResult(BaseModel):
     severity: Optional[str] = None    # critical | high | medium | low
     remediation: Optional[str] = None
     check_type: str = "cname"         # cname | ns | mx | fingerprint
+    ttl_warning: Optional[str] = None
+    evidence: list[str] = []
 
 
 # ── DNS Helpers ────────────────────────────────────────────────────────────────
 
-def _sync_resolve_cname_chain(hostname: str) -> tuple[list[str], str | None, bool]:
-    """Synchronous CNAME chain follower. Returns (chain, final_dest, is_dangling)."""
+def _sync_resolve_cname_chain(
+    hostname: str,
+) -> tuple[list[str], str | None, bool, str | None]:
+    """Synchronous CNAME chain follower.
+
+    Returns:
+        (chain, final_dest, is_dangling, ttl_warning)
+        where ttl_warning is a human-readable string when any hop has TTL ≤ 300,
+        or None otherwise.
+    """
     resolver = dns.resolver.Resolver()
     resolver.timeout = 5
     resolver.lifetime = 8
@@ -473,10 +585,16 @@ def _sync_resolve_cname_chain(hostname: str) -> tuple[list[str], str | None, boo
     chain: list[str] = [hostname]
     current = hostname
     dangling = False
+    ttl_warning: str | None = None
 
     for _ in range(10):  # max 10 hops to prevent infinite loops
         try:
             answers = resolver.resolve(current, "CNAME")
+            ttl = answers.rrset.ttl if answers.rrset is not None else None
+            if ttl is not None and ttl <= 300:
+                ttl_warning = (
+                    f"Low TTL ({ttl}s) suggests recent DNS change — increased takeover risk."
+                )
             target = str(answers[0].target).rstrip(".")
             chain.append(target)
             current = target
@@ -490,7 +608,7 @@ def _sync_resolve_cname_chain(hostname: str) -> tuple[list[str], str | None, boo
             break
 
     final = chain[-1] if len(chain) > 1 else None
-    return chain, final, dangling
+    return chain, final, dangling, ttl_warning
 
 
 def _sync_resolve_ns(hostname: str) -> tuple[list[str], bool]:
@@ -542,7 +660,9 @@ def _sync_check_host_resolves(hostname: str) -> bool:
 
 # ── Core Detection Functions ───────────────────────────────────────────────────
 
-async def _resolve_cname_chain(hostname: str) -> tuple[list[str], str | None, bool]:
+async def _resolve_cname_chain(
+    hostname: str,
+) -> tuple[list[str], str | None, bool, str | None]:
     """Async wrapper — runs sync DNS in thread."""
     return await asyncio.to_thread(_sync_resolve_cname_chain, hostname)
 
@@ -667,6 +787,18 @@ def _match_cname_to_fingerprint(cname: str) -> dict | None:
     return None
 
 
+def _sync_resolve_a_records(hostname: str) -> list[str]:
+    """Resolve A records for a hostname. Returns list of IP strings."""
+    resolver = dns.resolver.Resolver()
+    resolver.timeout = 4
+    resolver.lifetime = 6
+    try:
+        answers = resolver.resolve(hostname, "A")
+        return [str(r.address) for r in answers]
+    except Exception:
+        return []
+
+
 async def _analyze_target(
     hostname: str,
     client: httpx.AsyncClient,
@@ -684,13 +816,17 @@ async def _analyze_target(
         "severity": None,
         "remediation": None,
         "check_type": "cname",
+        "ttl_warning": None,
+        "evidence": [],
     }
 
     try:
         # ── Layer 1: CNAME chain resolution ───────────────────────────────────
         if req.check_cname:
-            chain, final_cname, is_dangling = await _resolve_cname_chain(hostname)
+            chain, final_cname, is_dangling, ttl_warning = await _resolve_cname_chain(hostname)
             base["cname_chain"] = chain
+            if ttl_warning:
+                base["ttl_warning"] = ttl_warning
 
             if final_cname:
                 matched_fp = _match_cname_to_fingerprint(final_cname)
@@ -749,11 +885,26 @@ async def _analyze_target(
                     )
                     return base
 
+        # ── Layer 1b: A-record cloud IP range validation ───────────────────────
+        a_records = await asyncio.to_thread(_sync_resolve_a_records, hostname)
+        if a_records:
+            # Probe the host to check for owned/live content
+            has_content_fingerprint = bool(await _check_service_fingerprint(hostname, client))
+            for ip in a_records:
+                is_cloud, provider = _is_cloud_ip(ip)
+                if is_cloud and not has_content_fingerprint:
+                    base["evidence"].append(
+                        f"Potential cloud resource with no matching content fingerprint "
+                        f"(IP {ip} belongs to {provider})"
+                    )
+
         # ── Layer 2: Body-only fingerprint (no matching CNAME) ─────────────────
         fp_result = await _check_service_fingerprint(hostname, client)
         if fp_result:
             fp_dict = fp_result.model_dump()
             fp_dict["cname_chain"] = base["cname_chain"]
+            fp_dict.setdefault("evidence", base["evidence"])
+            fp_dict.setdefault("ttl_warning", base.get("ttl_warning"))
             return fp_dict
 
         # ── Layer 3: NS takeover ───────────────────────────────────────────────

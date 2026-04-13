@@ -428,14 +428,7 @@ function AssetImportPanel({ onImport }: { onImport: (hosts: string[]) => void })
 
 export default function TakeoverPage() {
   const searchParams = useSearchParams();
-  const [targetsText, setTargetsText] = useState(() => {
-    // Pre-populate from URL ?hosts= param (e.g. navigating from Assets page)
-    if (typeof window !== "undefined") {
-      const hosts = new URLSearchParams(window.location.search).get("hosts");
-      if (hosts) return hosts.split(",").join("\n");
-    }
-    return "";
-  });
+  const [targetsText, setTargetsText] = useState("");
   const [checkCname, setCheckCname] = useState(true);
   const [checkNs, setCheckNs] = useState(true);
   const [checkMx, setCheckMx] = useState(false);

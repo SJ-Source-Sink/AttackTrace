@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useCallback, useEffect, useRef } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   Crosshair, Play, Square, Download, CheckCircle2,
   Wifi, Shield, ChevronDown, ChevronRight, Search,
@@ -200,6 +201,8 @@ function FindingCard({ finding }: { finding: NucleiFinding }) {
 }
 
 export default function NucleiPage() {
+  const searchParams = useSearchParams();
+
   // Scan config
   const [target, setTarget]               = useState("");
   const [concurrency, setConcurrency]     = useState("25");
@@ -237,6 +240,25 @@ export default function NucleiPage() {
   const progressEndRef                  = useRef<HTMLDivElement | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
+
+  // Pre-populate from URL params (?target=URL&tags=ssh,ssl)
+  useEffect(() => {
+    const urlTarget = searchParams.get("target");
+    const urlTags   = searchParams.get("tags");
+    if (urlTarget) {
+      setTarget(urlTarget);
+    }
+    if (urlTags) {
+      const tagList = urlTags.split(",").map((t) => t.trim()).filter(Boolean);
+      // Map tag names to known CATEGORIES values
+      const validCats = CATEGORIES.map((c) => c.value);
+      const matched = tagList.filter((t) => validCats.includes(t));
+      if (matched.length > 0) {
+        setTemplateMode("categories");
+        setSelectedCategories(matched);
+      }
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-scroll progress log
   useEffect(() => {

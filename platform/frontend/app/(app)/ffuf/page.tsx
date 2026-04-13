@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useCallback, useRef, useEffect } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   Zap, Play, Square, AlertCircle, CheckCircle2, ChevronDown,
   ChevronRight, ExternalLink, History, Trash2, Settings2, Plus, X,
@@ -99,6 +100,7 @@ function ResultRow({ result }: { result: FfufResult }) {
 }
 
 export default function FfufPage() {
+  const searchParams = useSearchParams();
   const [url, setUrl] = useState("http://FUZZ.example.com");
   const [method, setMethod] = useState("GET");
   const [wordlist, setWordlist] = useState("");           // selected path (or "" = auto)
@@ -133,6 +135,14 @@ export default function FfufPage() {
   useEffect(() => {
     progressEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [progressLog]);
+
+  // Pre-populate from URL params (?target=URL/FUZZ)
+  useEffect(() => {
+    const urlTarget = searchParams.get("target");
+    if (urlTarget) {
+      setUrl(urlTarget);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch available wordlists on mount
   useEffect(() => {
