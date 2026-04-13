@@ -24,6 +24,9 @@ header() { echo -e "\n${BOLD}${CYAN}── $* ──${NC}"; }
 die()    { err "$*"; exit 1; }
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Extend PATH to pick up Homebrew postgres, node, etc.
+export PATH="/opt/homebrew/opt/postgresql@16/bin:/opt/homebrew/opt/postgresql@15/bin:/opt/homebrew/opt/postgresql/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 BACKEND_DIR="$REPO_ROOT/platform/backend"
 FRONTEND_DIR="$REPO_ROOT/platform/frontend"
 PIDS_DIR="$REPO_ROOT/.pids"
@@ -114,13 +117,13 @@ header "Frontend"
 
 if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
   info "Installing frontend dependencies (first time, may take a minute)..."
-  npm --prefix "$FRONTEND_DIR" ci --silent
+  npm --prefix "$FRONTEND_DIR" install --silent
   ok "Node modules installed"
 else
   # Quick check — only reinstall if package.json changed
   if [ "$FRONTEND_DIR/package.json" -nt "$FRONTEND_DIR/node_modules/.package-lock.json" ] 2>/dev/null; then
     info "package.json changed — reinstalling..."
-    npm --prefix "$FRONTEND_DIR" ci --silent
+    npm --prefix "$FRONTEND_DIR" install --silent
     ok "Node modules updated"
   else
     ok "Node modules up to date"
@@ -158,7 +161,6 @@ ACCESS_TOKEN_EXPIRE_MINUTES=480
 REFRESH_TOKEN_EXPIRE_DAYS=7
 ENVIRONMENT=development
 DEBUG=false
-CORS_ORIGINS=http://localhost:3000
 FIRST_SUPERUSER_EMAIL=admin
 FIRST_SUPERUSER_PASSWORD=Ihate13\$
 ATTACKTRACE_WORKSPACE_DIR=${HOME}/.attacktrace/scans
@@ -201,12 +203,23 @@ if ! pg_isready -q 2>/dev/null; then
 fi
 ok "PostgreSQL is running"
 
-# Create user + database if they don't exist
-psql -U postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='attacktrace'" 2>/dev/null | grep -q 1 || \
-  psql -U postgres -c "CREATE USER attacktrace WITH PASSWORD 'attacktrace';" >/dev/null 2>&1 || true
+# Determine the postgres superuser (Homebrew uses current OS user; Linux uses 'postgres')
+PG_SUPERUSER=""
+for candidate in "$USER" postgres; do
+  if psql -U "$candidate" -c "" postgres >/dev/null 2>&1; then
+    PG_SUPERUSER="$candidate"
+    break
+  fi
+done
+[ -n "$PG_SUPERUSER" ] || die "Cannot connect to PostgreSQL as any superuser. Check that PostgreSQL is running and your user has access."
 
-psql -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='attacktrace'" 2>/dev/null | grep -q 1 || \
-  psql -U postgres -c "CREATE DATABASE attacktrace OWNER attacktrace;" >/dev/null 2>&1 || true
+# Create role if missing
+psql -U "$PG_SUPERUSER" -tc "SELECT 1 FROM pg_roles WHERE rolname='attacktrace'" postgres 2>/dev/null | grep -q 1 || \
+  psql -U "$PG_SUPERUSER" -c "CREATE USER attacktrace WITH PASSWORD 'attacktrace';" postgres >/dev/null 2>&1
+
+# Create database if missing
+psql -U "$PG_SUPERUSER" -tc "SELECT 1 FROM pg_database WHERE datname='attacktrace'" postgres 2>/dev/null | grep -q 1 || \
+  psql -U "$PG_SUPERUSER" -c "CREATE DATABASE attacktrace OWNER attacktrace;" postgres >/dev/null 2>&1
 
 ok "Database 'attacktrace' ready"
 
