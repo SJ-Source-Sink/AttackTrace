@@ -160,7 +160,29 @@ Located at `/platform/backend/alembic/versions/`. Run with:
 ```bash
 cd /Users/sai/Desktop/Coding/AttackTrace/platform/backend && python3.11 -m alembic upgrade head
 ```
-Latest: `cascade_assets_scan` (cascade delete assets when scan deleted; down_revision: `a3b4c5d6e7f8`)
+Latest: `kev_epss_confidence` (adds confidence/kev_status/epss_score/priority_score/dedup_hash to findings; creates scan_suppression_rules table; down_revision: `cascade_assets_scan`)
+**Idempotent pattern**: Always use `_col_exists()`, `_table_exists()`, `_idx_exists()` helper functions in migrations — wrap all DDL in existence checks to survive re-runs.
+
+## KEV/EPSS enrichment
+- `app/services/kev_epss_service.py` — async (for FastAPI routes), 1h in-process cache
+- `app/services/kev_epss_sync.py` — sync (for Celery workers), same logic using `httpx.Client`
+- Priority score formula: KEV → 10.0; else `(epss×0.6 + cvss_norm×0.4)×10`
+- Called in `scan_worker.py` after findings are persisted
+
+## Suppression rules
+- `app/models/db/suppression_rule.py` — `ScanSuppressionRule` model
+- `app/api/v1/suppression_rules.py` — CRUD endpoints (POST/GET/DELETE)
+- Applied in scan_worker: loaded before finding persist loop, matched by title+asset pattern
+- Schema: `(org_id, finding_title, affected_asset_pattern, action, expires_at, created_by, notes)`
+
+## DB column widths (findings)
+- `affected_asset`, `title`, `ticket_ref` were VARCHAR(512) — widened to TEXT via raw SQL (April 12, 2026)
+- Also add Python-side truncation in scan_worker: `title[:1000]`, `affected_asset[:2000]`
+
+## Attack Chain tab
+- `extractRootDomain(val)` — extracts TLD+1 from URL or hostname string
+- Fallback chain: domains > subdomains (extract root) > webapps (extract root from URL)
+- Without this, webapp-only scans (no domain/subdomain assets) showed empty chain
 
 ## Key component locations
 - Asset table: `components/assets/asset-table.tsx`

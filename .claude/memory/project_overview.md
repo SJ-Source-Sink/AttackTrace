@@ -35,7 +35,12 @@ AttackTrace (formerly EASD) is a hosted enterprise SaaS platform that wraps the 
 - **Scan form**: "Company Name" renamed to "Engagement Name" throughout
 - **Celery beat watchdog**: `recover_stuck_scans` fires every 5 min — requeues PENDING >5min scans, fails RUNNING >3h scans
 - **Scan event replay**: Redis list `scan:{scan_id}:events` replays history on reconnect (no more reset to 0% on nav back)
-- **E2E tested (April 2026)**: Full native install verified working — `./start.sh` brings up all 4 services; testphp.vulnweb.com scan completed in ~30s finding 15 assets + 14 findings; Nmap, Nuclei, ffuf standalone scanners all confirmed working
+- **E2E tested (April 12, 2026)**: Full audible.com scan completed — 386 assets, 142 findings, 12 medium, 88 low; all pages verified: Dashboard, Scans, Assets (405 total), Findings (Active/Suppressed/KEV/Confidence filters), Nmap, Nuclei (9976 templates streaming), ffuf (completed, history saved), Reports (HTML generated), Settings/Integrations (6 integrations)
+- **Attack Chain fix**: Was empty for webapp-only scans; fixed to derive root domains from webapp URL hostnames via `extractRootDomain()` fallback in `scan-results-tabs.tsx`
+- **KEV/EPSS enrichment**: CISA KEV feed + FIRST.org EPSS scores; priority_score computed per finding; `kev_status`, `epss_score`, `confidence`, `priority_score`, `dedup_hash` columns on findings
+- **Suppression rules**: `scan_suppression_rules` table — org-scoped, pattern-matched, expiry-aware; CRUD at `/suppression-rules`; applied during scan_worker finding persist
+- **Findings deduplication**: sha256(org|title|asset)[:32] stored as `dedup_hash`; duplicate findings skipped within same scan
+- **Partial persistence**: scan_worker persists module results via `on_module_complete` callbacks — no total data loss on crash
 - **tsconfig baseUrl**: `platform/frontend/tsconfig.json` has `"baseUrl": "."` — required for `@/*` imports to resolve on Linux/non-Mac hosts
 
 **AttackTrace API (correct)**:
