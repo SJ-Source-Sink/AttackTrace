@@ -1,32 +1,31 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/Next.js-15-black?style=for-the-badge&logo=next.js&logoColor=white" alt="Next.js">
+  <img src="https://img.shields.io/badge/Docker-required-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
-  <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-blue?style=for-the-badge" alt="Platform">
   <img src="https://img.shields.io/badge/Status-Active-success?style=for-the-badge" alt="Status">
 </p>
 
 <h1 align="center">AttackTrace</h1>
 
 <p align="center">
-  <b>A comprehensive external attack surface discovery tool for red team engagements</b>
+  <b>External Attack Surface Management Platform</b>
 </p>
 
 <p align="center">
-  Provide a company name or domain, and AttackTrace automatically discovers websites, applications, exposed services, cloud assets, employees, leaked credentials, and potential vulnerabilities — then generates an interactive HTML report.
+  A full-stack web platform for external attack surface discovery, vulnerability scanning, and team-based security management. Point it at a domain and get a complete picture of your external footprint — subdomains, exposed services, vulnerabilities, cloud assets, and more.
 </p>
 
 ---
 
-## Report Preview
+## Platform Preview
 
 <p align="center">
   <img src="docs/images/report-dashboard.png" alt="AttackTrace Dashboard" width="100%">
 </p>
 
-<p align="center"><i>Interactive dashboard with attack surface metrics and security findings</i></p>
-
 <details>
-<summary><b>View More Screenshots</b></summary>
+<summary><b>More Screenshots</b></summary>
 
 ### Subdomains Discovery
 <p align="center">
@@ -49,62 +48,33 @@
 
 ## Features
 
-### Discovery Modules
-
-| Module | Description | Type |
-|:------:|-------------|:----:|
-| **Subdomain Enumeration** | Multi-source discovery via Certificate Transparency, DNS bruteforce, passive sources | Passive |
-| **ASN & IP Range Discovery** | BGP/WHOIS lookups to map organization IP space | Passive |
-| **Port Scanning** | 100+ ports including SFTP, FTP, SMB, databases, admin panels | Active |
-| **Technology Fingerprinting** | 60+ technology signatures (frameworks, CMS, servers) | Active |
-| **Cloud Asset Discovery** | AWS S3, Azure Blob, GCP bucket enumeration | Active |
-
-### OSINT Capabilities
-
-| Capability | Description |
-|:----------:|-------------|
-| **GitHub Intelligence** | Organization repos, commit history, leaked secrets in code |
-| **Employee Discovery** | Email patterns, names, positions via Hunter.io |
-| **Secret Detection** | API keys, AWS credentials, database passwords, private keys |
-| **Credential Exposure** | Check employee emails against breach databases |
-
-### Intelligence Platforms
-
-| Platform | Features |
-|:--------:|----------|
-| **Shodan InternetDB** | CVEs, open ports, hostnames (no API key required) |
-| **Censys** | Certificate & host discovery |
-| **SecurityTrails** | Passive DNS, subdomain history |
-| **AlienVault OTX** | Threat pulses, IOCs |
-| **URLScan.io** | Screenshots, DOM analysis |
-| **GreyNoise** | Scanner identification |
-| **IPinfo** | Geolocation, ASN, VPN detection |
-| **BuiltWith** | Technology stack profiling |
-| **Chaos (ProjectDiscovery)** | Massive subdomain database |
-| **PassiveTotal / RiskIQ** | Passive DNS, WHOIS history |
-| **Wayback Machine** | Historical URLs, config files |
-
-### Breach & Credential Checking
-
-| Service | Features |
-|:-------:|----------|
-| **HaveIBeenPwned** | Check if employee emails appear in breaches |
-| **DeHashed** | Search breach databases for exposed credentials |
-| **LeakCheck** | Credential leak verification |
-| **Intelligence X** | Dark web, paste sites, breach data |
+| Category | Capabilities |
+|---|---|
+| **Asset Discovery** | Subdomain enumeration, ASN/IP range mapping, certificate transparency, DNS resolution |
+| **Infrastructure** | Port scanning (100+ ports), service detection, banner grabbing |
+| **Web Analysis** | HTTP probing, technology fingerprinting (60+ signatures), automated screenshots |
+| **Cloud** | AWS S3, Azure Blob, GCP bucket enumeration |
+| **OSINT** | GitHub recon, employee discovery, leaked secrets in code |
+| **Threat Intel** | Shodan, Censys, SecurityTrails, AlienVault OTX, GreyNoise, URLScan |
+| **Vulnerability Scanning** | Nuclei integration with CVE/CVSS enrichment from NVD |
+| **Fuzzing** | ffuf integration with wordlist picker and live progress |
+| **Network** | Nmap scanner with 7 scan types and parsed results |
+| **Takeover Detection** | Subdomain takeover checker via CNAME chain analysis |
+| **Findings** | Severity triage, status workflow, CVE linking, bulk operations |
+| **Reports** | Auto-generated HTML reports per scan |
+| **Team** | Multi-user, invite codes, role-based access (Owner / Admin / Analyst / Viewer) |
 
 ---
 
-## Interactive HTML Reports
+## Stack
 
-AttackTrace generates professional, self-contained HTML reports with:
-
-- **Dark theme** with modern UI
-- **Collapsible sections** for easy navigation
-- **Screenshot gallery** with zoom/preview modal
-- **Service exploitation guides** with detailed attack techniques
-- **Risk scoring** and severity indicators
-- **Filtering & search** capabilities
+| Layer | Technology |
+|---|---|
+| Backend | FastAPI + SQLAlchemy (async) |
+| Frontend | Next.js 15 + React 19 + Tailwind CSS |
+| Task Queue | Celery + Redis |
+| Database | PostgreSQL |
+| Scan Engine | AttackTrace Python CLI + nuclei + ffuf + nmap |
 
 ---
 
@@ -112,257 +82,209 @@ AttackTrace generates professional, self-contained HTML reports with:
 
 ### Prerequisites
 
-- Python 3.10 or higher
-- pip
+- [Docker Desktop](https://docs.docker.com/get-docker/) (includes Docker Compose)
+- Git
 
-### Option 1 — pip install (recommended)
+That's it. Everything else runs inside containers.
+
+---
+
+### 1. Clone the repository
 
 ```bash
 git clone https://github.com/BaymaxPop23/AttackTrace.git
 cd AttackTrace
-pip install -e .
 ```
 
-For screenshot support (optional but recommended):
+### 2. Run setup
 
 ```bash
-pip install -e ".[screenshots]"
-playwright install chromium
+chmod +x setup.sh && ./setup.sh
 ```
 
-### Option 2 — Virtual environment (isolated)
+Or using Make:
 
 ```bash
-git clone https://github.com/BaymaxPop23/AttackTrace.git
-cd AttackTrace
-
-python3 -m venv venv
-source venv/bin/activate          # macOS/Linux
-# venv\Scripts\activate           # Windows
-
-pip install -r requirements.txt
-pip install -e .
-
-# Optional: screenshot support
-playwright install chromium
+make setup
 ```
 
-### Verify installation
+The setup script will:
+1. Generate a `.env` file with random secrets
+2. Build all Docker images
+3. Start PostgreSQL and Redis
+4. Run database migrations
+5. Create the default admin account and invite code
+6. Start all services
+
+**First run takes 3–5 minutes** (downloading base images and compiling dependencies). Subsequent runs are fast.
+
+---
+
+### 3. Log in
+
+Once setup completes, open **http://localhost:3000**
+
+| Field | Value |
+|---|---|
+| Username | `admin` |
+| Password | `Ihate13$` |
+
+---
+
+### 4. Install scanning tools (optional but recommended)
+
+To use Nuclei, ffuf, Nmap, and other scanners:
 
 ```bash
-attacktrace --help
+make install-tools
+```
+
+This installs: `nuclei`, `ffuf`, `nmap`, `gowitness`, `SecLists`, `nuclei-templates`, and Playwright browsers.
+
+---
+
+## Updating
+
+When new changes are pushed to GitHub, update your running instance with a single command:
+
+```bash
+make update
+```
+
+Or directly:
+
+```bash
+./update.sh
+```
+
+This will:
+- Pull the latest code from GitHub
+- Rebuild only the images that changed (backend or frontend)
+- Run any new database migrations automatically
+- Restart only the affected services
+
+**Your data is never touched** — Postgres and Redis volumes are preserved.
+
+---
+
+## Useful Commands
+
+```bash
+make setup          # First-time setup
+make update         # Pull latest changes and hot-update
+
+make up             # Start all services
+make down           # Stop all services
+make restart        # Stop then start
+make logs           # Tail all service logs
+make ps             # Show container status
+
+make migrate        # Run database migrations manually
+make seed           # Re-run initial data seed
+make install-tools  # Install nuclei, ffuf, nmap, etc.
+
+make backend-logs   # Backend logs only
+make worker-logs    # Celery worker logs
+make db-shell       # PostgreSQL interactive shell
+make redis-cli      # Redis CLI
 ```
 
 ---
 
-## Quick Start
+## Inviting Team Members
 
-### Interactive Mode
+1. Go to **Settings → Members**
+2. Click **Generate Invite Code**
+3. Choose a role and expiry
+4. Copy the invite link and share it
 
-Run without arguments to launch the guided wizard:
+Recipients open the link, enter their details, and join your organization automatically.
 
+**Roles:**
+
+| Role | Permissions |
+|---|---|
+| Owner | Full access, cannot be removed |
+| Admin | Manage team, settings, all scans |
+| Analyst | Run scans, manage findings |
+| Viewer | Read-only access |
+
+---
+
+## API Keys (optional enrichment)
+
+Configure third-party API keys at **Settings → Integrations** to enable enrichment modules:
+
+| Service | Used for |
+|---|---|
+| Shodan | Open ports, CVEs, banners |
+| Censys | Certificate & host discovery |
+| SecurityTrails | Passive DNS, subdomain history |
+| GitHub Token | Repo recon, secret detection |
+| AlienVault OTX | Threat intelligence, IOCs |
+| PassiveTotal | Passive DNS, WHOIS history |
+
+All credentials are encrypted with AES-256-GCM before storage.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│              Docker Compose                  │
+│                                              │
+│  ┌──────────┐    ┌──────────┐               │
+│  │ Next.js  │───▶│ FastAPI  │               │
+│  │ :3000    │    │ :8000    │               │
+│  └──────────┘    └────┬─────┘               │
+│                       │                      │
+│          ┌────────────┼────────────┐         │
+│          ▼            ▼            ▼         │
+│     ┌─────────┐  ┌────────┐  ┌────────┐    │
+│     │Postgres │  │ Redis  │  │ Celery │    │
+│     │  :5432  │  │ :6379  │  │ Worker │    │
+│     └─────────┘  └────────┘  └────────┘    │
+└─────────────────────────────────────────────┘
+```
+
+- **Celery Worker** runs long scans asynchronously, streaming progress via Redis pub/sub
+- **Celery Beat** runs a watchdog every 5 minutes to recover stuck scans
+- **Flower** (Celery monitoring UI) available at http://localhost:5555/flower
+
+---
+
+## Troubleshooting
+
+**Containers won't start**
 ```bash
-attacktrace
+make logs          # Check what's failing
+make down && make up
 ```
 
-The wizard walks you through:
-1. Target information (company name and/or domains)
-2. Scan intensity (passive / normal / aggressive)
-3. Module selection
-4. API key configuration
-5. Output format
-
-### CLI Scan
-
+**Database migration errors**
 ```bash
-# Scan by company name
-attacktrace scan --company "Acme Corp" --domains acme.com
-
-# Passive-only scan (no direct contact with targets)
-attacktrace scan --domains example.com --intensity passive
-
-# Full scan with output directory
-attacktrace scan --company "Target Inc" --domains target.com --output ./results
-
-# Resume or list past sessions
-attacktrace sessions list
-attacktrace sessions show <session-id>
+make migrate
 ```
 
----
-
-## Configuration
-
-AttackTrace looks for a config file in the following order:
-
-1. `./attacktrace.yaml`
-2. `./config/config.yaml`
-3. `~/.config/attacktrace/config.yaml`
-4. Environment variables (`ATTACKTRACE_` prefix)
-
-### Example `attacktrace.yaml`
-
-```yaml
-attacktrace:
-  api_keys:
-    shodan: ""
-    censys_id: ""
-    censys_secret: ""
-    securitytrails: ""
-    github: ""
-    hunter: ""
-    urlscan: ""
-    greynoise: ""
-    alienvault: ""
-    ipinfo: ""
-    builtwith: ""
-    chaos: ""
-    passivetotal: ""
-    passivetotal_user: ""
-    hibp: ""
-    dehashed: ""
-    dehashed_email: ""
-    leakcheck: ""
-    intelx: ""
-
-  scan:
-    intensity: normal        # passive | normal | aggressive
-    rate_limit: 1000         # requests per second
-    timeout: 10              # seconds
-    threads: 200
-
-  modules:
-    subdomain:
-      bruteforce: true
-      bruteforce_threads: 200
-      recursive: false
-    ports:
-      top_ports: 1000
-      scan_type: tcp         # tcp | udp | both
-      service_detection: true
-    web:
-      screenshot: true
-      tech_detect: true
-    cloud:
-      providers:
-        - aws
-        - azure
-        - gcp
-
-  output:
-    directory: ./results
-    formats:
-      - json
-      - html
-    screenshots_dir: ./screenshots
-```
-
-### Environment Variables
-
-All API keys can also be set via environment variables:
-
+**Backend not responding after update**
 ```bash
-export SHODAN_API_KEY="your-key"
-export CENSYS_API_ID="your-id"
-export CENSYS_API_SECRET="your-secret"
-export SECURITYTRAILS_API_KEY="your-key"
-export GITHUB_TOKEN="your-token"
-export HUNTER_API_KEY="your-key"
-export URLSCAN_API_KEY="your-key"
-export GREYNOISE_API_KEY="your-key"
-export ALIENVAULT_API_KEY="your-key"
-export IPINFO_TOKEN="your-token"
-export BUILTWITH_API_KEY="your-key"
-export CHAOS_API_KEY="your-key"
-export HIBP_API_KEY="your-key"
-export DEHASHED_API_KEY="your-key"
-export DEHASHED_EMAIL="your-email"
-export LEAKCHECK_API_KEY="your-key"
-export INTELX_API_KEY="your-key"
+make backend-logs  # Check for errors
+make restart
 ```
 
-API keys are optional. Modules with missing keys are automatically skipped.
-
----
-
-## Modules
-
-| Module | Description | Active/Passive |
-|:------:|-------------|:--------------:|
-| `seed` | WHOIS, Certificate Transparency, ASN discovery | Passive |
-| `domain` | Subdomain enumeration from multiple sources | Passive |
-| `dns` | DNS resolution for discovered domains | Active |
-| `infrastructure` | Port scanning, service detection | Active |
-| `enrichment` | Shodan, Censys, SecurityTrails lookups | Passive |
-| `intel` | URLScan, GreyNoise, Wayback, CVEs, breach data | Passive |
-| `osint` | GitHub repos, commits, employee discovery | Passive |
-| `web` | HTTP probing, tech detection, screenshots | Active |
-| `cloud` | S3/Azure/GCP bucket enumeration | Active |
-| `correlation` | Risk scoring and data correlation | — |
-
----
-
-## Port Coverage
-
-AttackTrace scans **100+ ports** across multiple categories:
-
-| Category | Ports |
-|:--------:|-------|
-| **Web** | HTTP (80), HTTPS (443), alt HTTP (8080, 8443, 8888) |
-| **File Transfer** | FTP (21), SFTP/SSH (22), FTPS (990), TFTP (69) |
-| **Databases** | MySQL (3306), PostgreSQL (5432), MongoDB (27017), Redis (6379), MSSQL (1433), Elasticsearch (9200) |
-| **Remote Access** | RDP (3389), VNC (5900), WinRM (5985/5986), Telnet (23) |
-| **Directory** | LDAP (389), LDAPS (636), Kerberos (88) |
-| **File Sharing** | SMB (445), NFS (2049), NetBIOS (137-139) |
-| **Containers** | Docker (2375/2376), Kubernetes API (6443), etcd (2379/2380) |
-| **Messaging** | RabbitMQ (5672/15672), Kafka (9092), MQTT (1883) |
-
----
-
-## Output Structure
-
-```
-results/
-└── <session-id>/
-    ├── scan_results.json        # Raw findings
-    └── report.html              # Interactive HTML report
-
-screenshots/
-└── <session-id>/
-    └── *.png                    # Web application screenshots
-```
-
----
-
-## Secret Detection
-
-GitHub reconnaissance automatically scans for:
-
-| Type | Severity |
-|:----:|:--------:|
-| AWS Access Keys | `CRITICAL` |
-| Private Keys (RSA, PGP, SSH) | `CRITICAL` |
-| Database Connection Strings | `CRITICAL` |
-| Stripe Secret Keys | `CRITICAL` |
-| API Keys / Tokens | `HIGH` |
-| Hardcoded Passwords | `HIGH` |
-| JWT Secrets | `HIGH` |
-| Slack / Discord Tokens | `HIGH` |
-
----
-
-## Development
-
+**Scanning tools not found (nuclei / ffuf / nmap)**
 ```bash
-# Install dev dependencies
-pip install -e ".[dev]"
+make install-tools
+```
 
-# Run tests
-pytest
+**Forgot the admin password**
 
-# Lint
-ruff check attacktrace/
-black --check attacktrace/
+Reset it directly in the database:
+```bash
+make db-shell
+# Inside psql:
+UPDATE users SET hashed_password = '<new-bcrypt-hash>' WHERE email = 'admin';
 ```
 
 ---
