@@ -13,15 +13,15 @@
 # Rate limiting uses nginx's limit_req_zone.
 # Body size limit (50m) accommodates large scan target uploads.
 #
-# Replace `app.easd.io` with your actual domain.
+# Replace `app.attacktrace.io` with your actual domain.
 
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: easd-ingress
+  name: attacktrace-ingress
   namespace: attacktrace-platform
   labels:
-    app.kubernetes.io/name: easd-ingress
+    app.kubernetes.io/name: attacktrace-ingress
     app.kubernetes.io/part-of: attacktrace-platform
   annotations:
     # ── Ingress class ──────────────────────────────────────────────────────────
@@ -72,11 +72,11 @@ spec:
   ingressClassName: nginx
   tls:
     - hosts:
-        - app.easd.io
+        - app.attacktrace.io
       # cert-manager will create this Secret with the TLS certificate
-      secretName: easd-tls-cert
+      secretName: attacktrace-tls-cert
   rules:
-    - host: app.easd.io
+    - host: app.attacktrace.io
       http:
         paths:
           # API routes — must come before /* to avoid Next.js catching them

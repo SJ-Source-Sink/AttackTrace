@@ -20,8 +20,8 @@ metadata:
     app.kubernetes.io/part-of: attacktrace-platform
   annotations:
     # Trigger re-deploy when the ConfigMap changes (use Reloader or similar)
-    configmap.reloader.stakater.com/reload: "easd-config"
-    secret.reloader.stakater.com/reload: "easd-secrets"
+    configmap.reloader.stakater.com/reload: "attacktrace-config"
+    secret.reloader.stakater.com/reload: "attacktrace-secrets"
 spec:
   replicas: 2
   selector:
@@ -50,8 +50,8 @@ spec:
               app: backend
       containers:
         - name: backend
-          # Replace with your registry path, e.g. ghcr.io/yourorg/easd-backend:latest
-          image: easd-backend:latest
+          # Replace with your registry path, e.g. ghcr.io/yourorg/attacktrace-backend:latest
+          image: attacktrace-backend:latest
           imagePullPolicy: Always
           ports:
             - name: http
@@ -59,9 +59,9 @@ spec:
               protocol: TCP
           envFrom:
             - configMapRef:
-                name: easd-config
+                name: attacktrace-config
             - secretRef:
-                name: easd-secrets
+                name: attacktrace-secrets
           resources:
             requests:
               cpu: "250m"
@@ -104,12 +104,12 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            - name: easd-workspace
+            - name: attacktrace-workspace
               mountPath: /tmp/attacktrace_scans
       volumes:
         - name: tmp
           emptyDir: {}
-        - name: easd-workspace
+        - name: attacktrace-workspace
           emptyDir: {}
 
 ---

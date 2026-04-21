@@ -55,7 +55,7 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: easd-secrets
+                  name: attacktrace-secrets
                   key: POSTGRES_PASSWORD
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
@@ -78,7 +78,7 @@ spec:
               command:
                 - sh
                 - -c
-                - exec pg_isready -U easd -d easd -h 127.0.0.1
+                - exec pg_isready -U attacktrace -d attacktrace -h 127.0.0.1
             initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 5
@@ -88,7 +88,7 @@ spec:
               command:
                 - sh
                 - -c
-                - exec pg_isready -U easd -d easd -h 127.0.0.1
+                - exec pg_isready -U attacktrace -d attacktrace -h 127.0.0.1
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3

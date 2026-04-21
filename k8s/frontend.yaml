@@ -60,11 +60,7 @@ spec:
             # Internal API URL used by Next.js server-side rendering
             # Points to the backend ClusterIP service, not the public ingress
             - name: INTERNAL_API_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: easd-config
-                  key: DATABASE_URL
-                  optional: true
+              value: "http://backend:8000/api/v1"
           resources:
             requests:
               cpu: "100m"

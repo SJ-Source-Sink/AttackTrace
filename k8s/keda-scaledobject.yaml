@@ -86,5 +86,5 @@ spec:
 # spec:
 #   secretTargetRef:
 #     - parameter: password
-#       name: easd-secrets
+#       name: attacktrace-secrets
 #       key: REDIS_PASSWORD
