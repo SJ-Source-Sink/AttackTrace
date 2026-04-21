@@ -210,30 +210,48 @@ async def health_check() -> dict:
     return {"status": "ok", "version": settings.APP_VERSION}
 
 
-@app.get("/ready", tags=["Health"], summary="Readiness check (DB + Redis connectivity)")
+@app.get("/ready", tags=["Health"], summary="Readiness check (DB + Redis + Celery connectivity)")
 async def readiness_check() -> dict:
+    import asyncio as _asyncio
     from sqlalchemy import text
     from app.core.database import engine
     import redis.asyncio as aioredis
 
     checks: dict[str, Any] = {}
 
-    # DB check
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-        checks["database"] = "ok"
-    except Exception as e:
-        checks["database"] = f"error: {e}"
+    async def _check_db():
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+            checks["database"] = "ok"
+        except Exception as e:
+            checks["database"] = f"error: {e}"
 
-    # Redis check
-    try:
-        r = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=2)
-        await r.ping()
-        await r.aclose()
-        checks["redis"] = "ok"
-    except Exception as e:
-        checks["redis"] = f"error: {e}"
+    async def _check_redis():
+        try:
+            r = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=2)
+            await r.ping()
+            await r.aclose()
+            checks["redis"] = "ok"
+        except Exception as e:
+            checks["redis"] = f"error: {e}"
+
+    async def _check_celery():
+        # Check Celery broker reachability via an async Redis PING.
+        # A direct kombu inspect in a thread pool is unreliable in production
+        # (kombu borrows connections that may not be thread-safe in all setups).
+        # Broker reachable ≈ workers can receive tasks; deeper worker-alive checks
+        # belong in a separate metrics endpoint.
+        try:
+            broker_url = settings.CELERY_BROKER_URL
+            r = aioredis.from_url(broker_url, socket_connect_timeout=2)
+            await r.ping()
+            await r.aclose()
+            checks["celery_broker"] = "ok"
+        except Exception as e:
+            checks["celery_broker"] = f"error: {e}"
+
+    await _asyncio.gather(_check_db(), _check_redis(), _check_celery())
 
     all_ok = all(v == "ok" for v in checks.values())
     return JSONResponse(

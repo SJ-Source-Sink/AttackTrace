@@ -41,6 +41,7 @@ async def get_dashboard_stats(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     cache_key = f"dashboard:stats:{org_id}"
+    lock_key = f"dashboard:lock:{org_id}"
     redis = await _get_redis()
     if redis:
         try:
@@ -48,8 +49,17 @@ async def get_dashboard_stats(
             if cached:
                 await redis.aclose()
                 return json.loads(cached)
+            # Stampede protection: acquire a short-lived lock so only one
+            # concurrent request rebuilds the cache. Others serve stale or fall
+            # through to the DB (acceptable on very first cold start).
+            acquired = await redis.set(lock_key, "1", nx=True, ex=10)
+            if not acquired:
+                stale = await redis.get(cache_key)
+                if stale:
+                    await redis.aclose()
+                    return json.loads(stale)
         except Exception:
-            pass
+            redis = None
 
     # Total assets
     total_assets = (
@@ -146,6 +156,7 @@ async def get_dashboard_stats(
     if redis:
         try:
             await redis.set(cache_key, json.dumps(result), ex=_CACHE_TTL)
+            await redis.delete(lock_key)
             await redis.aclose()
         except Exception:
             pass

@@ -19,7 +19,7 @@ export default function DashboardPage() {
   const { data: stats, isLoading: statsLoading, refetch } = useQuery({
     queryKey: ["dashboard", "stats"],
     queryFn: () => dashboardApi.stats() as Promise<DashboardStats>,
-    staleTime: 60_000,
+    staleTime: 0,
   });
 
   const { data: scansData, isLoading: scansLoading } = useQuery({

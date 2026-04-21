@@ -2,10 +2,13 @@
 Celery application setup with Redis broker.
 """
 
+import json
 import os
+from datetime import datetime, timezone
 
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import task_failure
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -50,7 +53,30 @@ celery_app.conf.update(
 
 # Optionally switch to redbeat for HA beat scheduler
 # Set CELERY_BEAT_USE_REDBEAT=true in env to enable
-import os
 if os.getenv("CELERY_BEAT_USE_REDBEAT", "false").lower() == "true":
     celery_app.conf.beat_scheduler = "redbeat.schedulers:RedBeatScheduler"
     celery_app.conf.redbeat_redis_url = settings.REDIS_URL
+
+
+# --- Dead Letter Queue handler ---
+# When a scan task exhausts all retries, write a structured record to a capped
+# Redis list so operators can inspect and replay failed scans without losing context.
+
+@task_failure.connect(sender="app.workers.scan_worker.run_scan")
+def on_scan_task_failure(task_id, exception, args, kwargs, traceback, einfo, **kw):
+    """Push exhausted scan tasks to a Redis DLQ for operator inspection."""
+    try:
+        import redis as _redis_sync
+        r = _redis_sync.from_url(settings.REDIS_URL, decode_responses=True)
+        entry = json.dumps({
+            "task_id": task_id,
+            "scan_job_id": args[0] if args else kwargs.get("scan_job_id"),
+            "error": str(exception)[:500],
+            "failed_at": datetime.now(timezone.utc).isoformat(),
+        })
+        dlq_key = "scans:dlq"
+        r.rpush(dlq_key, entry)
+        r.ltrim(dlq_key, -1000, -1)  # cap at 1000 entries
+        r.close()
+    except Exception:
+        pass  # DLQ write failure must never crash the signal handler

@@ -1240,6 +1240,54 @@ async def list_audit_logs(
     return {"items": items, "total": total}
 
 
+@org_router.get(
+    "/ai-circuit-breaker",
+    summary="Get AI circuit breaker state",
+    description="Returns the current state of the Anthropic API circuit breaker. Admin/owner only.",
+)
+async def get_ai_circuit_breaker(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    await _require_org_role(db, current_user.id, org_id, [MemberRole.OWNER, MemberRole.ADMIN])
+    try:
+        import redis as _redis_sync
+        import time
+        from app.services.ai_service import _CB_KEY
+        r = _redis_sync.from_url(settings.REDIS_URL, socket_connect_timeout=1, decode_responses=True)
+        state = r.get(f"{_CB_KEY}:state") or "closed"
+        failures = int(r.get(f"{_CB_KEY}:failures") or 0)
+        last_fail = r.get(f"{_CB_KEY}:last_fail")
+        r.close()
+        return {
+            "state": state,
+            "consecutive_failures": failures,
+            "last_failure_at": last_fail,
+        }
+    except Exception as e:
+        return {"state": "unknown", "error": str(e)}
+
+
+@org_router.post(
+    "/ai-circuit-breaker/reset",
+    summary="Reset AI circuit breaker",
+    description="Force the circuit breaker back to closed state. Admin/owner only.",
+)
+async def reset_ai_circuit_breaker(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    await _require_org_role(db, current_user.id, org_id, [MemberRole.OWNER, MemberRole.ADMIN])
+    try:
+        from app.services.ai_service import _cb_record_success
+        _cb_record_success()
+        return {"status": "reset", "state": "closed"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # --- Helpers ---
 
 async def _get_org_or_404(db: AsyncSession, org_id: UUID, user_id: UUID) -> Organization:

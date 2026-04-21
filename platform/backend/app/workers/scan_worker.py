@@ -29,6 +29,16 @@ settings = get_settings()
 # Track running subprocess PIDs so they can be cleaned up on SIGTERM
 _running_pids: dict[str, int] = {}  # scan_id -> subprocess PID
 
+# Only retry scans on transient infrastructure errors.
+# Logic errors (invalid target, bad config, auth failure) are permanent — retrying wastes time.
+_TRANSIENT_SCAN_EXCEPTIONS = (
+    ConnectionError,
+    TimeoutError,
+    OSError,
+    ConnectionResetError,
+    BrokenPipeError,
+)
+
 
 def _handle_sigterm(signum, frame):
     """Gracefully kill any running scan subprocesses on worker shutdown."""
@@ -72,21 +82,34 @@ def _get_sync_redis():
 
 
 def _publish_event(r, scan_id: str, event_type: str, data: dict) -> None:
-    payload = json.dumps({
-        "event_type": event_type,
-        "scan_id": scan_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "data": data,
-    })
+    _TTL = 86_400  # 24 h
     try:
+        # Monotonic sequence number per scan — used by SSE clients for Last-Event-ID replay
+        seq_key = f"scan:{scan_id}:seq"
+        event_id = r.incr(seq_key)
+        r.expire(seq_key, _TTL)
+
+        payload = json.dumps({
+            "event_type": event_type,
+            "event_id": event_id,
+            "scan_id": scan_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "data": data,
+        })
+
         r.publish(f"scan:{scan_id}", payload)
-        # Persist structural events (not findings) in a replay list so clients that
-        # navigate away and come back can catch up without seeing a false restart.
-        # TTL 24 h — enough to cover any reasonable scan duration.
-        if event_type != "finding":
+
+        if event_type == "finding":
+            # Store last 100 findings for reconnect replay (capped list)
+            findings_key = f"scan:{scan_id}:findings"
+            r.rpush(findings_key, payload)
+            r.ltrim(findings_key, -100, -1)
+            r.expire(findings_key, _TTL)
+        else:
+            # Structural events replayed in full for state reconstruction
             replay_key = f"scan:{scan_id}:events"
             r.rpush(replay_key, payload)
-            r.expire(replay_key, 86_400)
+            r.expire(replay_key, _TTL)
     except Exception as e:
         logger.warning(f"Failed to publish event to Redis: {e}")
 
@@ -330,10 +353,11 @@ async def _combined_web_module(session, config, orchestrator):
 
 # --- Asset/Finding persistence ---
 
-def _compute_dedup_hash(org_id: UUID, title: str, affected_asset: str) -> str:
-    """Compute a stable dedup hash for a finding (org + title + asset)."""
-    key = f"{str(org_id)}|{title}|{affected_asset}"
-    return hashlib.sha256(key.encode()).hexdigest()[:32]
+def _compute_dedup_hash(org_id: UUID, title: str, affected_asset: str, cve_list: list[str] | None = None) -> str:
+    """Compute a stable 64-char dedup hash: sha256(org|title|asset|sorted_cves)."""
+    sorted_cves = "|".join(sorted(cve_list or []))
+    key = f"{str(org_id)}|{title}|{affected_asset}|{sorted_cves}"
+    return hashlib.sha256(key.encode()).hexdigest()
 
 
 def _load_suppression_rules(db_session, org_id: UUID) -> list:
@@ -450,7 +474,7 @@ def _persist_module_results_partial(
         # Persist findings (with dedup check)
         for f in getattr(module_result, "findings", []):
             sev_value = f.severity.value if hasattr(f.severity, "value") else f.severity
-            dedup_hash = _compute_dedup_hash(org_id, f.title, f.affected_asset)
+            dedup_hash = _compute_dedup_hash(org_id, f.title, f.affected_asset, getattr(f, "cve", None))
 
             # Check for existing finding with same dedup hash
             existing = db_session.execute(
@@ -609,7 +633,7 @@ def _persist_session_results(db_session, scan_job, attacktrace_session, org_id: 
 
     for f in attacktrace_session.findings:
         sev_value = f.severity.value
-        dedup_hash = _compute_dedup_hash(org_id, f.title, f.affected_asset)
+        dedup_hash = _compute_dedup_hash(org_id, f.title, f.affected_asset, getattr(f, "cve", None))
 
         # Idempotent: skip if already persisted (e.g., by partial persist callback)
         existing = db_session.execute(
@@ -741,6 +765,24 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
         if job.status in (DBScanStatus.CANCELLED, DBScanStatus.COMPLETED, DBScanStatus.FAILED):
             return {"status": job.status.value}
 
+        # Per-org concurrency limit: max 3 running scans per org at a time.
+        # If already at the limit, reschedule this task to run in 2 minutes.
+        _MAX_CONCURRENT_SCANS_PER_ORG = 3
+        running_count = db.execute(
+            sync_select(ScanJob).where(
+                ScanJob.org_id == job.org_id,
+                ScanJob.status == DBScanStatus.RUNNING,
+                ScanJob.id != job.id,
+            )
+        ).scalars().all()
+
+        if len(running_count) >= _MAX_CONCURRENT_SCANS_PER_ORG:
+            logger.info(
+                f"Org {job.org_id} already has {len(running_count)} running scans; "
+                f"rescheduling scan {scan_job_id} in 120s"
+            )
+            raise self.retry(countdown=120, exc=Exception("org_concurrency_limit"))
+
         job.status = DBScanStatus.RUNNING
         job.started_at = datetime.now(timezone.utc)
         db.commit()
@@ -844,6 +886,14 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
             job.findings_count = findings_count
             db.commit()
 
+            # Refresh scan metrics materialized view (best-effort, non-blocking)
+            try:
+                from sqlalchemy import text as sa_text
+                db.execute(sa_text("REFRESH MATERIALIZED VIEW CONCURRENTLY scan_metrics_mv"))
+                db.commit()
+            except Exception as _mv_err:
+                logger.warning(f"scan_metrics_mv refresh skipped: {_mv_err}")
+
             _publish_event(r, scan_job_id, "status_change", {
                 "status": "completed",
                 "findings_count": findings_count,
@@ -885,8 +935,14 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
             _publish_event(r, scan_job_id, "error", {"message": str(exc)[:500]})
             _publish_event(r, scan_job_id, "status_change", {"status": "failed"})
 
-            if self.request.retries < self.max_retries:
+            # Only auto-retry transient infrastructure errors.
+            # Logic errors (bad config, invalid target) are permanent — don't retry.
+            if self.request.retries < self.max_retries and isinstance(exc, _TRANSIENT_SCAN_EXCEPTIONS):
                 countdown = 60 * (2 ** self.request.retries)
+                logger.warning(
+                    f"Scan {scan_job_id} transient failure (attempt {self.request.retries + 1}/"
+                    f"{self.max_retries}), retrying in {countdown}s: {exc}"
+                )
                 raise self.retry(exc=exc, countdown=countdown)
 
             return {"status": "failed", "error": str(exc)[:500]}
@@ -901,8 +957,13 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
 
 # --- AI triage task ---
 
-@celery_app.task(name="app.workers.scan_worker.triage_scan_findings")
-def triage_scan_findings(scan_job_id: str) -> dict:
+@celery_app.task(
+    name="app.workers.scan_worker.triage_scan_findings",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=30,
+)
+def triage_scan_findings(self, scan_job_id: str) -> dict:
     """Background task: AI triage on findings from a completed scan."""
     if not settings.ANTHROPIC_API_KEY:
         return {"status": "skipped", "reason": "no_api_key"}
@@ -943,45 +1004,58 @@ def triage_scan_findings(scan_job_id: str) -> dict:
         if not findings:
             return {"status": "no_findings_to_triage"}
 
+        # Build asset context map (one DB query per finding was the old approach — avoid N+1)
+        asset_ids = list({f.asset_id for f in findings if f.asset_id})
+        asset_rows = db.execute(
+            sync_select(Asset).where(Asset.id.in_(asset_ids))
+        ).scalars().all() if asset_ids else []
+        asset_map = {
+            str(a.id): {"type": a.asset_type.value, "value": a.value, "risk_score": a.risk_score}
+            for a in asset_rows
+        }
+
+        # Batch triage with concurrency semaphore — single asyncio.run() for the entire
+        # batch replaces N separate asyncio.run() calls (one event loop per finding was wrong).
+        async def _batch_triage() -> list[tuple]:
+            sem = asyncio.Semaphore(5)  # max 5 concurrent AI calls
+
+            async def _one(finding):
+                async with sem:
+                    try:
+                        ctx = asset_map.get(str(finding.asset_id), {}) if finding.asset_id else {}
+                        result = await _import_and_triage(finding, ctx, org_context)
+                        return finding, result, None
+                    except Exception as e:
+                        return finding, None, e
+
+            return await asyncio.gather(*[_one(f) for f in findings])
+
+        triage_results = asyncio.run(_batch_triage())
+
         triaged = 0
         errors = 0
 
-        for finding in findings:
-            try:
-                asset_ctx = {}
-                if finding.asset_id:
-                    asset = db.get(Asset, finding.asset_id)
-                    if asset:
-                        asset_ctx = {
-                            "type": asset.asset_type.value,
-                            "value": asset.value,
-                            "risk_score": asset.risk_score,
-                        }
-
-                triage_result = asyncio.run(_import_and_triage(finding, asset_ctx, org_context))
-
-                ai_sev = triage_result.get("severity", finding.severity.value)
-                try:
-                    finding.ai_severity = FindingSeverity(ai_sev)
-                except ValueError:
-                    finding.ai_severity = finding.severity
-
-                finding.ai_reasoning = triage_result.get("reasoning", "")
-                finding.ai_confidence = float(triage_result.get("confidence", 0.0))
-                finding.ai_triaged_at = datetime.now(timezone.utc)
-
-                if triage_result.get("is_false_positive"):
-                    finding.false_positive = True
-
-                db.add(finding)
-                triaged += 1
-
-                if triaged % 10 == 0:
-                    db.commit()
-
-            except Exception as e:
-                logger.error(f"AI triage failed for finding {finding.id}: {e}")
+        for finding, result, err in triage_results:
+            if err is not None:
+                logger.error(f"AI triage failed for finding {finding.id}: {err}")
                 errors += 1
+                continue
+
+            ai_sev = result.get("severity", finding.severity.value)
+            try:
+                finding.ai_severity = FindingSeverity(ai_sev)
+            except ValueError:
+                finding.ai_severity = finding.severity
+
+            finding.ai_reasoning = result.get("reasoning", "")
+            finding.ai_confidence = float(result.get("confidence", 0.0))
+            finding.ai_triaged_at = datetime.now(timezone.utc)
+
+            if result.get("is_false_positive"):
+                finding.false_positive = True
+
+            db.add(finding)
+            triaged += 1
 
         db.commit()
         return {"status": "completed", "triaged": triaged, "errors": errors}

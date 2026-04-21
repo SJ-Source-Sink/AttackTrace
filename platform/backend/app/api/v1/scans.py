@@ -145,6 +145,15 @@ async def cancel_or_delete_scan_job(
         await db.delete(job)
         await db.commit()
 
+        # Invalidate dashboard cache so asset/finding counts update immediately
+        try:
+            import redis.asyncio as aioredis
+            _r = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=1)
+            await _r.delete(f"dashboard:stats:{org_id_str}")
+            await _r.aclose()
+        except Exception:
+            pass
+
         # Clean up scan files from disk (screenshots, AttackTrace sqlite db, reports)
         workspace = Path(settings.ATTACKTRACE_WORKSPACE_DIR)
 
@@ -233,8 +242,18 @@ async def scan_stream(
             detail={"error": {"code": "SCAN_NOT_FOUND", "message": "Scan not found"}},
         )
 
+    # Read Last-Event-ID header for efficient replay (browser sends this automatically
+    # on reconnect when EventSource events have id: fields)
+    raw_lei = request.headers.get("Last-Event-ID")
+    last_event_id: int | None = None
+    if raw_lei:
+        try:
+            last_event_id = int(raw_lei)
+        except (ValueError, TypeError):
+            pass
+
     return StreamingResponse(
-        stream_scan_events(str(scan_id)),
+        stream_scan_events(str(scan_id), request, last_event_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

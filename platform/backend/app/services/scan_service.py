@@ -3,13 +3,16 @@ Scan service: create, cancel, and query scan jobs.
 Manages the lifecycle from DB creation through Celery dispatch to SSE streaming.
 """
 
+import asyncio
 import json
 import math
+import time
 from datetime import datetime, timezone
 from typing import AsyncGenerator, Optional
 from uuid import UUID
 
 import redis.asyncio as aioredis
+from fastapi import Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +24,9 @@ from app.models.schemas.scan import ScanCreate, ScanResponse
 settings = get_settings()
 
 _redis: Optional[aioredis.Redis] = None
+
+_HEARTBEAT_INTERVAL = 15  # seconds between SSE comment pings
+_POLL_INTERVAL = 0.2       # seconds between get_message polls when idle
 
 
 def _get_redis() -> aioredis.Redis:
@@ -184,44 +190,102 @@ async def list_scans(
     }
 
 
-async def stream_scan_events(scan_id: str) -> AsyncGenerator[str, None]:
+def _is_terminal(payload: dict) -> bool:
+    event_type = payload.get("event_type")
+    if event_type in ("complete", "error"):
+        return True
+    if event_type == "status_change" and payload.get("data", {}).get("status") in ("cancelled", "failed"):
+        return True
+    return False
+
+
+def _sse_event(payload: dict) -> str:
+    """Format a payload dict as an SSE frame with an id: field."""
+    event_id = payload.get("event_id", "")
+    return f"id: {event_id}\ndata: {json.dumps(payload)}\n\n"
+
+
+async def stream_scan_events(
+    scan_id: str,
+    request: Request,
+    last_event_id: Optional[int] = None,
+) -> AsyncGenerator[str, None]:
     """
     Subscribe to the Redis pub/sub channel for a scan and yield SSE events.
-    Replays stored structural events first so reconnecting clients catch up
-    without seeing a false restart. Closes when 'complete' or 'error' is received.
+
+    Improvements over the original implementation:
+    - Heartbeat comment (`: ping`) every 15s prevents proxy/LB connection timeouts.
+    - Client-disconnect detection via request.is_disconnected() stops the generator
+      immediately, releasing the Redis pub/sub connection and CPU.
+    - id: field on every event enables native EventSource Last-Event-ID resumption.
+    - last_event_id: skip already-seen structural events on reconnect so the client
+      only receives events it missed, not the full replay from the start.
+    - Finding events from the last 100 are also replayed on reconnect so the live
+      feed is not empty after a brief navigation away.
     """
     r = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
     pubsub = r.pubsub()
     await pubsub.subscribe(f"scan:{scan_id}")
 
+    next_heartbeat = time.monotonic() + _HEARTBEAT_INTERVAL
+
     try:
-        # Send initial ping
+        # Connected acknowledgment (no id — not a replayable structural event)
         yield f"data: {json.dumps({'event_type': 'connected', 'scan_id': scan_id, 'timestamp': datetime.now(timezone.utc).isoformat(), 'data': {}})}\n\n"
 
-        # Replay stored structural events (status_change, module_start, module_complete).
-        # This lets clients that navigated away and came back catch up immediately.
+        # Replay structural events (status_change, module_start/complete, complete, error).
+        # Skip events with event_id <= last_event_id so reconnecting clients only
+        # receive events they actually missed.
         replay_key = f"scan:{scan_id}:events"
-        stored = await r.lrange(replay_key, 0, -1)
+        stored_structural = await r.lrange(replay_key, 0, -1)
         already_terminal = False
-        for raw in stored:
+
+        for raw in stored_structural:
             try:
                 payload = json.loads(raw)
             except (json.JSONDecodeError, TypeError):
                 continue
-            yield f"data: {json.dumps(payload)}\n\n"
-            event_type = payload.get("event_type")
-            if event_type in ("complete", "error"):
-                already_terminal = True
-                break
-            if event_type == "status_change" and payload.get("data", {}).get("status") == "cancelled":
+            eid = payload.get("event_id")
+            if last_event_id is not None and eid is not None and eid <= last_event_id:
+                continue  # client already saw this
+            yield _sse_event(payload)
+            if _is_terminal(payload):
                 already_terminal = True
                 break
 
         if already_terminal:
             return
 
-        async for message in pubsub.listen():
-            if message["type"] != "message":
+        # Replay last N findings so the live feed is populated on reconnect.
+        findings_key = f"scan:{scan_id}:findings"
+        stored_findings = await r.lrange(findings_key, 0, -1)
+        for raw in stored_findings:
+            try:
+                payload = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            eid = payload.get("event_id")
+            if last_event_id is not None and eid is not None and eid <= last_event_id:
+                continue
+            yield _sse_event(payload)
+
+        # Live event loop — poll get_message with short sleep so we can interleave
+        # disconnect checks and heartbeat without blocking the event loop.
+        while True:
+            # Disconnect detection: stop immediately if client navigated away
+            if await request.is_disconnected():
+                break
+
+            # Heartbeat: keeps the connection alive through proxies (Nginx, ALB)
+            # that would otherwise close idle streams after 60-75 s.
+            now = time.monotonic()
+            if now >= next_heartbeat:
+                yield ": ping\n\n"
+                next_heartbeat = now + _HEARTBEAT_INTERVAL
+
+            message = await pubsub.get_message(ignore_subscribe_messages=True)
+            if message is None:
+                await asyncio.sleep(_POLL_INTERVAL)
                 continue
 
             try:
@@ -229,16 +293,11 @@ async def stream_scan_events(scan_id: str) -> AsyncGenerator[str, None]:
             except (json.JSONDecodeError, TypeError):
                 continue
 
-            yield f"data: {json.dumps(payload)}\n\n"
+            yield _sse_event(payload)
 
-            # Terminal events — stop streaming
-            event_type = payload.get("event_type")
-            if event_type in ("complete", "error"):
+            if _is_terminal(payload):
                 break
-            if event_type == "status_change":
-                data = payload.get("data", {})
-                if data.get("status") == "cancelled":
-                    break
+
     finally:
         await pubsub.unsubscribe(f"scan:{scan_id}")
         await pubsub.close()

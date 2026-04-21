@@ -39,6 +39,43 @@ AsyncSessionLocal = async_sessionmaker(
     autocommit=False,
 )
 
+# Read replica engine — points to replica if DATABASE_READ_REPLICA_URL is set,
+# otherwise falls back to the primary so existing code works without any infra change.
+_replica_url = settings.DATABASE_READ_REPLICA_URL or settings.DATABASE_URL
+read_engine = create_async_engine(
+    _replica_url,
+    pool_size=settings.DATABASE_POOL_SIZE,
+    max_overflow=settings.DATABASE_MAX_OVERFLOW,
+    pool_timeout=settings.DATABASE_POOL_TIMEOUT,
+    pool_pre_ping=True,
+    echo=settings.DEBUG,
+    connect_args={
+        "server_settings": {
+            "statement_timeout": str(settings.DATABASE_STATEMENT_TIMEOUT_MS),
+            "default_transaction_read_only": "on",
+        }
+    },
+)
+
+ReadSessionLocal = async_sessionmaker(
+    bind=read_engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autoflush=False,
+    autocommit=False,
+)
+
+
+async def get_read_db() -> AsyncGenerator[AsyncSession, None]:
+    """Dependency that provides a read-only database session (replica-routed)."""
+    async with ReadSessionLocal() as session:
+        try:
+            yield session
+        except Exception:
+            raise
+        finally:
+            await session.close()
+
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """Dependency that provides a raw async database session."""
@@ -115,5 +152,6 @@ async def init_db() -> None:
 
 
 async def close_db() -> None:
-    """Dispose the engine connection pool."""
+    """Dispose the engine connection pools."""
     await engine.dispose()
+    await read_engine.dispose()

@@ -81,6 +81,7 @@ export function useDeleteScan() {
     mutationFn: (id: string) => scansApi.delete(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: scanKeys.lists() });
+      queryClient.invalidateQueries({ queryKey: ["dashboard", "stats"] });
       toast.success("Scan deleted");
     },
     onError: (error: Error) => {

@@ -7,6 +7,7 @@ and Jira ticket generation.
 import asyncio
 import json
 import logging
+import time
 from typing import Optional
 
 import anthropic
@@ -18,6 +19,58 @@ settings = get_settings()
 
 _AI_TIMEOUT = 60  # seconds per request
 _AI_MAX_RETRIES = 3
+
+# --- Redis-backed AI circuit breaker ---
+# Trips after 5 consecutive failures; auto-resets after 60s (half-open probe).
+# Prevents cascading timeouts when the Anthropic API is degraded.
+_CB_FAILURE_THRESHOLD = 5
+_CB_OPEN_TIMEOUT = 60  # seconds before attempting half-open probe
+_CB_KEY = "ai:circuit_breaker"
+
+
+def _cb_is_open() -> bool:
+    """Return True if the circuit is open and AI calls should be skipped."""
+    try:
+        import redis as _redis_sync
+        r = _redis_sync.from_url(settings.REDIS_URL, socket_connect_timeout=1, decode_responses=True)
+        state = r.get(f"{_CB_KEY}:state")
+        if state == "open":
+            last_fail = float(r.get(f"{_CB_KEY}:last_fail") or 0)
+            if time.time() - last_fail > _CB_OPEN_TIMEOUT:
+                r.set(f"{_CB_KEY}:state", "half_open")
+                r.close()
+                return False  # allow one probe request
+            r.close()
+            return True
+        r.close()
+    except Exception:
+        pass  # Redis unavailable → treat as closed (fail open)
+    return False
+
+
+def _cb_record_success() -> None:
+    try:
+        import redis as _redis_sync
+        r = _redis_sync.from_url(settings.REDIS_URL, socket_connect_timeout=1, decode_responses=True)
+        r.delete(f"{_CB_KEY}:failures", f"{_CB_KEY}:state", f"{_CB_KEY}:last_fail")
+        r.close()
+    except Exception:
+        pass
+
+
+def _cb_record_failure() -> None:
+    try:
+        import redis as _redis_sync
+        r = _redis_sync.from_url(settings.REDIS_URL, socket_connect_timeout=1, decode_responses=True)
+        failures = int(r.incr(f"{_CB_KEY}:failures") or 0)
+        r.set(f"{_CB_KEY}:last_fail", time.time())
+        r.expire(f"{_CB_KEY}:failures", 300)  # reset counter after 5 min inactivity
+        if failures >= _CB_FAILURE_THRESHOLD:
+            r.set(f"{_CB_KEY}:state", "open")
+            logger.warning(f"AI circuit breaker OPENED after {failures} consecutive failures")
+        r.close()
+    except Exception:
+        pass
 
 
 def _get_client() -> anthropic.Anthropic:
@@ -31,25 +84,33 @@ def _get_client() -> anthropic.Anthropic:
 
 
 async def _call_with_retry(client: anthropic.Anthropic, **kwargs) -> anthropic.types.Message:
-    """Call Claude with exponential backoff on transient errors."""
+    """Call Claude with exponential backoff on transient errors and circuit breaker protection."""
+    if _cb_is_open():
+        raise RuntimeError("AI circuit breaker is open — Anthropic API is currently degraded")
+
     last_exc: Exception = RuntimeError("No attempts made")
     for attempt in range(_AI_MAX_RETRIES):
         try:
-            return client.messages.create(**kwargs)
+            result = client.messages.create(**kwargs)
+            _cb_record_success()
+            return result
         except anthropic.RateLimitError as exc:
             wait = 2 ** attempt
             logger.warning(f"AI rate limited, retrying in {wait}s (attempt {attempt + 1})")
+            _cb_record_failure()
             await asyncio.sleep(wait)
             last_exc = exc
         except (anthropic.APITimeoutError, anthropic.APIConnectionError) as exc:
             wait = 2 ** attempt
             logger.warning(f"AI transient error: {exc}, retrying in {wait}s (attempt {attempt + 1})")
+            _cb_record_failure()
             await asyncio.sleep(wait)
             last_exc = exc
         except anthropic.APIStatusError as exc:
             if exc.status_code >= 500:
                 wait = 2 ** attempt
                 logger.warning(f"AI server error {exc.status_code}, retrying in {wait}s")
+                _cb_record_failure()
                 await asyncio.sleep(wait)
                 last_exc = exc
             else:

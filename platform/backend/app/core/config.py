@@ -34,6 +34,9 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://attacktrace:attacktrace@localhost:5432/attacktrace"
+    # Set DATABASE_READ_REPLICA_URL to a read replica DSN to split read traffic.
+    # Defaults to the primary so no infra change is required right now.
+    DATABASE_READ_REPLICA_URL: Optional[str] = None
     DATABASE_POOL_SIZE: int = 20
     DATABASE_MAX_OVERFLOW: int = 40
     DATABASE_POOL_TIMEOUT: int = 30
