@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     # AttackTrace CLI
     ATTACKTRACE_WORKSPACE_DIR: str = str(Path.home() / ".attacktrace" / "scans")
 
+    # MSRA — Mobile Security Review Assistant sidecar
+    MSRA_URL: str = "http://localhost:5001"
+
     # Pagination defaults
     DEFAULT_PAGE_SIZE: int = 50
     MAX_PAGE_SIZE: int = 200

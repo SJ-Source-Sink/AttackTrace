@@ -24,6 +24,8 @@ import {
   Map,
   ScrollText,
   FlaskConical,
+  Smartphone,
+  BookOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -84,6 +86,19 @@ const toolItems: NavItem[] = [
     label: "Test Case Generator",
     href: "/test-generator",
     icon: FlaskConical,
+  },
+];
+
+const mobileItems: NavItem[] = [
+  {
+    label: "Mobile Scanner",
+    href: "/mobile",
+    icon: Smartphone,
+  },
+  {
+    label: "Pattern Library",
+    href: "/mobile/patterns",
+    icon: BookOpen,
   },
 ];
 
@@ -222,6 +237,19 @@ export function Sidebar({ className }: SidebarProps) {
           </div>
           <div className="space-y-0.5">
             {toolItems.map((item) => (
+              <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
+            ))}
+          </div>
+        </div>
+
+        <div className="mb-4">
+          <div className="px-3 pb-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+              Mobile Security
+            </p>
+          </div>
+          <div className="space-y-0.5">
+            {mobileItems.map((item) => (
               <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
             ))}
           </div>

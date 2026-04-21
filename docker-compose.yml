@@ -24,6 +24,10 @@ volumes:
     driver: local
   redis-data:
     driver: local
+  msra-data:
+    driver: local
+  msra-src:
+    driver: local
 
 services:
 
@@ -90,6 +94,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+      MSRA_URL: http://msra:5001
     ports:
       - "8000:8000"
     # Mount source for hot-reload in development; uvicorn --reload watches /app
@@ -183,6 +188,41 @@ services:
       - backend
     networks:
       - attacktrace-network
+
+  # ─── MSRA — Mobile Security Review Assistant ────────────────────────────────
+
+  msra:
+    image: python:3.11-slim
+    restart: unless-stopped
+    working_dir: /msra
+    # Clone MSRA on first start, install deps, then launch the Flask server
+    command: >
+      bash -c "
+        if [ ! -f server.py ]; then
+          apt-get update -qq && apt-get install -y -qq git &&
+          git clone --depth=1 https://github.com/BaymaxPop23/MSRA.git . ;
+        fi &&
+        pip install -q -r requirements.txt &&
+        python server.py
+      "
+    environment:
+      FLASK_ENV: production
+      PORT: "5001"
+      # Pass through Anthropic key for MSRA AI triage if configured
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+    ports:
+      - "5001:5001"
+    volumes:
+      - msra-data:/msra/data
+      - msra-src:/msra
+    networks:
+      - attacktrace-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5001/api/dashboard/stats || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   # ─── Celery Monitoring ───────────────────────────────────────────────────────
 
