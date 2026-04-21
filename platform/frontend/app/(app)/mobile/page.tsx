@@ -4,8 +4,7 @@ import React, { useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
   Smartphone, Upload, Trash2, Eye, RefreshCw,
-  CheckCircle2, Clock, XCircle,
-  Shield,
+  CheckCircle2, Clock, XCircle, Shield,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -22,55 +21,50 @@ const PLATFORM_COLORS: Record<string, string> = {
   android: "bg-emerald-500/10 text-emerald-400 border-emerald-500/30",
   ios:     "bg-blue-500/10 text-blue-400 border-blue-500/30",
   jar:     "bg-amber-500/10 text-amber-400 border-amber-500/30",
+  exe:     "bg-violet-500/10 text-violet-400 border-violet-500/30",
   windows: "bg-violet-500/10 text-violet-400 border-violet-500/30",
 };
 
-const SEV_COLORS: Record<string, string> = {
-  CRITICAL: "bg-red-500/10 text-red-400 border-red-500/30",
-  HIGH:     "bg-orange-500/10 text-orange-400 border-orange-500/30",
-  MEDIUM:   "bg-yellow-500/10 text-yellow-400 border-yellow-500/30",
-  LOW:      "bg-blue-500/10 text-blue-400 border-blue-500/30",
-  INFO:     "bg-zinc-500/10 text-zinc-400 border-zinc-500/30",
-};
-
 const SEV_DOT: Record<string, string> = {
-  CRITICAL: "bg-red-500",
-  HIGH:     "bg-orange-500",
-  MEDIUM:   "bg-yellow-500",
-  LOW:      "bg-blue-400",
-  INFO:     "bg-zinc-500",
+  Critical: "bg-red-500",
+  High:     "bg-orange-500",
+  Medium:   "bg-yellow-500",
+  Low:      "bg-blue-400",
+  Info:     "bg-zinc-500",
 };
 
+// MSRA scan object from /api/dashboard/stats → recent_scans
 interface MobileScan {
-  id: string;
-  file_name: string;
+  scan_id: string;
+  apk: string;
   platform: string;
   status: string;
   risk_score: number;
-  created_at: string;
-  finding_counts?: {
-    CRITICAL?: number;
-    HIGH?: number;
-    MEDIUM?: number;
-    LOW?: number;
-    INFO?: number;
-  };
+  created_at: number; // unix timestamp
+  severity_counts?: Record<string, number>;
+  total_findings?: number;
+}
+
+interface StatsResponse {
+  total_scans: number;
+  total_findings: number;
+  recent_scans: MobileScan[];
 }
 
 function StatusBadge({ status }: { status: string }) {
-  if (status === "completed")
+  if (status === "completed" || status === "done")
     return (
       <span className="inline-flex items-center gap-1.5 text-xs text-emerald-400">
         <CheckCircle2 className="h-3.5 w-3.5" /> Completed
       </span>
     );
-  if (status === "scanning" || status === "processing")
+  if (status === "scanning" || status === "processing" || status === "pending")
     return (
       <span className="inline-flex items-center gap-1.5 text-xs text-blue-400">
         <Clock className="h-3.5 w-3.5 animate-pulse" /> Scanning
       </span>
     );
-  if (status === "failed")
+  if (status === "failed" || status === "error")
     return (
       <span className="inline-flex items-center gap-1.5 text-xs text-red-400">
         <XCircle className="h-3.5 w-3.5" /> Failed
@@ -91,9 +85,9 @@ function RiskBar({ score }: { score: number }) {
   return (
     <div className="flex items-center gap-2">
       <div className="w-16 h-1.5 rounded-full bg-zinc-800">
-        <div className={cn("h-full rounded-full", color)} style={{ width: `${Math.min(score, 100)}%` }} />
+        <div className={cn("h-full rounded-full", color)} style={{ width: `${Math.min(score ?? 0, 100)}%` }} />
       </div>
-      <span className="text-xs text-zinc-400">{score}</span>
+      <span className="text-xs text-zinc-400">{Math.round(score ?? 0)}</span>
     </div>
   );
 }
@@ -148,7 +142,7 @@ export default function MobileScannerPage() {
   const queryClient = useQueryClient();
   const [uploading, setUploading] = useState(false);
 
-  const { data: statsData, isLoading, refetch } = useQuery({
+  const { data: statsData, isLoading, refetch } = useQuery<StatsResponse>({
     queryKey: ["mobile", "stats"],
     queryFn: async () => {
       const res = await fetchWithAuth(`${API_BASE}/mobile/stats`);
@@ -156,6 +150,7 @@ export default function MobileScannerPage() {
       return res.json();
     },
     staleTime: 0,
+    refetchInterval: 5000, // poll so in-progress scans update
   });
 
   const deleteMutation = useMutation({
@@ -184,7 +179,8 @@ export default function MobileScannerPage() {
         if (!res.ok) throw new Error(data?.error?.message ?? "Upload failed");
         toast.success(`Scan started for ${file.name}`);
         queryClient.invalidateQueries({ queryKey: ["mobile", "stats"] });
-        if (data.scan_id) router.push(`/mobile/${data.scan_id}`);
+        const scanId = data.scan_id ?? data.id;
+        if (scanId) router.push(`/mobile/${scanId}`);
       } catch (err: unknown) {
         toast.error(err instanceof Error ? err.message : "Upload failed");
       } finally {
@@ -194,10 +190,10 @@ export default function MobileScannerPage() {
     [queryClient, router],
   );
 
-  const scans: MobileScan[] = statsData?.scans ?? [];
+  const scans: MobileScan[] = statsData?.recent_scans ?? [];
   const totalScans = statsData?.total_scans ?? 0;
-  const completedScans = statsData?.completed_scans ?? 0;
   const totalFindings = statsData?.total_findings ?? 0;
+  const completedScans = scans.filter((s) => s.status === "completed").length;
 
   return (
     <div className="flex flex-col gap-6 p-6">
@@ -276,17 +272,19 @@ export default function MobileScannerPage() {
           ) : (
             <div className="divide-y divide-zinc-800">
               {scans.map((scan) => {
-                const counts = scan.finding_counts ?? {};
+                const counts = scan.severity_counts ?? {};
                 const platform = scan.platform?.toLowerCase() ?? "android";
+                // Display just the short app name before the first underscore or full apk name
+                const displayName = scan.apk?.split("_")[0] ?? scan.apk ?? scan.scan_id;
                 return (
                   <div
-                    key={scan.id}
+                    key={scan.scan_id}
                     className="flex items-center gap-4 px-4 py-3 hover:bg-zinc-800/50 transition-colors"
                   >
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-0.5">
-                        <span className="text-sm font-medium text-zinc-200 truncate">
-                          {scan.file_name}
+                        <span className="text-sm font-medium text-zinc-200 truncate max-w-sm" title={scan.apk}>
+                          {displayName}
                         </span>
                         <Badge
                           variant="outline"
@@ -295,18 +293,20 @@ export default function MobileScannerPage() {
                           {platform}
                         </Badge>
                       </div>
-                      <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-3 flex-wrap">
                         <StatusBadge status={scan.status} />
-                        <span className="text-xs text-zinc-600">
-                          {new Date(scan.created_at).toLocaleDateString()}
-                        </span>
+                        {scan.created_at && (
+                          <span className="text-xs text-zinc-600">
+                            {new Date(scan.created_at * 1000).toLocaleDateString()}
+                          </span>
+                        )}
                         {Object.entries(counts)
                           .filter(([, v]) => v && v > 0)
                           .map(([sev, count]) => (
                             <span key={sev} className="flex items-center gap-1">
                               <span className={cn("h-1.5 w-1.5 rounded-full", SEV_DOT[sev] ?? "bg-zinc-500")} />
                               <span className="text-xs text-zinc-500">
-                                {count} {sev.toLowerCase()}
+                                {count} {sev}
                               </span>
                             </span>
                           ))}
@@ -319,7 +319,7 @@ export default function MobileScannerPage() {
                           variant="ghost"
                           size="icon"
                           className="h-7 w-7 text-zinc-500 hover:text-zinc-100"
-                          onClick={() => router.push(`/mobile/${scan.id}`)}
+                          onClick={() => router.push(`/mobile/${scan.scan_id}`)}
                         >
                           <Eye className="h-3.5 w-3.5" />
                         </Button>
@@ -328,7 +328,7 @@ export default function MobileScannerPage() {
                           size="icon"
                           className="h-7 w-7 text-zinc-500 hover:text-red-400"
                           onClick={() => {
-                            if (confirm("Delete this scan?")) deleteMutation.mutate(scan.id);
+                            if (confirm("Delete this scan?")) deleteMutation.mutate(scan.scan_id);
                           }}
                         >
                           <Trash2 className="h-3.5 w-3.5" />

@@ -21,19 +21,19 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
 
 const SEV_COLORS: Record<string, string> = {
-  CRITICAL: "bg-red-500/10 text-red-400 border-red-500/30",
-  HIGH:     "bg-orange-500/10 text-orange-400 border-orange-500/30",
-  MEDIUM:   "bg-yellow-500/10 text-yellow-400 border-yellow-500/30",
-  LOW:      "bg-blue-500/10 text-blue-400 border-blue-500/30",
-  INFO:     "bg-zinc-500/10 text-zinc-400 border-zinc-500/30",
+  Critical: "bg-red-500/10 text-red-400 border-red-500/30",
+  High:     "bg-orange-500/10 text-orange-400 border-orange-500/30",
+  Medium:   "bg-yellow-500/10 text-yellow-400 border-yellow-500/30",
+  Low:      "bg-blue-500/10 text-blue-400 border-blue-500/30",
+  Info:     "bg-zinc-500/10 text-zinc-400 border-zinc-500/30",
 };
 
 const SEV_ROW_ACCENT: Record<string, string> = {
-  CRITICAL: "border-l-red-500",
-  HIGH:     "border-l-orange-500",
-  MEDIUM:   "border-l-yellow-500",
-  LOW:      "border-l-blue-400",
-  INFO:     "border-l-zinc-600",
+  Critical: "border-l-red-500",
+  High:     "border-l-orange-500",
+  Medium:   "border-l-yellow-500",
+  Low:      "border-l-blue-400",
+  Info:     "border-l-zinc-600",
 };
 
 const TRIAGE_COLORS: Record<string, string> = {
@@ -47,37 +47,31 @@ interface Finding {
   title: string;
   severity: string;
   category: string;
-  platform: string;
   description: string;
-  file_path?: string;
-  line_number?: number;
-  code_snippet?: string;
-  cwe?: string;
-  owasp?: string;
+  cwe?: string[];
   triage_status?: string;
-  poc_code?: string;
+  poc?: string;
+  evidence?: string;
+  remediation?: string;
+  references?: string[];
 }
 
-interface ScanDetail {
-  id: string;
-  file_name: string;
-  platform: string;
-  status: string;
-  risk_score: number;
-  created_at: string;
-  app_name?: string;
-  package_name?: string;
-  version?: string;
+// Response shape from /api/v1/mobile/scans/{id}/findings
+interface FindingsResponse {
+  apk: string;
+  package: string;
+  scan_time: string;
+  total_findings: number;
+  severity_counts: Record<string, number>;
   findings: Finding[];
-  finding_counts?: Record<string, number>;
 }
 
 function StatusBadge({ status }: { status: string }) {
-  if (status === "completed")
+  if (status === "completed" || status === "done")
     return <span className="inline-flex items-center gap-1.5 text-xs text-emerald-400"><CheckCircle2 className="h-3 w-3" /> Completed</span>;
-  if (status === "scanning" || status === "processing")
+  if (status === "scanning" || status === "processing" || status === "pending")
     return <span className="inline-flex items-center gap-1.5 text-xs text-blue-400"><Clock className="h-3 w-3 animate-pulse" /> Scanning</span>;
-  if (status === "failed")
+  if (status === "failed" || status === "error")
     return <span className="inline-flex items-center gap-1.5 text-xs text-red-400"><XCircle className="h-3 w-3" /> Failed</span>;
   return <span className="inline-flex items-center gap-1.5 text-xs text-zinc-400"><Clock className="h-3 w-3" /> {status}</span>;
 }
@@ -85,14 +79,18 @@ function StatusBadge({ status }: { status: string }) {
 function FindingRow({ finding, scanId }: { finding: Finding; scanId: string }) {
   const [expanded, setExpanded] = useState(false);
   const [loadingPoc, setLoadingPoc] = useState(false);
-  const [poc, setPoc] = useState<string | null>(finding.poc_code ?? null);
+  const [poc, setPoc] = useState<string | null>(finding.poc ?? null);
   const queryClient = useQueryClient();
 
   const triageMutation = useMutation({
     mutationFn: async (status: string) => {
       const res = await fetchWithAuth(
         `${API_BASE}/mobile/scans/${scanId}/findings/${finding.id}/triage`,
-        { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ triage_status: status }) },
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ triage_status: status }),
+        },
       );
       if (!res.ok) throw new Error("Triage failed");
       return res.json();
@@ -114,7 +112,7 @@ function FindingRow({ finding, scanId }: { finding: Finding; scanId: string }) {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error?.message ?? "PoC generation failed");
-      setPoc(data.poc_code ?? data.code ?? "");
+      setPoc(data.poc_code ?? data.code ?? data.poc ?? "");
       toast.success("PoC generated");
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "PoC generation failed");
@@ -123,10 +121,11 @@ function FindingRow({ finding, scanId }: { finding: Finding; scanId: string }) {
     }
   };
 
-  const sev = finding.severity?.toUpperCase() ?? "INFO";
+  const sev = finding.severity ?? "Info";
+  const cweList = Array.isArray(finding.cwe) ? finding.cwe.join(", ") : finding.cwe ?? "";
 
   return (
-    <div className={cn("border-l-2 border-zinc-800 hover:bg-zinc-800/30 transition-colors", SEV_ROW_ACCENT[sev])}>
+    <div className={cn("border-l-2 hover:bg-zinc-800/30 transition-colors", SEV_ROW_ACCENT[sev] ?? "border-l-zinc-600")}>
       <button
         className="w-full flex items-center gap-3 px-4 py-3 text-left"
         onClick={() => setExpanded(!expanded)}
@@ -136,47 +135,51 @@ function FindingRow({ finding, scanId }: { finding: Finding; scanId: string }) {
         ) : (
           <ChevronRight className="h-3.5 w-3.5 text-zinc-500 shrink-0" />
         )}
-        <Badge variant="outline" className={cn("text-xs font-medium w-20 justify-center", SEV_COLORS[sev])}>
+        <Badge variant="outline" className={cn("text-xs font-medium w-20 justify-center shrink-0", SEV_COLORS[sev] ?? SEV_COLORS.Info)}>
           {sev}
         </Badge>
         <span className="flex-1 text-sm text-zinc-200 font-medium truncate">{finding.title}</span>
-        <span className="text-xs text-zinc-500">{finding.category}</span>
+        <span className="text-xs text-zinc-500 shrink-0">{finding.category}</span>
         {finding.triage_status && (
-          <Badge variant="outline" className={cn("text-xs ml-2", TRIAGE_COLORS[finding.triage_status])}>
-            {finding.triage_status.replace("_", " ")}
+          <Badge variant="outline" className={cn("text-xs ml-2 shrink-0", TRIAGE_COLORS[finding.triage_status] ?? "")}>
+            {finding.triage_status.replace(/_/g, " ")}
           </Badge>
         )}
-        {finding.cwe && (
-          <span className="text-xs text-zinc-600 ml-2">{finding.cwe}</span>
+        {cweList && (
+          <span className="text-xs text-zinc-600 ml-2 shrink-0 hidden lg:block">{cweList}</span>
         )}
       </button>
 
       {expanded && (
-        <div className="px-4 pb-4 ml-6 space-y-3">
-          <p className="text-sm text-zinc-400">{finding.description}</p>
+        <div className="px-4 pb-4 ml-6 space-y-3 border-t border-zinc-800/50">
+          <p className="text-sm text-zinc-400 pt-3">{finding.description}</p>
 
-          {finding.file_path && (
-            <div className="flex items-center gap-2 text-xs text-zinc-500">
-              <Code2 className="h-3.5 w-3.5" />
-              <span className="font-mono">{finding.file_path}</span>
-              {finding.line_number && <span>:{finding.line_number}</span>}
+          {finding.evidence && (
+            <div>
+              <p className="text-xs font-medium text-zinc-500 mb-1 flex items-center gap-1.5">
+                <Code2 className="h-3.5 w-3.5" /> Evidence
+              </p>
+              <pre className="bg-zinc-950 rounded-md p-3 text-xs text-zinc-300 font-mono overflow-x-auto border border-zinc-800 whitespace-pre-wrap">
+                {finding.evidence}
+              </pre>
             </div>
-          )}
-
-          {finding.code_snippet && (
-            <pre className="bg-zinc-950 rounded-md p-3 text-xs text-zinc-300 font-mono overflow-x-auto border border-zinc-800">
-              {finding.code_snippet}
-            </pre>
           )}
 
           {poc && (
             <div>
               <p className="text-xs font-medium text-zinc-400 mb-1 flex items-center gap-1.5">
-                <Zap className="h-3.5 w-3.5 text-yellow-400" /> AI-Generated PoC
+                <Zap className="h-3.5 w-3.5 text-yellow-400" /> Proof of Concept
               </p>
-              <pre className="bg-zinc-950 rounded-md p-3 text-xs text-yellow-200 font-mono overflow-x-auto border border-yellow-900/30">
+              <pre className="bg-zinc-950 rounded-md p-3 text-xs text-yellow-200 font-mono overflow-x-auto border border-yellow-900/30 whitespace-pre-wrap">
                 {poc}
               </pre>
+            </div>
+          )}
+
+          {finding.remediation && (
+            <div className="bg-emerald-900/10 border border-emerald-900/30 rounded-md p-3">
+              <p className="text-xs font-medium text-emerald-400 mb-1">Remediation</p>
+              <p className="text-xs text-zinc-400">{finding.remediation}</p>
             </div>
           )}
 
@@ -194,7 +197,7 @@ function FindingRow({ finding, scanId }: { finding: Finding; scanId: string }) {
                     className="text-xs text-zinc-300 hover:text-zinc-100 cursor-pointer"
                     onClick={() => triageMutation.mutate(s)}
                   >
-                    {s.replace("_", " ")}
+                    {s.replace(/_/g, " ")}
                   </DropdownMenuItem>
                 ))}
               </DropdownMenuContent>
@@ -226,16 +229,16 @@ export default function MobileScanDetailPage() {
   const router = useRouter();
   const [sevFilter, setSevFilter] = useState<string | null>(null);
 
-  const { data: scan, isLoading, refetch } = useQuery<ScanDetail>({
+  const { data: scanData, isLoading, refetch } = useQuery<FindingsResponse>({
     queryKey: ["mobile", "scan", id],
     queryFn: async () => {
       const res = await fetchWithAuth(`${API_BASE}/mobile/scans/${id}/findings`);
       if (!res.ok) throw new Error("Failed to load scan");
       return res.json();
     },
-    refetchInterval: (data) => {
-      const status = (data as ScanDetail | undefined)?.status;
-      return status === "scanning" || status === "processing" ? 3000 : false;
+    refetchInterval: (query) => {
+      // We don't have status in the findings response, so stop polling once findings are loaded
+      return query.state.data ? false : 3000;
     },
   });
 
@@ -250,16 +253,21 @@ export default function MobileScanDetailPage() {
       a.download = `scan_${id}.${fmt}`;
       a.click();
       URL.revokeObjectURL(url);
+      toast.success(`Exported as ${fmt.toUpperCase()}`);
     } catch {
       toast.error("Export failed");
     }
   };
 
-  const findings = scan?.findings ?? [];
-  const filtered = sevFilter ? findings.filter((f) => f.severity?.toUpperCase() === sevFilter) : findings;
-  const counts = scan?.finding_counts ?? {};
+  const findings = scanData?.findings ?? [];
+  const SEVS = ["Critical", "High", "Medium", "Low", "Info"];
+  const filtered = sevFilter ? findings.filter((f) => f.severity === sevFilter) : findings;
+  const counts = scanData?.severity_counts ?? {};
 
-  const SEVS = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"];
+  // Short display name from the APK filename
+  const displayName = scanData?.apk
+    ? scanData.apk.split("_").slice(0, 2).join("_") || scanData.apk
+    : id;
 
   return (
     <div className="flex flex-col gap-6 p-6">
@@ -277,13 +285,15 @@ export default function MobileScanDetailPage() {
           <div>
             <div className="flex items-center gap-2">
               <Smartphone className="h-5 w-5 text-blue-400" />
-              <h1 className="text-lg font-semibold text-zinc-100 truncate max-w-lg">
-                {scan?.file_name ?? "Loading…"}
+              <h1 className="text-lg font-semibold text-zinc-100 truncate max-w-lg" title={scanData?.apk}>
+                {displayName}
               </h1>
-              {scan && <StatusBadge status={scan.status} />}
             </div>
-            {scan?.app_name && (
-              <p className="text-xs text-zinc-500 mt-0.5 ml-7">{scan.app_name} · {scan.package_name}</p>
+            {scanData?.package && (
+              <p className="text-xs text-zinc-500 mt-0.5 ml-7">
+                {scanData.package}
+                {scanData.scan_time && ` · ${scanData.scan_time}`}
+              </p>
             )}
           </div>
         </div>
@@ -307,7 +317,7 @@ export default function MobileScanDetailPage() {
               {["pdf", "csv", "sarif", "json"].map((fmt) => (
                 <DropdownMenuItem
                   key={fmt}
-                  className="text-xs text-zinc-300 hover:text-zinc-100 cursor-pointer uppercase"
+                  className="text-xs text-zinc-300 hover:text-zinc-100 cursor-pointer"
                   onClick={() => handleExport(fmt)}
                 >
                   {fmt.toUpperCase()}
@@ -319,7 +329,7 @@ export default function MobileScanDetailPage() {
       </div>
 
       {/* Severity summary cards */}
-      {scan && (
+      {scanData && (
         <div className="grid grid-cols-5 gap-3">
           {SEVS.map((sev) => {
             const count = counts[sev] ?? 0;
@@ -331,7 +341,7 @@ export default function MobileScanDetailPage() {
                 className={cn(
                   "rounded-lg border p-3 text-left transition-all",
                   active
-                    ? cn("border-opacity-60", SEV_COLORS[sev])
+                    ? SEV_COLORS[sev]
                     : "bg-zinc-900 border-zinc-800 hover:border-zinc-700",
                 )}
               >
@@ -343,14 +353,14 @@ export default function MobileScanDetailPage() {
         </div>
       )}
 
-      {/* Findings */}
+      {/* Findings table */}
       <Card className="bg-zinc-900 border-zinc-800">
         <CardHeader className="pb-3">
           <CardTitle className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
             <Shield className="h-4 w-4 text-zinc-400" />
             Findings
             {sevFilter && (
-              <Badge variant="outline" className={cn("text-xs ml-1", SEV_COLORS[sevFilter])}>
+              <Badge variant="outline" className={cn("text-xs ml-1", SEV_COLORS[sevFilter] ?? "")}>
                 {sevFilter}
               </Badge>
             )}
@@ -364,7 +374,7 @@ export default function MobileScanDetailPage() {
             <div className="p-12 text-center">
               <CheckCircle2 className="h-10 w-10 text-emerald-500/50 mx-auto mb-3" />
               <p className="text-sm text-zinc-500">
-                {sevFilter ? `No ${sevFilter} findings` : "No findings"}
+                {sevFilter ? `No ${sevFilter} findings` : "No findings yet — scan may still be in progress"}
               </p>
             </div>
           ) : (

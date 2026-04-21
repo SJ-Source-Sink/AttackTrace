@@ -3,11 +3,11 @@
 import React, { useState } from "react";
 import {
   BookOpen, Plus, Pencil, Trash2, ToggleLeft, ToggleRight,
-  RefreshCw, Search, ChevronRight, X,
+  RefreshCw, Search, ChevronDown, ChevronRight, X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/shared/page-header";
@@ -22,43 +22,43 @@ const PLATFORM_COLORS: Record<string, string> = {
   android: "bg-emerald-500/10 text-emerald-400 border-emerald-500/30",
   ios:     "bg-blue-500/10 text-blue-400 border-blue-500/30",
   jar:     "bg-amber-500/10 text-amber-400 border-amber-500/30",
-  windows: "bg-violet-500/10 text-violet-400 border-violet-500/30",
+  exe:     "bg-violet-500/10 text-violet-400 border-violet-500/30",
   all:     "bg-zinc-500/10 text-zinc-400 border-zinc-500/30",
 };
 
 const SEV_COLORS: Record<string, string> = {
-  CRITICAL: "bg-red-500/10 text-red-400 border-red-500/30",
-  HIGH:     "bg-orange-500/10 text-orange-400 border-orange-500/30",
-  MEDIUM:   "bg-yellow-500/10 text-yellow-400 border-yellow-500/30",
-  LOW:      "bg-blue-500/10 text-blue-400 border-blue-500/30",
-  INFO:     "bg-zinc-500/10 text-zinc-400 border-zinc-500/30",
+  Critical: "bg-red-500/10 text-red-400 border-red-500/30",
+  High:     "bg-orange-500/10 text-orange-400 border-orange-500/30",
+  Medium:   "bg-yellow-500/10 text-yellow-400 border-yellow-500/30",
+  Low:      "bg-blue-500/10 text-blue-400 border-blue-500/30",
+  Info:     "bg-zinc-500/10 text-zinc-400 border-zinc-500/30",
 };
 
+// MSRA rule fields
 interface Pattern {
   id: string;
-  name: string;
+  title: string;
   platform: string;
   severity: string;
   category: string;
   description?: string;
-  pattern?: string;
+  patterns?: Array<{ pattern?: string; name?: string }>;
   enabled: boolean;
-  custom?: boolean;
+  source?: string; // "builtin" | "custom"
 }
 
-interface PatternStats {
-  android: number;
-  ios: number;
-  jar: number;
-  windows: number;
+interface RuleStats {
   total: number;
-  custom: number;
+  enabled: number;
+  disabled: number;
+  by_source: { builtin: number; custom: number };
+  by_severity: Record<string, number>;
 }
 
 const EMPTY_RULE = {
-  name: "",
+  title: "",
   platform: "android",
-  severity: "MEDIUM",
+  severity: "Medium",
   category: "",
   description: "",
   pattern: "",
@@ -85,8 +85,8 @@ function RuleEditor({
         <div className="col-span-2">
           <Label className="text-xs text-zinc-400 mb-1 block">Rule Name</Label>
           <Input
-            value={form.name}
-            onChange={set("name")}
+            value={form.title}
+            onChange={set("title")}
             placeholder="e.g. Hardcoded API Key"
             className="h-8 bg-zinc-900 border-zinc-700 text-sm text-zinc-200"
           />
@@ -98,7 +98,7 @@ function RuleEditor({
             onChange={set("platform")}
             className="w-full h-8 rounded-md bg-zinc-900 border border-zinc-700 text-sm text-zinc-200 px-2"
           >
-            {["android", "ios", "jar", "windows", "all"].map((p) => (
+            {["android", "ios", "jar", "exe", "all"].map((p) => (
               <option key={p} value={p}>{p}</option>
             ))}
           </select>
@@ -110,7 +110,7 @@ function RuleEditor({
             onChange={set("severity")}
             className="w-full h-8 rounded-md bg-zinc-900 border border-zinc-700 text-sm text-zinc-200 px-2"
           >
-            {["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"].map((s) => (
+            {["Critical", "High", "Medium", "Low", "Info"].map((s) => (
               <option key={s} value={s}>{s}</option>
             ))}
           </select>
@@ -129,7 +129,7 @@ function RuleEditor({
           <Input
             value={form.pattern}
             onChange={set("pattern")}
-            placeholder="e.g. (api_key|apikey)\s*=\s*['\"].*['\"]"
+            placeholder={"e.g. (api_key|apikey)\\s*=\\s*['\"]"}
             className="h-8 bg-zinc-900 border-zinc-700 text-sm text-zinc-200 font-mono"
           />
         </div>
@@ -152,7 +152,7 @@ function RuleEditor({
           size="sm"
           className="h-8 text-xs bg-blue-600 hover:bg-blue-700"
           onClick={() => onSave(form)}
-          disabled={loading || !form.name || !form.pattern}
+          disabled={loading || !form.title || !form.pattern}
         >
           {loading ? <RefreshCw className="h-3 w-3 animate-spin mr-1" /> : null}
           Save Rule
@@ -170,33 +170,38 @@ function PatternRow({ pattern, onToggle, onEdit, onDelete }: {
 }) {
   const [expanded, setExpanded] = useState(false);
   const plat = pattern.platform?.toLowerCase() ?? "android";
-  const sev = pattern.severity?.toUpperCase() ?? "INFO";
+  const sev = pattern.severity ?? "Info";
+  const isCustom = pattern.source === "custom";
+
+  // Extract first pattern string if available
+  const patternStr = pattern.patterns?.[0]?.pattern ?? "";
 
   return (
-    <div className={cn("border-zinc-800 hover:bg-zinc-800/30 transition-colors", !pattern.enabled && "opacity-50")}>
+    <div className={cn("hover:bg-zinc-800/30 transition-colors", !pattern.enabled && "opacity-50")}>
       <div className="flex items-center gap-3 px-4 py-2.5">
-        <button onClick={() => setExpanded(!expanded)} className="text-zinc-600 hover:text-zinc-400">
+        <button onClick={() => setExpanded(!expanded)} className="text-zinc-600 hover:text-zinc-400 shrink-0">
           {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
         </button>
-        <Badge variant="outline" className={cn("text-xs capitalize w-18", PLATFORM_COLORS[plat] ?? PLATFORM_COLORS.android)}>
+        <Badge variant="outline" className={cn("text-xs capitalize shrink-0", PLATFORM_COLORS[plat] ?? PLATFORM_COLORS.android)}>
           {plat}
         </Badge>
-        <Badge variant="outline" className={cn("text-xs w-20 justify-center", SEV_COLORS[sev])}>
+        <Badge variant="outline" className={cn("text-xs w-20 justify-center shrink-0", SEV_COLORS[sev] ?? SEV_COLORS.Info)}>
           {sev}
         </Badge>
-        <span className="flex-1 text-sm text-zinc-200 font-medium truncate">{pattern.name}</span>
-        <span className="text-xs text-zinc-500">{pattern.category}</span>
-        {pattern.custom && (
-          <Badge variant="outline" className="text-xs border-blue-800 text-blue-400">custom</Badge>
+        <span className="flex-1 text-sm text-zinc-200 font-medium truncate">{pattern.title}</span>
+        <span className="text-xs text-zinc-500 shrink-0 hidden md:block">{pattern.category}</span>
+        {isCustom && (
+          <Badge variant="outline" className="text-xs border-blue-800 text-blue-400 shrink-0">custom</Badge>
         )}
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 shrink-0">
           <button
             onClick={onToggle}
+            title={pattern.enabled ? "Disable" : "Enable"}
             className={cn("transition-colors", pattern.enabled ? "text-emerald-400 hover:text-emerald-300" : "text-zinc-600 hover:text-zinc-400")}
           >
             {pattern.enabled ? <ToggleRight className="h-4 w-4" /> : <ToggleLeft className="h-4 w-4" />}
           </button>
-          {pattern.custom && (
+          {isCustom && (
             <>
               <button onClick={onEdit} className="text-zinc-600 hover:text-zinc-300 p-1">
                 <Pencil className="h-3.5 w-3.5" />
@@ -208,12 +213,14 @@ function PatternRow({ pattern, onToggle, onEdit, onDelete }: {
           )}
         </div>
       </div>
-      {expanded && pattern.description && (
-        <div className="px-11 pb-3 space-y-1">
-          <p className="text-xs text-zinc-400">{pattern.description}</p>
-          {pattern.pattern && (
-            <code className="text-xs font-mono text-zinc-500 bg-zinc-950 px-2 py-0.5 rounded">
-              {pattern.pattern}
+      {expanded && (
+        <div className="px-11 pb-3 space-y-1.5 border-t border-zinc-800/30">
+          {pattern.description && (
+            <p className="text-xs text-zinc-400 pt-2">{pattern.description}</p>
+          )}
+          {patternStr && (
+            <code className="text-xs font-mono text-zinc-500 bg-zinc-950 px-2 py-1 rounded block border border-zinc-800 mt-1">
+              {patternStr}
             </code>
           )}
         </div>
@@ -230,7 +237,7 @@ export default function PatternsPage() {
   const [editTarget, setEditTarget] = useState<Pattern | null>(null);
   const [savingRule, setSavingRule] = useState(false);
 
-  const { data: stats } = useQuery<PatternStats>({
+  const { data: stats } = useQuery<RuleStats>({
     queryKey: ["mobile", "rule-stats"],
     queryFn: async () => {
       const res = await fetchWithAuth(`${API_BASE}/mobile/rules/stats`);
@@ -238,11 +245,14 @@ export default function PatternsPage() {
     },
   });
 
-  const { data: patternsData, isLoading, refetch } = useQuery<{ rules: Pattern[] }>({
+  // MSRA returns a list directly
+  const { data: patterns = [], isLoading, refetch } = useQuery<Pattern[]>({
     queryKey: ["mobile", "rules"],
     queryFn: async () => {
       const res = await fetchWithAuth(`${API_BASE}/mobile/rules`);
-      return res.json();
+      const data = await res.json();
+      // Handle both list and {rules: [...]} shapes
+      return Array.isArray(data) ? data : (data.rules ?? []);
     },
   });
 
@@ -297,20 +307,28 @@ export default function PatternsPage() {
     }
   };
 
-  const patterns = patternsData?.rules ?? [];
   const filtered = patterns.filter((p) => {
-    const matchSearch = !search || p.name.toLowerCase().includes(search.toLowerCase()) || (p.category ?? "").toLowerCase().includes(search.toLowerCase());
+    const matchSearch =
+      !search ||
+      (p.title ?? "").toLowerCase().includes(search.toLowerCase()) ||
+      (p.category ?? "").toLowerCase().includes(search.toLowerCase());
     const matchPlat = !platFilter || p.platform?.toLowerCase() === platFilter;
     return matchSearch && matchPlat;
   });
 
-  const PLATFORMS = ["android", "ios", "jar", "windows"];
+  const PLATFORMS = ["android", "ios", "jar", "exe"];
+
+  // Count per platform from live data
+  const platformCounts = PLATFORMS.reduce<Record<string, number>>((acc, p) => {
+    acc[p] = patterns.filter((r) => r.platform?.toLowerCase() === p).length;
+    return acc;
+  }, {});
 
   return (
     <div className="flex flex-col gap-6 p-6">
       <PageHeader
         title="Pattern Library"
-        description="215+ built-in detection patterns for Android, iOS, JAR, and Windows. Add custom rules to extend coverage."
+        description={`${stats?.total ?? patterns.length} detection patterns for Android, iOS, JAR, and Windows. Add custom rules to extend coverage.`}
       >
         <Button
           variant="ghost"
@@ -329,38 +347,38 @@ export default function PatternsPage() {
         </Button>
       </PageHeader>
 
-      {/* Stats */}
-      {stats && (
-        <div className="grid grid-cols-5 gap-3">
-          {[
-            { label: "Android", key: "android", color: "text-emerald-400" },
-            { label: "iOS", key: "ios", color: "text-blue-400" },
-            { label: "JAR", key: "jar", color: "text-amber-400" },
-            { label: "Windows", key: "windows", color: "text-violet-400" },
-            { label: "Custom", key: "custom", color: "text-zinc-300" },
-          ].map(({ label, key, color }) => (
-            <Card key={key} className="bg-zinc-900 border-zinc-800">
-              <CardContent className="pt-4 pb-4">
-                <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                <p className={cn("text-2xl font-bold", color)}>{(stats as Record<string, number>)[key] ?? 0}</p>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      )}
+      {/* Stats cards */}
+      <div className="grid grid-cols-5 gap-3">
+        {[
+          { label: "Android", key: "android", color: "text-emerald-400" },
+          { label: "iOS",     key: "ios",     color: "text-blue-400" },
+          { label: "JAR",     key: "jar",     color: "text-amber-400" },
+          { label: "EXE",     key: "exe",     color: "text-violet-400" },
+          { label: "Custom",  key: "custom",  color: "text-zinc-300" },
+        ].map(({ label, key, color }) => (
+          <div key={key} className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+            <p className="text-xs text-zinc-500 mb-1">{label}</p>
+            <p className={cn("text-2xl font-bold", color)}>
+              {key === "custom"
+                ? (stats?.by_source?.custom ?? 0)
+                : (platformCounts[key] ?? 0)}
+            </p>
+          </div>
+        ))}
+      </div>
 
-      {/* New rule editor */}
+      {/* New / edit rule editor */}
       {showEditor && (
         <RuleEditor
           initial={
             editTarget
               ? {
-                  name: editTarget.name,
+                  title: editTarget.title,
                   platform: editTarget.platform,
                   severity: editTarget.severity,
                   category: editTarget.category ?? "",
                   description: editTarget.description ?? "",
-                  pattern: editTarget.pattern ?? "",
+                  pattern: editTarget.patterns?.[0]?.pattern ?? "",
                 }
               : EMPTY_RULE
           }
@@ -370,7 +388,7 @@ export default function PatternsPage() {
         />
       )}
 
-      {/* Filters */}
+      {/* Filter bar */}
       <div className="flex items-center gap-3">
         <div className="relative flex-1 max-w-xs">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500" />
@@ -409,32 +427,30 @@ export default function PatternsPage() {
       </div>
 
       {/* Pattern list */}
-      <Card className="bg-zinc-900 border-zinc-800">
-        <CardContent className="p-0">
-          {isLoading ? (
-            <div className="p-6 text-center text-sm text-zinc-500">Loading patterns…</div>
-          ) : filtered.length === 0 ? (
-            <div className="p-12 text-center">
-              <BookOpen className="h-10 w-10 text-zinc-700 mx-auto mb-3" />
-              <p className="text-sm text-zinc-500">No patterns match your filters.</p>
-            </div>
-          ) : (
-            <div className="divide-y divide-zinc-800">
-              {filtered.map((pattern) => (
-                <PatternRow
-                  key={pattern.id}
-                  pattern={pattern}
-                  onToggle={() => toggleMutation.mutate({ id: pattern.id, enabled: !pattern.enabled })}
-                  onEdit={() => { setEditTarget(pattern); setShowEditor(true); }}
-                  onDelete={() => {
-                    if (confirm("Delete this custom rule?")) deleteMutation.mutate(pattern.id);
-                  }}
-                />
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      <div className="bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
+        {isLoading ? (
+          <div className="p-6 text-center text-sm text-zinc-500">Loading patterns…</div>
+        ) : filtered.length === 0 ? (
+          <div className="p-12 text-center">
+            <BookOpen className="h-10 w-10 text-zinc-700 mx-auto mb-3" />
+            <p className="text-sm text-zinc-500">No patterns match your filters.</p>
+          </div>
+        ) : (
+          <div className="divide-y divide-zinc-800">
+            {filtered.map((pattern) => (
+              <PatternRow
+                key={pattern.id}
+                pattern={pattern}
+                onToggle={() => toggleMutation.mutate({ id: pattern.id, enabled: !pattern.enabled })}
+                onEdit={() => { setEditTarget(pattern); setShowEditor(true); }}
+                onDelete={() => {
+                  if (confirm("Delete this custom rule?")) deleteMutation.mutate(pattern.id);
+                }}
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
