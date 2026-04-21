@@ -2,6 +2,8 @@
 Celery application setup with Redis broker.
 """
 
+import os
+
 from celery import Celery
 from celery.schedules import crontab
 from app.core.config import get_settings
@@ -35,7 +37,8 @@ celery_app.conf.update(
     },
     task_default_queue="default",
     broker_connection_retry_on_startup=True,
-    result_expires=86400 * 7,  # Keep results for 7 days
+    result_expires=3600,  # Keep results for 1 hour (was 7 days)
+    worker_concurrency=int(os.getenv("CELERYD_CONCURRENCY", "4")),
     # Periodic tasks
     beat_schedule={
         "recover-stuck-scans-every-5min": {

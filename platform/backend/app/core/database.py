@@ -24,6 +24,11 @@ engine = create_async_engine(
     pool_timeout=settings.DATABASE_POOL_TIMEOUT,
     pool_pre_ping=True,
     echo=settings.DEBUG,
+    connect_args={
+        "server_settings": {
+            "statement_timeout": str(settings.DATABASE_STATEMENT_TIMEOUT_MS),
+        }
+    },
 )
 
 AsyncSessionLocal = async_sessionmaker(

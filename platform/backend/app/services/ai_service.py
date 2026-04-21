@@ -4,9 +4,9 @@ natural-language search translation, executive summary generation,
 and Jira ticket generation.
 """
 
+import asyncio
 import json
 import logging
-from datetime import datetime, timezone
 from typing import Optional
 
 import anthropic
@@ -16,11 +16,45 @@ from app.core.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+_AI_TIMEOUT = 60  # seconds per request
+_AI_MAX_RETRIES = 3
+
 
 def _get_client() -> anthropic.Anthropic:
     if not settings.ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY is not configured")
-    return anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+    return anthropic.Anthropic(
+        api_key=settings.ANTHROPIC_API_KEY,
+        timeout=_AI_TIMEOUT,
+        max_retries=0,  # We handle retries ourselves for better control
+    )
+
+
+async def _call_with_retry(client: anthropic.Anthropic, **kwargs) -> anthropic.types.Message:
+    """Call Claude with exponential backoff on transient errors."""
+    last_exc: Exception = RuntimeError("No attempts made")
+    for attempt in range(_AI_MAX_RETRIES):
+        try:
+            return client.messages.create(**kwargs)
+        except anthropic.RateLimitError as exc:
+            wait = 2 ** attempt
+            logger.warning(f"AI rate limited, retrying in {wait}s (attempt {attempt + 1})")
+            await asyncio.sleep(wait)
+            last_exc = exc
+        except (anthropic.APITimeoutError, anthropic.APIConnectionError) as exc:
+            wait = 2 ** attempt
+            logger.warning(f"AI transient error: {exc}, retrying in {wait}s (attempt {attempt + 1})")
+            await asyncio.sleep(wait)
+            last_exc = exc
+        except anthropic.APIStatusError as exc:
+            if exc.status_code >= 500:
+                wait = 2 ** attempt
+                logger.warning(f"AI server error {exc.status_code}, retrying in {wait}s")
+                await asyncio.sleep(wait)
+                last_exc = exc
+            else:
+                raise
+    raise last_exc
 
 
 async def triage_finding(
@@ -76,7 +110,8 @@ Respond with this exact JSON structure:
 }}"""
 
     try:
-        response = client.messages.create(
+        response = await _call_with_retry(
+            client,
             model=settings.AI_MODEL,
             max_tokens=settings.AI_MAX_TOKENS,
             system=system_prompt,
@@ -149,7 +184,8 @@ Rules:
 Respond with ONLY a JSON object."""
 
     try:
-        response = client.messages.create(
+        response = await _call_with_retry(
+            client,
             model=settings.AI_MODEL,
             max_tokens=512,
             system=system_prompt,
@@ -229,7 +265,8 @@ Write exactly 3 bullet points covering:
 Format each bullet as: - **[Topic]**: [2-3 sentences]"""
 
     try:
-        response = client.messages.create(
+        response = await _call_with_retry(
+            client,
             model=settings.AI_MODEL,
             max_tokens=settings.AI_MAX_TOKENS,
             system=system_prompt,
@@ -300,7 +337,8 @@ Respond with this JSON structure:
 }}"""
 
     try:
-        response = client.messages.create(
+        response = await _call_with_retry(
+            client,
             model=settings.AI_MODEL,
             max_tokens=settings.AI_MAX_TOKENS,
             system=system_prompt,

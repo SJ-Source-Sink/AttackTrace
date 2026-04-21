@@ -7,16 +7,21 @@ OpenAPI metadata, and mounts all API routers.
 
 import logging
 import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
 from pathlib import Path
 
+import structlog
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from app.core.config import get_settings
 from app.core.database import close_db, init_db
@@ -27,7 +32,28 @@ logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logger = logging.getLogger("attacktrace.platform")
+
+# --- Structured logging ---
+structlog.configure(
+    processors=[
+        structlog.contextvars.merge_contextvars,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+        structlog.dev.set_exc_info,
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+    ],
+    wrapper_class=structlog.make_filtering_bound_logger(
+        logging.DEBUG if settings.DEBUG else logging.INFO
+    ),
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+)
+logger = structlog.get_logger("attacktrace.platform")
+
+# --- Rate limiter ---
+limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
 
 
 @asynccontextmanager
@@ -73,6 +99,7 @@ app = FastAPI(
     docs_url=f"{settings.API_V1_PREFIX}/docs",
     redoc_url=f"{settings.API_V1_PREFIX}/redoc",
     lifespan=lifespan,
+    generate_unique_id_function=lambda route: route.name,
     contact={
         "name": "AttackTrace",
         "url": "https://github.com/attacktrace-platform",
@@ -91,6 +118,10 @@ app = FastAPI(
     ],
 )
 
+# --- Rate limiter ---
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # --- CORS ---
 app.add_middleware(
     CORSMiddleware,
@@ -98,17 +129,29 @@ app.add_middleware(
     allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Request-ID", "X-RateLimit-Remaining"],
+    expose_headers=["X-Request-ID", "X-RateLimit-Remaining", "X-Response-Time-Ms"],
 )
 
 
-# --- Request timing middleware ---
+# --- Request ID + timing + security headers middleware ---
 @app.middleware("http")
-async def add_request_timing(request: Request, call_next):
+async def request_middleware(request: Request, call_next):
+    request_id = str(uuid.uuid4())
+    request.state.request_id = request_id
     start = time.perf_counter()
+
     response = await call_next(request)
+
     duration_ms = (time.perf_counter() - start) * 1000
+    response.headers["X-Request-ID"] = request_id
     response.headers["X-Response-Time-Ms"] = f"{duration_ms:.1f}"
+    # Security headers
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    if settings.ENVIRONMENT != "development":
+        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
     return response
 
 

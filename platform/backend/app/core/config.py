@@ -34,9 +34,10 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://attacktrace:attacktrace@localhost:5432/attacktrace"
-    DATABASE_POOL_SIZE: int = 10
-    DATABASE_MAX_OVERFLOW: int = 20
+    DATABASE_POOL_SIZE: int = 20
+    DATABASE_MAX_OVERFLOW: int = 40
     DATABASE_POOL_TIMEOUT: int = 30
+    DATABASE_STATEMENT_TIMEOUT_MS: int = 30000  # 30s per query
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -82,6 +83,25 @@ class Settings(BaseSettings):
         return v
 
 
+    def validate_production_secrets(self) -> None:
+        """Fail fast if insecure defaults are used outside development."""
+        if self.ENVIRONMENT != "development":
+            insecure_defaults = [
+                "change-me-in-production-use-32-char-min",
+                "change-me-32-bytes-base64-encoded==",
+            ]
+            if self.SECRET_KEY in insecure_defaults:
+                raise RuntimeError(
+                    "SECRET_KEY must be changed from the default value in non-development environments."
+                )
+            if self.KMS_MASTER_KEY in insecure_defaults:
+                raise RuntimeError(
+                    "KMS_MASTER_KEY must be changed from the default value in non-development environments."
+                )
+
+
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    s = Settings()
+    s.validate_production_secrets()
+    return s

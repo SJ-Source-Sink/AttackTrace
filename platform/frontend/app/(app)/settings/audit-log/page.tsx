@@ -4,7 +4,7 @@ import React, { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Shield, Search, RefreshCw, User, Terminal, Cpu, Globe,
-  KeyRound, Settings, ChevronDown, ChevronUp, Clock,
+  KeyRound, Settings, ChevronDown, ChevronUp, Clock, Download,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -146,6 +146,29 @@ export default function AuditLogPage() {
   const [page, setPage] = useState(0);
   const PAGE_SIZE = 50;
 
+  function exportCsv() {
+    const rows = (data?.items ?? []);
+    if (rows.length === 0) return;
+    const header = ["ID", "Action", "User", "Email", "Target", "IP Address", "Timestamp"];
+    const lines = rows.map(e => [
+      e.id,
+      e.action,
+      e.user_name,
+      e.user_email,
+      String(e.after_state?.target ?? ""),
+      e.ip_address ?? "",
+      e.created_at,
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(","));
+    const csv = [header.join(","), ...lines].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `audit-log-page${page + 1}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   const { data, isLoading, refetch, isFetching } = useQuery({
     queryKey: ["audit-logs", page],
     queryFn: async () => {
@@ -182,6 +205,16 @@ export default function AuditLogPage() {
         title="Audit Log"
         description="Track all actions performed across the platform"
       >
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={exportCsv}
+          disabled={!data?.items?.length}
+          className="gap-1.5 border-zinc-700"
+        >
+          <Download className="h-3.5 w-3.5" />
+          Export CSV
+        </Button>
         <Button
           variant="outline"
           size="sm"
