@@ -37,6 +37,16 @@ interface Integration {
 
 const INTEGRATIONS: Integration[] = [
   {
+    id: "anthropic",
+    name: "Anthropic Claude",
+    description: "Powers AI-assisted triage, executive summaries, and the AI mode in the Security Test Case Generator.",
+    category: "AI",
+    docsUrl: "https://console.anthropic.com/settings/keys",
+    fields: [
+      { key: "anthropic_key", label: "API Key", placeholder: "sk-ant-api03-...", hint: "Required for AI Test Case Generator and AI triage features" },
+    ],
+  },
+  {
     id: "shodan",
     name: "Shodan",
     description: "Internet-wide scan data for IP enrichment, open ports, vulnerabilities, and banner grabbing.",
@@ -101,6 +111,7 @@ const INTEGRATIONS: Integration[] = [
 ];
 
 const CATEGORY_COLORS: Record<string, string> = {
+  AI: "bg-violet-500/10 text-violet-400 border-violet-500/20",
   Enrichment: "bg-blue-500/10 text-blue-400 border-blue-500/20",
   Intelligence: "bg-purple-500/10 text-purple-400 border-purple-500/20",
   OSINT: "bg-amber-500/10 text-amber-400 border-amber-500/20",

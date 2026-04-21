@@ -158,6 +158,7 @@ class OrgCredentials(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     org_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), unique=True, nullable=False
     )
+    anthropic_key_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     shodan_key_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     censys_id_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     censys_secret_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

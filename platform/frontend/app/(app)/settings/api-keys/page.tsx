@@ -74,7 +74,7 @@ export default function ApiKeysPage() {
     <div className="space-y-6 max-w-3xl">
       <PageHeader
         title="API Keys"
-        description="Manage API keys for programmatic access"
+        description="Generate keys to access the AttackTrace API programmatically — for CI/CD pipelines, scripts, or custom integrations"
       >
         <Button onClick={() => setShowCreate(true)} className="gap-1.5">
           <Plus className="h-4 w-4" />

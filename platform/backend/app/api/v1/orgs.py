@@ -614,6 +614,8 @@ async def update_credentials(
         creds = OrgCredentials(org_id=org_id)
         db.add(creds)
 
+    if payload.anthropic_key is not None:
+        creds.anthropic_key_enc = encrypt_credential(payload.anthropic_key) if payload.anthropic_key else None
     if payload.shodan_key is not None:
         creds.shodan_key_enc = encrypt_credential(payload.shodan_key) if payload.shodan_key else None
     if payload.censys_id is not None:
@@ -647,6 +649,7 @@ async def update_credentials(
 
     # Return which keys are configured (no values)
     return {
+        "anthropic_key": bool(creds.anthropic_key_enc),
         "shodan_key": bool(creds.shodan_key_enc),
         "censys_id": bool(creds.censys_id_enc),
         "censys_secret": bool(creds.censys_secret_enc),
@@ -846,6 +849,7 @@ async def get_current_org_credentials(
     creds = result.scalar_one_or_none()
     if not creds:
         return {
+            "anthropic_key": False,
             "shodan_key": False,
             "censys_id": False,
             "censys_secret": False,
@@ -856,6 +860,7 @@ async def get_current_org_credentials(
             "passivetotal_key": False,
         }
     return {
+        "anthropic_key": bool(creds.anthropic_key_enc),
         "shodan_key": bool(creds.shodan_key_enc),
         "censys_id": bool(creds.censys_id_enc),
         "censys_secret": bool(creds.censys_secret_enc),
@@ -886,6 +891,8 @@ async def update_current_org_credentials(
         creds = OrgCredentials(org_id=org_id)
         db.add(creds)
 
+    if payload.anthropic_key is not None:
+        creds.anthropic_key_enc = encrypt_credential(payload.anthropic_key) if payload.anthropic_key else None
     if payload.shodan_key is not None:
         creds.shodan_key_enc = encrypt_credential(payload.shodan_key) if payload.shodan_key else None
     if payload.censys_id is not None:
@@ -918,6 +925,7 @@ async def update_current_org_credentials(
     await db.flush()
 
     return {
+        "anthropic_key": bool(creds.anthropic_key_enc),
         "shodan_key": bool(creds.shodan_key_enc),
         "censys_id": bool(creds.censys_id_enc),
         "censys_secret": bool(creds.censys_secret_enc),
