@@ -20,6 +20,10 @@ import {
   Layers,
   Target,
   Bug,
+  RefreshCw,
+  Database,
+  Globe,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -366,12 +370,29 @@ export default function AttackMapperPage() {
   const [techniqueSearch, setTechniqueSearch] = useState("");
   const [techniquePhaseFilter, setTechniquePhaseFilter] = useState("all");
 
+  // Intel update state
+  const [isUpdatingIntel, setIsUpdatingIntel] = useState(false);
+  const [intelLog, setIntelLog] = useState<Array<{ icon: string; line: string }>>([]);
+  const [showIntelPanel, setShowIntelPanel] = useState(false);
+  const [intelStats, setIntelStats] = useState<{
+    cached_cves: number;
+    cached_threat_actors: number;
+    last_updated: string | null;
+    techniques: Record<string, number>;
+  } | null>(null);
+
   const abortRef = useRef<AbortController | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
+  const intelLogEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     loadHistory();
+    loadStats();
   }, []);
+
+  useEffect(() => {
+    intelLogEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [intelLog]);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -388,6 +409,85 @@ export default function AttackMapperPage() {
       // silently ignore
     }
   }
+
+  async function loadStats() {
+    try {
+      const res = await fetchWithAuth(`${API_BASE}/attackmapper/stats`);
+      if (res.ok) {
+        const data = await res.json();
+        setIntelStats(data);
+      }
+    } catch {
+      // silently ignore
+    }
+  }
+
+  const handleUpdateIntel = useCallback(async () => {
+    setIsUpdatingIntel(true);
+    setIntelLog([]);
+    setShowIntelPanel(true);
+
+    try {
+      let token = await refreshAccessToken();
+      if (!token) token = localStorage.getItem("attacktrace_at");
+      const res = await fetch(`${API_BASE}/attackmapper/update-intel`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(String(err.detail ?? "Update failed"));
+      }
+
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+
+        for (const part of parts) {
+          let eventType = "";
+          let dataStr = "";
+          for (const line of part.split("\n")) {
+            if (line.startsWith("event: ")) eventType = line.slice(7).trim();
+            else if (line.startsWith("data: ")) dataStr = line.slice(6);
+          }
+          if (!dataStr) continue;
+          let payload: Record<string, unknown>;
+          try { payload = JSON.parse(dataStr); } catch { continue; }
+
+          if (eventType === "start") {
+            setIntelLog((p) => [...p, { icon: "⟳", line: String(payload.message ?? "") }]);
+          } else if (eventType === "progress") {
+            setIntelLog((p) => [...p, { icon: String(payload.icon ?? "⟳"), line: String(payload.line ?? "") }]);
+          } else if (eventType === "complete") {
+            setIntelLog((p) => [...p, {
+              icon: "✓",
+              line: `Update complete — ${payload.items_fetched} items fetched, ${payload.cached_cves} CVEs cached`,
+            }]);
+            toast.success("Threat intelligence updated from internet");
+            loadStats();
+          } else if (eventType === "error") {
+            setIntelLog((p) => [...p, { icon: "✗", line: `Error: ${payload.message}` }]);
+            toast.error(String(payload.message ?? "Update failed"));
+          }
+        }
+      }
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        toast.error(err.message);
+        setIntelLog((p) => [...p, { icon: "✗", line: `Error: ${err.message}` }]);
+      }
+    } finally {
+      setIsUpdatingIntel(false);
+    }
+  }, []);
 
   const handleStop = useCallback(() => {
     abortRef.current?.abort();
@@ -513,10 +613,75 @@ export default function AttackMapperPage() {
 
   return (
     <div className="flex flex-col gap-6 p-6">
-      <PageHeader
-        title="Attack Path Mapper"
-        description="Visualize attack paths for AD, Cloud, and Network infrastructure mapped to MITRE ATT&CK"
-      />
+      <div className="flex items-start justify-between gap-4 pb-2">
+        <PageHeader
+          title="Attack Path Mapper"
+          description="Visualize attack paths for AD, Cloud, and Network infrastructure mapped to MITRE ATT&CK"
+          className="pb-0"
+        />
+        <div className="flex items-center gap-2 shrink-0 mt-1">
+          {intelStats?.last_updated && (
+            <span className="text-xs text-zinc-500 hidden sm:block">
+              Updated {new Date(intelStats.last_updated).toLocaleDateString()}
+            </span>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleUpdateIntel}
+            disabled={isUpdatingIntel}
+            className="border-zinc-700 text-zinc-300 hover:bg-zinc-800 gap-2"
+          >
+            <RefreshCw className={cn("h-3.5 w-3.5", isUpdatingIntel && "animate-spin")} />
+            {isUpdatingIntel ? "Updating..." : "Update Intel"}
+          </Button>
+        </div>
+      </div>
+
+      {/* Intel Update Panel */}
+      {showIntelPanel && (
+        <Card className="border-zinc-700 bg-zinc-900">
+          <CardHeader className="pb-2 pt-3 px-4">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-xs font-semibold uppercase tracking-wider text-zinc-500 flex items-center gap-2">
+                <Globe className="h-3.5 w-3.5 text-blue-400" />
+                Internet Intel Update
+                {isUpdatingIntel && <span className="h-1.5 w-1.5 rounded-full bg-blue-400 animate-pulse" />}
+              </CardTitle>
+              {!isUpdatingIntel && (
+                <button type="button" onClick={() => setShowIntelPanel(false)} className="text-zinc-600 hover:text-zinc-400">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent className="px-4 pb-3">
+            <div className="bg-zinc-950 border border-zinc-800 rounded p-3 max-h-40 overflow-y-auto font-mono text-xs space-y-0.5">
+              {intelLog.map((entry, i) => (
+                <div key={i} className={cn(
+                  "flex items-start gap-2",
+                  entry.icon === "✓" ? "text-emerald-400" :
+                  entry.icon === "✗" ? "text-red-400" :
+                  entry.icon === "⚠" ? "text-yellow-400" : "text-zinc-400"
+                )}>
+                  <span className="shrink-0 w-4">{entry.icon}</span>
+                  <span>{entry.line}</span>
+                </div>
+              ))}
+              <div ref={intelLogEndRef} />
+            </div>
+            {intelStats && !isUpdatingIntel && (
+              <div className="flex gap-4 mt-3 text-xs text-zinc-400">
+                <span className="flex items-center gap-1"><Database className="h-3 w-3" />{intelStats.cached_cves.toLocaleString()} CVEs cached</span>
+                <span className="flex items-center gap-1"><Shield className="h-3 w-3" />{intelStats.cached_threat_actors} threat actors</span>
+                {Object.entries(intelStats.techniques).map(([k, v]) => (
+                  <span key={k} className="capitalize">{k}: {v} techniques</span>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
         {/* ── Left: Config panel ──────────────────────────────────────────── */}

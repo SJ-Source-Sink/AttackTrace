@@ -263,3 +263,158 @@ async def get_attackmapper_scan(
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
     return scan
+
+
+async def _stream_update_intel() -> AsyncGenerator[str, None]:
+    """Stream `attackmapper update-intel` output as SSE progress lines."""
+    import re
+
+    am_bin = shutil.which("attackmapper") or "attackmapper"
+    items_total = 0
+    failed: list[str] = []
+
+    yield _sse("start", {
+        "message": "Starting threat intelligence update from internet sources...",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            am_bin, "update-intel",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        assert proc.stdout is not None
+        assert proc.stderr is not None
+
+        # Use a queue so we can interleave stdout + stderr lines
+        queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
+
+        async def enqueue(stream: asyncio.StreamReader) -> None:
+            async for raw in stream:
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                if line:
+                    await queue.put(("line", line))
+            await queue.put(None)  # sentinel
+
+        t1 = asyncio.create_task(enqueue(proc.stdout))
+        t2 = asyncio.create_task(enqueue(proc.stderr))
+
+        sentinels = 0
+        while sentinels < 2:
+            item = await queue.get()
+            if item is None:
+                sentinels += 1
+                continue
+            _, line = item
+            icon = "⟳"
+            if line.startswith("[+]"):
+                icon = "✓"
+                m = re.search(r"(\d+) items cached", line)
+                if m:
+                    items_total += int(m.group(1))
+            elif line.startswith("[-]"):
+                icon = "✗"
+                src = line[4:].split(":")[0].strip()
+                if src:
+                    failed.append(src)
+            elif "Warning" in line:
+                icon = "⚠"
+            yield _sse("progress", {"line": line, "icon": icon})
+
+        await proc.wait()
+        await t1
+        await t2
+
+        # Fetch final stats
+        stats_proc = await asyncio.create_subprocess_exec(
+            am_bin, "stats",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stats_out, _ = await asyncio.wait_for(stats_proc.communicate(), timeout=15)
+        stats_text = stats_out.decode("utf-8", errors="replace")
+
+        cached_cves = 0
+        last_updated = datetime.now(timezone.utc).isoformat()
+        m_cves = re.search(r"Cached CVEs:\s*(\d+)", stats_text)
+        m_updated = re.search(r"Last Updated:\s*(\S+)", stats_text)
+        if m_cves:
+            cached_cves = int(m_cves.group(1))
+        if m_updated:
+            last_updated = m_updated.group(1)
+
+        yield _sse("complete", {
+            "message": "Threat intelligence update complete",
+            "items_fetched": items_total,
+            "cached_cves": cached_cves,
+            "failed_sources": failed,
+            "last_updated": last_updated,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+    except Exception as exc:
+        yield _sse("error", {"message": str(exc)})
+
+
+@router.post("/update-intel", summary="Update threat intelligence from internet sources (streaming)")
+async def update_intel(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> StreamingResponse:
+    if not shutil.which("attackmapper"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="attackmapper is not installed on this server",
+        )
+    return StreamingResponse(
+        _stream_update_intel(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/stats", summary="Get AttackMapper cache statistics")
+async def get_attackmapper_stats(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    am_bin = shutil.which("attackmapper") or "attackmapper"
+    try:
+        import re
+        proc = await asyncio.create_subprocess_exec(
+            am_bin, "stats",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        text = stdout.decode("utf-8", errors="replace")
+
+        stats: dict = {
+            "techniques": {},
+            "cached_cves": 0,
+            "cached_threat_actors": 0,
+            "custom_feeds": 0,
+            "last_updated": None,
+            "raw": text,
+        }
+
+        for line in text.splitlines():
+            m = re.match(r"\s*(\w[\w\s]+) Module:\s*(\d+) techniques", line)
+            if m:
+                stats["techniques"][m.group(1).strip().lower()] = int(m.group(2))
+            m2 = re.search(r"Cached CVEs:\s*(\d+)", line)
+            if m2:
+                stats["cached_cves"] = int(m2.group(1))
+            m3 = re.search(r"Cached Threat Actors:\s*(\d+)", line)
+            if m3:
+                stats["cached_threat_actors"] = int(m3.group(1))
+            m4 = re.search(r"Last Updated:\s*(\S+)", line)
+            if m4:
+                stats["last_updated"] = m4.group(1)
+
+        return stats
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
