@@ -1,0 +1,265 @@
+"""
+AttackMapper integration — runs attack path visualizations via the attackmapper CLI
+and streams results via SSE.
+
+Commands used:
+  attackmapper <infra> --format json -o <file>         → all techniques for infra
+  attackmapper full-chain --infra <infra> --format json -o <file>  → full attack chain
+  attackmapper threat-intel --infra <infra> --format json -o <file> → threat intel
+"""
+
+import asyncio
+import json
+import os
+import shutil
+import tempfile
+import uuid
+from datetime import datetime, timezone
+from typing import Annotated, AsyncGenerator
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, field_validator
+
+from app.core.dependencies import get_current_user
+from app.models.db.user import User
+
+router = APIRouter(prefix="/attackmapper", tags=["AttackMapper"])
+
+# In-memory scan history
+_scan_history: dict[str, dict] = {}
+
+INFRA_LABELS: dict[str, str] = {
+    "ad": "Active Directory",
+    "aws": "Amazon Web Services",
+    "azure": "Microsoft Azure",
+    "gcp": "Google Cloud Platform",
+    "network": "Network Infrastructure",
+}
+
+VALID_INFRA = set(INFRA_LABELS.keys())
+
+
+class AttackMapperRequest(BaseModel):
+    infrastructure_type: str
+    category: str | None = None
+    phase: str | None = None
+    search: str | None = None
+
+    @field_validator("infrastructure_type")
+    @classmethod
+    def validate_infra(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in VALID_INFRA:
+            raise ValueError(f"infrastructure_type must be one of: {', '.join(sorted(VALID_INFRA))}")
+        return v
+
+    @field_validator("category", "phase", "search")
+    @classmethod
+    def validate_text_field(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        import re
+        if re.search(r"[;&|`$(){}<>]", v):
+            raise ValueError("Field contains invalid characters")
+        return v.strip() or None
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+async def _run_attackmapper_cmd(cmd: list[str], output_file: str) -> dict | None:
+    """Run an attackmapper command and return parsed JSON output."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+
+        if proc.returncode == 0 and os.path.exists(output_file):
+            with open(output_file, "r") as f:
+                return json.load(f)
+        return None
+    except (asyncio.TimeoutError, Exception):
+        return None
+    finally:
+        try:
+            if os.path.exists(output_file):
+                os.unlink(output_file)
+        except OSError:
+            pass
+
+
+async def _stream_attackmapper(scan_id: str, req: AttackMapperRequest) -> AsyncGenerator[str, None]:
+    am_bin = shutil.which("attackmapper") or "attackmapper"
+    infra = req.infrastructure_type
+    infra_label = INFRA_LABELS[infra]
+
+    _scan_history[scan_id] = {
+        "id": scan_id,
+        "infrastructure_type": infra,
+        "infrastructure_label": infra_label,
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "techniques": [],
+        "attack_chain": None,
+        "threat_intel": None,
+    }
+
+    yield _sse("start", {
+        "scan_id": scan_id,
+        "infrastructure_type": infra,
+        "infrastructure_label": infra_label,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+    techniques = []
+    attack_chain = None
+    threat_intel = None
+    error_msg = None
+
+    try:
+        # ── Step 1: Fetch attack techniques ──────────────────────────────────
+        yield _sse("progress", {"message": f"Loading {infra_label} attack techniques..."})
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+            tech_file = tmp.name
+
+        tech_cmd = [am_bin, infra, "--format", "json", "--output", tech_file]
+        if req.category:
+            tech_cmd += ["--category", req.category]
+        if req.phase:
+            tech_cmd += ["--phase", req.phase]
+        if req.search:
+            tech_cmd += ["--search", req.search]
+
+        tech_data = await _run_attackmapper_cmd(tech_cmd, tech_file)
+        if tech_data:
+            techniques = tech_data.get("techniques", [])
+            yield _sse("progress", {
+                "message": f"Loaded {len(techniques)} techniques for {infra_label}",
+            })
+        else:
+            yield _sse("progress", {"message": "Warning: Could not load techniques"})
+
+        await asyncio.sleep(0)
+
+        # ── Step 2: Fetch full attack chain ───────────────────────────────────
+        yield _sse("progress", {"message": "Building full attack chain..."})
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+            chain_file = tmp.name
+
+        chain_cmd = [am_bin, "full-chain", "--infra", infra, "--format", "json", "--output", chain_file]
+        chain_data = await _run_attackmapper_cmd(chain_cmd, chain_file)
+        if chain_data:
+            attack_chain = chain_data.get("attack_path")
+            step_count = len(attack_chain.get("steps", [])) if attack_chain else 0
+            yield _sse("progress", {"message": f"Attack chain built: {step_count} steps"})
+        else:
+            yield _sse("progress", {"message": "Warning: Could not build attack chain"})
+
+        await asyncio.sleep(0)
+
+        # ── Step 3: Fetch threat intelligence ────────────────────────────────
+        yield _sse("progress", {"message": "Fetching threat intelligence..."})
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+            intel_file = tmp.name
+
+        intel_cmd = [am_bin, "threat-intel", "--infra", infra, "--format", "json", "--output", intel_file]
+        intel_data = await _run_attackmapper_cmd(intel_cmd, intel_file)
+        if intel_data:
+            threat_intel = intel_data.get("threat_intel")
+            cve_count = len(threat_intel.get("critical_cves", [])) if threat_intel else 0
+            yield _sse("progress", {"message": f"Threat intel loaded: {cve_count} critical CVEs"})
+        else:
+            yield _sse("progress", {"message": "Warning: Could not load threat intelligence"})
+
+        _scan_history[scan_id].update({
+            "status": "completed",
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "techniques": techniques,
+            "attack_chain": attack_chain,
+            "threat_intel": threat_intel,
+        })
+
+        yield _sse("complete", {
+            "scan_id": scan_id,
+            "infrastructure_type": infra,
+            "infrastructure_label": infra_label,
+            "technique_count": len(techniques),
+            "chain_steps": len(attack_chain.get("steps", [])) if attack_chain else 0,
+            "critical_cves": len(threat_intel.get("critical_cves", [])) if threat_intel else 0,
+            "techniques": techniques,
+            "attack_chain": attack_chain,
+            "threat_intel": threat_intel,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+    except Exception as exc:
+        error_msg = str(exc)
+        _scan_history[scan_id].update({"status": "failed", "error": error_msg})
+        yield _sse("error", {"message": error_msg})
+
+
+@router.post("/scan", summary="Run an AttackMapper analysis and stream results")
+async def run_attackmapper_scan(
+    payload: AttackMapperRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> StreamingResponse:
+    if not shutil.which("attackmapper"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="attackmapper is not installed on this server",
+        )
+    scan_id = str(uuid.uuid4())
+    return StreamingResponse(
+        _stream_attackmapper(scan_id, payload),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/scans", summary="List AttackMapper scan history")
+async def list_attackmapper_scans(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    scans = sorted(
+        _scan_history.values(),
+        key=lambda s: s.get("started_at", ""),
+        reverse=True,
+    )
+    # Return lightweight summaries (no full technique data)
+    summaries = []
+    for s in scans:
+        summaries.append({
+            "id": s["id"],
+            "infrastructure_type": s["infrastructure_type"],
+            "infrastructure_label": s["infrastructure_label"],
+            "status": s["status"],
+            "started_at": s.get("started_at"),
+            "completed_at": s.get("completed_at"),
+            "technique_count": len(s.get("techniques", [])),
+            "chain_steps": len(s.get("attack_chain", {}).get("steps", [])) if s.get("attack_chain") else 0,
+            "critical_cves": len(s.get("threat_intel", {}).get("critical_cves", [])) if s.get("threat_intel") else 0,
+        })
+    return {"items": summaries, "total": len(summaries)}
+
+
+@router.get("/scans/{scan_id}", summary="Get AttackMapper scan result")
+async def get_attackmapper_scan(
+    scan_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    scan = _scan_history.get(scan_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return scan

@@ -21,6 +21,7 @@ import {
   Swords,
   BrainCircuit,
   GitFork,
+  Map,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -96,6 +97,12 @@ const attackSuiteItems: NavItem[] = [
     label: "Takeover Checker",
     href: "/takeover",
     icon: GitFork,
+    badge: "New",
+  },
+  {
+    label: "Attack Path Mapper",
+    href: "/attackmapper",
+    icon: Map,
     badge: "New",
   },
 ];
