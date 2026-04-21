@@ -28,7 +28,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/shared/page-header";
 import { cn } from "@/lib/utils";
-import { fetchWithAuth } from "@/lib/auth";
+import { fetchWithAuth, refreshAccessToken } from "@/lib/auth";
 import { toast } from "sonner";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
@@ -404,7 +404,9 @@ export default function AttackMapperPage() {
     abortRef.current = new AbortController();
 
     try {
-      const token = localStorage.getItem("access_token");
+      // Always refresh to guarantee a non-expired token for the SSE stream
+      let token = await refreshAccessToken();
+      if (!token) token = localStorage.getItem("attacktrace_at");
       const res = await fetch(`${API_BASE}/attackmapper/scan`, {
         method: "POST",
         headers: {

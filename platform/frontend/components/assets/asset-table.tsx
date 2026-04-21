@@ -279,45 +279,41 @@ export function AssetTable({
         const bare = stripProtocol(asset.value);
         const isWebapp = asset.asset_type === "webapp";
         const isDomainLike = asset.asset_type === "subdomain" || asset.asset_type === "domain";
+        const nmapUrl = "/nmap?target=" + encodeURIComponent(bare);
+        const nucleiUrl = "/nuclei?target=" + encodeURIComponent(asset.value);
+        const takeoverUrl = "/takeover?hosts=" + encodeURIComponent(bare);
+        const ffufUrl = "/ffuf?target=" + encodeURIComponent(asset.value + "/FUZZ");
         return (
           <div onClick={(e) => e.stopPropagation()}>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 w-7 p-0 text-zinc-500 hover:text-zinc-300"
-              >
-                <MoreHorizontal className="h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="text-xs w-44">
-              <DropdownMenuItem
-                onClick={(e) => { e.stopPropagation(); router.push(`/nmap?target=${encodeURIComponent(bare)}`); }}
-              >
-                Port Scan
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={(e) => { e.stopPropagation(); router.push(`/nuclei?target=${encodeURIComponent(asset.value)}`); }}
-              >
-                Scan with Nuclei
-              </DropdownMenuItem>
-              {isDomainLike && (
-                <DropdownMenuItem
-                  onClick={(e) => { e.stopPropagation(); router.push(`/takeover?hosts=${encodeURIComponent(bare)}`); }}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 w-7 p-0 text-zinc-500 hover:text-zinc-300"
                 >
-                  Check Takeover
+                  <MoreHorizontal className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="text-xs w-44">
+                <DropdownMenuItem onClick={() => router.push(nmapUrl)}>
+                  Port Scan
                 </DropdownMenuItem>
-              )}
-              {isWebapp && (
-                <DropdownMenuItem
-                  onClick={(e) => { e.stopPropagation(); router.push(`/ffuf?target=${encodeURIComponent(asset.value + "/FUZZ")}`); }}
-                >
-                  Fuzz Paths
+                <DropdownMenuItem onClick={() => router.push(nucleiUrl)}>
+                  Scan with Nuclei
                 </DropdownMenuItem>
-              )}
-            </DropdownMenuContent>
-          </DropdownMenu>
+                {isDomainLike && (
+                  <DropdownMenuItem onClick={() => router.push(takeoverUrl)}>
+                    Check Takeover
+                  </DropdownMenuItem>
+                )}
+                {isWebapp && (
+                  <DropdownMenuItem onClick={() => router.push(ffufUrl)}>
+                    Fuzz Paths
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         );
       },
