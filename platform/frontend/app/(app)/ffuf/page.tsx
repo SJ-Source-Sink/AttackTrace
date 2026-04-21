@@ -125,8 +125,17 @@ export default function FfufPage() {
   const [statusMsg, setStatusMsg] = useState("");
   const [progressLog, setProgressLog] = useState<string[]>([]);
   const [runningWordlist, setRunningWordlist] = useState("");
-  const [scanHistory, setScanHistory] = useState<ScanHistoryEntry[]>([]);
+  const [scanHistory, setScanHistory] = useState<ScanHistoryEntry[]>(() => {
+    try {
+      const saved = typeof window !== "undefined" ? localStorage.getItem("ffuf_history") : null;
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
   const [selectedHistoryScan, setSelectedHistoryScan] = useState<ScanHistoryEntry | null>(null);
+
+  useEffect(() => {
+    try { localStorage.setItem("ffuf_history", JSON.stringify(scanHistory.slice(0, 20))); } catch {}
+  }, [scanHistory]);
 
   const esRef = useRef<EventSource | null>(null);
   const currentScanIdRef = useRef<string | null>(null);
@@ -622,7 +631,7 @@ export default function FfufPage() {
                   </CardTitle>
                   <button
                     className="text-xs text-zinc-500 hover:text-red-400 transition-colors"
-                    onClick={() => { setScanHistory([]); setSelectedHistoryScan(null); }}
+                    onClick={() => { setScanHistory([]); setSelectedHistoryScan(null); localStorage.removeItem("ffuf_history"); }}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>

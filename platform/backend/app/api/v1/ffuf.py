@@ -14,11 +14,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, AsyncGenerator
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_current_user
+from app.core.database import get_db
+from app.core.dependencies import get_current_org_id, get_current_user
+from app.models.db.audit import AuditLog
 from app.models.db.user import User
 
 router = APIRouter(prefix="/ffuf", tags=["ffuf"])
@@ -457,7 +460,10 @@ async def list_wordlists(
 @router.post("/scan", summary="Run an ffuf scan and stream results via SSE")
 async def run_ffuf_scan(
     payload: FfufScanRequest,
+    request: Request,
     current_user: Annotated[User, Depends(get_current_user)],
+    org_id: uuid.UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     if not shutil.which("ffuf"):
         raise HTTPException(
@@ -484,6 +490,19 @@ async def run_ffuf_scan(
             )
 
     scan_id = str(uuid.uuid4())
+
+    log = AuditLog(
+        org_id=org_id,
+        user_id=current_user.id,
+        action="tool.ffuf.scan",
+        resource_type="ffuf_scan",
+        resource_id=scan_id,
+        after_state={"target": payload.target},
+        ip_address=request.client.host if request.client else None,
+    )
+    db.add(log)
+    await db.commit()
+
     return StreamingResponse(
         _stream_ffuf(scan_id, payload, wordlist),
         media_type="text/event-stream",

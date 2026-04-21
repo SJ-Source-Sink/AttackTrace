@@ -233,8 +233,17 @@ export default function NucleiPage() {
   const [scanStatus, setScanStatus]     = useState<"idle" | "running" | "completed" | "failed">("idle");
   const [filterSev, setFilterSev]       = useState<string | null>(null);
   const [searchQuery, setSearchQuery]   = useState("");
-  const [history, setHistory]           = useState<ScanHistoryEntry[]>([]);
+  const [history, setHistory]           = useState<ScanHistoryEntry[]>(() => {
+    try {
+      const saved = typeof window !== "undefined" ? localStorage.getItem("nuclei_history") : null;
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
   const [showHistory, setShowHistory]   = useState(false);
+
+  useEffect(() => {
+    try { localStorage.setItem("nuclei_history", JSON.stringify(history.slice(0, 20))); } catch {}
+  }, [history]);
   const [progressLog, setProgressLog]   = useState<string[]>([]);
   const [runningCmd, setRunningCmd]     = useState<string>("");
   const progressEndRef                  = useRef<HTMLDivElement | null>(null);
@@ -881,7 +890,7 @@ export default function NucleiPage() {
                 Scan History
               </CardTitle>
               {history.length > 0 && (
-                <Button variant="ghost" size="sm" onClick={() => setHistory([])} className="gap-1.5 text-xs text-zinc-500">
+                <Button variant="ghost" size="sm" onClick={() => { setHistory([]); localStorage.removeItem("nuclei_history"); }} className="gap-1.5 text-xs text-zinc-500">
                   <Trash2 className="h-3 w-3" /> Clear
                 </Button>
               )}

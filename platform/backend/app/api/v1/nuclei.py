@@ -12,11 +12,14 @@ from pathlib import Path
 from typing import Annotated, AsyncGenerator
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_current_user
+from app.core.database import get_db
+from app.core.dependencies import get_current_org_id, get_current_user
+from app.models.db.audit import AuditLog
 from app.models.db.user import User
 
 # Cache CVSS scores to avoid hammering NVD for duplicate CVEs across scans
@@ -342,7 +345,10 @@ async def _stream_nuclei(scan_id: str, req: NucleiScanRequest) -> AsyncGenerator
 @router.post("/scan", summary="Run a nuclei scan and stream results")
 async def run_nuclei_scan(
     payload: NucleiScanRequest,
+    request: Request,
     current_user: Annotated[User, Depends(get_current_user)],
+    org_id: uuid.UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     if not shutil.which("nuclei"):
         raise HTTPException(
@@ -350,6 +356,19 @@ async def run_nuclei_scan(
             detail="nuclei is not installed on this server",
         )
     scan_id = str(uuid.uuid4())
+
+    log = AuditLog(
+        org_id=org_id,
+        user_id=current_user.id,
+        action="tool.nuclei.scan",
+        resource_type="nuclei_scan",
+        resource_id=scan_id,
+        after_state={"target": payload.target},
+        ip_address=request.client.host if request.client else None,
+    )
+    db.add(log)
+    await db.commit()
+
     return StreamingResponse(
         _stream_nuclei(scan_id, payload),
         media_type="text/event-stream",

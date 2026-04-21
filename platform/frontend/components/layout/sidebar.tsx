@@ -22,6 +22,8 @@ import {
   BrainCircuit,
   GitFork,
   Map,
+  ScrollText,
+  FlaskConical,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -60,23 +62,28 @@ const navItems: NavItem[] = [
     href: "/reports",
     icon: FileText,
   },
+];
+
+const toolItems: NavItem[] = [
   {
     label: "Nmap Scanner",
     href: "/nmap",
     icon: Network,
-    badge: "Tool",
   },
   {
     label: "Nuclei Scanner",
     href: "/nuclei",
     icon: Crosshair,
-    badge: "Tool",
   },
   {
     label: "ffuf Fuzzer",
     href: "/ffuf",
     icon: Wind,
-    badge: "Tool",
+  },
+  {
+    label: "Test Case Generator",
+    href: "/test-generator",
+    icon: FlaskConical,
   },
 ];
 
@@ -85,7 +92,6 @@ const attackSuiteItems: NavItem[] = [
     label: "Attack Suite",
     href: "/attack-suite",
     icon: Swords,
-    badge: "New",
   },
   {
     label: "AI Attack Suite",
@@ -97,13 +103,11 @@ const attackSuiteItems: NavItem[] = [
     label: "Takeover Checker",
     href: "/takeover",
     icon: GitFork,
-    badge: "New",
   },
   {
     label: "Attack Path Mapper",
     href: "/attackmapper",
     icon: Map,
-    badge: "New",
   },
 ];
 
@@ -127,6 +131,11 @@ const settingsItems: NavItem[] = [
     label: "API Keys",
     href: "/settings/api-keys",
     icon: Key,
+  },
+  {
+    label: "Audit Log",
+    href: "/settings/audit-log",
+    icon: ScrollText,
   },
 ];
 
@@ -186,7 +195,7 @@ export function Sidebar({ className }: SidebarProps) {
         </div>
         <div>
           <div className="text-sm font-bold text-zinc-100 leading-none">AttackTrace</div>
-          <div className="text-xs text-zinc-500 leading-none mt-0.5">Attack Surface</div>
+          <div className="text-xs text-zinc-500 leading-none mt-0.5">Recon & Security Toolkit</div>
         </div>
       </div>
 
@@ -200,6 +209,19 @@ export function Sidebar({ className }: SidebarProps) {
           </div>
           <div className="space-y-0.5">
             {navItems.map((item) => (
+              <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
+            ))}
+          </div>
+        </div>
+
+        <div className="mb-4">
+          <div className="px-3 pb-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+              Tools
+            </p>
+          </div>
+          <div className="space-y-0.5">
+            {toolItems.map((item) => (
               <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
             ))}
           </div>
@@ -236,7 +258,7 @@ export function Sidebar({ className }: SidebarProps) {
       <div className="border-t border-zinc-800 p-3">
         <div className="rounded-md bg-zinc-900 p-3">
           <p className="text-xs font-medium text-zinc-300">AttackTrace</p>
-          <p className="text-xs text-zinc-500 mt-0.5">Attack Surface Management</p>
+          <p className="text-xs text-zinc-500 mt-0.5">Recon & Security Toolkit</p>
           <div className="mt-2 flex items-center gap-1.5">
             <div className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
             <span className="text-xs text-emerald-400">All systems operational</span>

@@ -106,11 +106,12 @@ async def register(
     )
     db.add(member)
 
-    # Mark invite as used
-    from datetime import timezone as tz
-    invite.used_at = datetime.now(tz.utc)
-    invite.used_by = user.id
-    db.add(invite)
+    # Only consume single-use (email-restricted) invites; open codes stay reusable
+    if invite.email:
+        from datetime import timezone as tz
+        invite.used_at = datetime.now(tz.utc)
+        invite.used_by = user.id
+        db.add(invite)
 
     await db.flush()
 

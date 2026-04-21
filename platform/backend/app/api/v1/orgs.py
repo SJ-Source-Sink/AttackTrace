@@ -929,6 +929,65 @@ async def update_current_org_credentials(
     }
 
 
+# --- Direct Member Creation ---
+
+from app.core.security import hash_password as _hash_password
+from pydantic import BaseModel as _BaseModel, EmailStr as _EmailStr
+
+
+class CreateMemberPayload(_BaseModel):
+    full_name: str
+    email: _EmailStr
+    password: str
+    role: str = "analyst"
+
+
+@org_router.post("/members/create", summary="Directly create a new user and add to org", status_code=201)
+async def create_member_direct(
+    payload: CreateMemberPayload,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Admin creates a new user account directly — no invite code needed."""
+    await _require_org_role(db, current_user.id, org_id, [MemberRole.OWNER, MemberRole.ADMIN])
+
+    # Check email not taken
+    existing_user = await db.execute(select(User).where(User.email == payload.email.lower()))
+    if existing_user.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": {"code": "EMAIL_EXISTS", "message": "A user with that email already exists"}},
+        )
+
+    try:
+        member_role = MemberRole(payload.role)
+    except ValueError:
+        member_role = MemberRole.ANALYST
+
+    user = User(
+        email=payload.email.lower(),
+        hashed_password=_hash_password(payload.password),
+        full_name=payload.full_name,
+        is_active=True,
+    )
+    db.add(user)
+    await db.flush()
+    await db.refresh(user)
+
+    member = OrgMember(user_id=user.id, org_id=org_id, role=member_role)
+    db.add(member)
+    await db.flush()
+
+    return {
+        "user_id": str(user.id),
+        "full_name": user.full_name,
+        "email": user.email,
+        "role": member_role.value,
+        "joined_at": member.joined_at.isoformat(),
+    }
+
+
 # --- Invite Codes ---
 
 import secrets as _secrets
@@ -941,6 +1000,79 @@ def _generate_invite_code() -> str:
     part1 = "".join(_secrets.choice(chars) for _ in range(4))
     part2 = "".join(_secrets.choice(chars) for _ in range(4))
     return f"AttackTrace-{part1}-{part2}"
+
+
+@org_router.get("/invite-link", summary="Get the org's permanent invite link (creates one if missing)")
+async def get_invite_link(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    await _require_org_role(db, current_user.id, org_id, [MemberRole.OWNER, MemberRole.ADMIN])
+
+    # Find existing permanent open invite code
+    result = await db.execute(
+        select(InviteCode).where(
+            InviteCode.org_id == org_id,
+            InviteCode.email.is_(None),
+            InviteCode.expires_at.is_(None),
+            InviteCode.is_revoked == False,
+        )
+    )
+    invite = result.scalar_one_or_none()
+
+    if not invite:
+        code = _generate_invite_code()
+        invite = InviteCode(
+            org_id=org_id,
+            created_by=current_user.id,
+            code=code,
+            role=MemberRole.ANALYST.value,
+            email=None,
+            expires_at=None,
+            is_revoked=False,
+        )
+        db.add(invite)
+        await db.flush()
+
+    return {"code": invite.code, "id": str(invite.id)}
+
+
+@org_router.post("/invite-link/regenerate", summary="Regenerate the org's permanent invite link", status_code=201)
+async def regenerate_invite_link(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    await _require_org_role(db, current_user.id, org_id, [MemberRole.OWNER, MemberRole.ADMIN])
+
+    # Revoke existing permanent open codes
+    result = await db.execute(
+        select(InviteCode).where(
+            InviteCode.org_id == org_id,
+            InviteCode.email.is_(None),
+            InviteCode.expires_at.is_(None),
+            InviteCode.is_revoked == False,
+        )
+    )
+    for old in result.scalars().all():
+        old.is_revoked = True
+        db.add(old)
+
+    code = _generate_invite_code()
+    invite = InviteCode(
+        org_id=org_id,
+        created_by=current_user.id,
+        code=code,
+        role=MemberRole.ANALYST.value,
+        email=None,
+        expires_at=None,
+        is_revoked=False,
+    )
+    db.add(invite)
+    await db.flush()
+
+    return {"code": invite.code, "id": str(invite.id)}
 
 
 @org_router.get("/invite-codes", summary="List invite codes for current org")
@@ -1035,6 +1167,69 @@ async def revoke_invite_code(
     invite.is_revoked = True
     db.add(invite)
     await db.flush()
+
+
+# --- Audit Logs ---
+
+from app.models.db.audit import AuditLog as _AuditLog
+
+
+@org_router.get("/audit-logs", summary="List audit log events for the current org")
+async def list_audit_logs(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+    limit: int = 100,
+    offset: int = 0,
+    action: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> dict:
+    await _require_org_role(db, current_user.id, org_id, [MemberRole.OWNER, MemberRole.ADMIN, MemberRole.ANALYST])
+
+    query = (
+        select(_AuditLog, User.full_name, User.email)
+        .outerjoin(User, User.id == _AuditLog.user_id)
+        .where(_AuditLog.org_id == org_id)
+    )
+    if action:
+        query = query.where(_AuditLog.action.ilike(f"%{action}%"))
+    if user_id:
+        try:
+            query = query.where(_AuditLog.user_id == UUID(user_id))
+        except ValueError:
+            pass
+
+    count_q = select(func.count()).select_from(_AuditLog).where(_AuditLog.org_id == org_id)
+    if action:
+        count_q = count_q.where(_AuditLog.action.ilike(f"%{action}%"))
+    if user_id:
+        try:
+            count_q = count_q.where(_AuditLog.user_id == UUID(user_id))
+        except ValueError:
+            pass
+    total_result = await db.execute(count_q)
+    total = total_result.scalar() or 0
+
+    query = query.order_by(_AuditLog.created_at.desc()).offset(offset).limit(min(limit, 200))
+    result = await db.execute(query)
+    rows = result.all()
+
+    items = []
+    for log, full_name, email in rows:
+        items.append({
+            "id": str(log.id),
+            "action": log.action,
+            "resource_type": log.resource_type,
+            "resource_id": log.resource_id,
+            "after_state": log.after_state,
+            "ip_address": log.ip_address,
+            "created_at": log.created_at.isoformat(),
+            "user_id": str(log.user_id) if log.user_id else None,
+            "user_name": full_name or "Unknown",
+            "user_email": email or "",
+        })
+
+    return {"items": items, "total": total}
 
 
 # --- Helpers ---

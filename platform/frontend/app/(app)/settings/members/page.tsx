@@ -4,193 +4,95 @@ import React, { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   UserPlus, Trash2, MoreVertical, Loader2, Shield, Eye, Edit, Crown,
-  KeyRound, Copy, Check, Link2, Clock, XCircle, RefreshCw, Plus,
+  Copy, Check, Link2, RefreshCw, ChevronDown,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-  DialogDescription,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/shared/loading-skeleton";
-import { orgApi, type InviteCodeItem } from "@/lib/api";
+import { orgApi } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
 import { toast } from "sonner";
 import type { OrgMember, UserRole } from "@/types";
 
-const ROLE_CONFIG: Record<UserRole, { label: string; icon: React.ElementType; color: string }> = {
-  owner: { label: "Owner", icon: Crown, color: "text-yellow-400" },
-  admin: { label: "Admin", icon: Shield, color: "text-blue-400" },
-  analyst: { label: "Analyst", icon: Edit, color: "text-emerald-400" },
-  viewer: { label: "Viewer", icon: Eye, color: "text-zinc-400" },
+const ROLE_CONFIG: Record<UserRole, { label: string; icon: React.ElementType; color: string; desc: string }> = {
+  owner:   { label: "Owner",   icon: Crown,  color: "text-yellow-400", desc: "Full access" },
+  admin:   { label: "Admin",   icon: Shield, color: "text-blue-400",   desc: "Manage team & settings" },
+  analyst: { label: "Analyst", icon: Edit,   color: "text-emerald-400",desc: "Run scans, manage findings" },
+  viewer:  { label: "Viewer",  icon: Eye,    color: "text-zinc-400",   desc: "Read-only access" },
 };
 
-function getInitials(name: string): string {
+function getInitials(name: string) {
   return name.split(" ").map((n) => n[0]).join("").toUpperCase().slice(0, 2);
 }
 
-function getInviteUrl(code: string): string {
+function getInviteUrl(code: string) {
   const base = typeof window !== "undefined" ? window.location.origin : "";
   return `${base}/register?code=${code}`;
 }
 
-function InviteCodeRow({ item, onRevoke }: { item: InviteCodeItem; onRevoke: (id: string) => void }) {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = () => {
-    navigator.clipboard.writeText(getInviteUrl(item.code)).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  };
-
-  const status = item.is_revoked
-    ? { label: "Revoked", color: "bg-zinc-800 text-zinc-500", icon: XCircle }
-    : item.used_at
-    ? { label: "Used", color: "bg-emerald-500/10 text-emerald-400", icon: Check }
-    : !item.is_valid
-    ? { label: "Expired", color: "bg-amber-500/10 text-amber-400", icon: Clock }
-    : { label: "Active", color: "bg-blue-500/10 text-blue-400", icon: RefreshCw };
-
-  const StatusIcon = status.icon;
-  const roleConfig = ROLE_CONFIG[item.role as UserRole] ?? ROLE_CONFIG.analyst;
-  const RoleIcon = roleConfig.icon;
-
-  return (
-    <div className="flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3 hover:border-zinc-700 transition-colors">
-      <div className="flex-shrink-0">
-        <KeyRound className="h-4 w-4 text-zinc-500" />
-      </div>
-
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="font-mono text-sm font-medium text-zinc-200 tracking-wider">
-            {item.code}
-          </span>
-          <span className={`inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded ${status.color}`}>
-            <StatusIcon className="h-3 w-3" />
-            {status.label}
-          </span>
-        </div>
-        <div className="flex items-center gap-3 mt-0.5">
-          <span className={`flex items-center gap-1 text-xs ${roleConfig.color}`}>
-            <RoleIcon className="h-3 w-3" />
-            {roleConfig.label}
-          </span>
-          {item.email && (
-            <span className="text-xs text-zinc-600">for {item.email}</span>
-          )}
-          {item.expires_at && !item.used_at && (
-            <span className="text-xs text-zinc-600">
-              expires {formatDate(item.expires_at)}
-            </span>
-          )}
-          {item.used_at && (
-            <span className="text-xs text-zinc-600">
-              used {formatDate(item.used_at)}
-            </span>
-          )}
-          {!item.used_at && !item.is_revoked && (
-            <span className="text-xs text-zinc-600">
-              created {formatDate(item.created_at)}
-            </span>
-          )}
-        </div>
-      </div>
-
-      {item.is_valid && !item.is_revoked && !item.used_at && (
-        <div className="flex items-center gap-1.5">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 gap-1.5 text-xs text-zinc-400 hover:text-zinc-200"
-            onClick={handleCopy}
-          >
-            {copied ? (
-              <Check className="h-3.5 w-3.5 text-emerald-400" />
-            ) : (
-              <Copy className="h-3.5 w-3.5" />
-            )}
-            {copied ? "Copied!" : "Copy link"}
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 text-zinc-600 hover:text-red-400"
-            onClick={() => onRevoke(item.id)}
-          >
-            <XCircle className="h-4 w-4" />
-          </Button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function MembersPage() {
   const queryClient = useQueryClient();
-  const [showGenerate, setShowGenerate] = useState(false);
-  const [codeRole, setCodeRole] = useState<UserRole>("analyst");
-  const [codeEmail, setCodeEmail] = useState("");
-  const [codeExpiry, setCodeExpiry] = useState("7");
 
+  // Add member dialog state
+  const [showAdd, setShowAdd] = useState(false);
+  const [newName, setNewName]       = useState("");
+  const [newEmail, setNewEmail]     = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [newRole, setNewRole]       = useState<UserRole>("analyst");
+
+  // Invite link copy state
+  const [linkCopied, setLinkCopied] = useState(false);
+
+  // Members
   const { data: membersData, isLoading: membersLoading } = useQuery({
     queryKey: ["org", "members"],
     queryFn: () => orgApi.members() as Promise<{ items: OrgMember[] } | OrgMember[]>,
     staleTime: 60_000,
   });
-  const members = Array.isArray(membersData) ? membersData : (membersData as { items: OrgMember[] })?.items ?? [];
+  const members = Array.isArray(membersData)
+    ? membersData
+    : (membersData as { items: OrgMember[] })?.items ?? [];
 
-  const { data: inviteCodes, isLoading: codesLoading } = useQuery({
-    queryKey: ["org", "invite-codes"],
-    queryFn: () => orgApi.inviteCodes(),
-    staleTime: 30_000,
+  // Invite link
+  const { data: inviteLink, isLoading: linkLoading } = useQuery({
+    queryKey: ["org", "invite-link"],
+    queryFn: () => orgApi.getInviteLink(),
+    staleTime: Infinity,
   });
 
-  const generateMutation = useMutation({
-    mutationFn: () =>
-      orgApi.createInviteCode({
-        role: codeRole,
-        email: codeEmail.trim() || undefined,
-        expires_in_days: parseInt(codeExpiry, 10),
-      }),
-    onSuccess: (newCode) => {
-      queryClient.invalidateQueries({ queryKey: ["org", "invite-codes"] });
-      setShowGenerate(false);
-      setCodeEmail("");
-      // Auto-copy the link
-      const url = getInviteUrl(newCode.code);
-      navigator.clipboard.writeText(url).catch(() => {});
-      toast.success(`Invite code ${newCode.code} generated — link copied!`);
-    },
-    onError: (err: Error) => toast.error(err.message),
-  });
-
-  const revokeMutation = useMutation({
-    mutationFn: (id: string) => orgApi.revokeInviteCode(id),
+  // Create member directly
+  const createMutation = useMutation({
+    mutationFn: () => orgApi.createMember({ full_name: newName, email: newEmail, password: newPassword, role: newRole }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["org", "invite-codes"] });
-      toast.success("Invite code revoked");
+      queryClient.invalidateQueries({ queryKey: ["org", "members"] });
+      setShowAdd(false);
+      setNewName(""); setNewEmail(""); setNewPassword(""); setNewRole("analyst");
+      toast.success("Member added successfully");
     },
     onError: (err: Error) => toast.error(err.message),
   });
 
+  // Regenerate invite link
+  const regenMutation = useMutation({
+    mutationFn: () => orgApi.regenerateInviteLink(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["org", "invite-link"] });
+      toast.success("Invite link regenerated");
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  // Remove member
   const removeMutation = useMutation({
     mutationFn: (userId: string) => orgApi.removeMember(userId),
     onSuccess: () => {
@@ -200,6 +102,7 @@ export default function MembersPage() {
     onError: (err: Error) => toast.error(err.message),
   });
 
+  // Update role
   const updateRoleMutation = useMutation({
     mutationFn: ({ userId, role }: { userId: string; role: UserRole }) =>
       orgApi.updateMemberRole(userId, role),
@@ -210,48 +113,84 @@ export default function MembersPage() {
     onError: (err: Error) => toast.error(err.message),
   });
 
-  const activeCodes = inviteCodes?.items?.filter((c) => c.is_valid && !c.is_revoked && !c.used_at) ?? [];
-  const pastCodes = inviteCodes?.items?.filter((c) => !c.is_valid || c.is_revoked || c.used_at) ?? [];
+  const copyInviteLink = () => {
+    if (!inviteLink?.code) return;
+    navigator.clipboard.writeText(getInviteUrl(inviteLink.code)).then(() => {
+      setLinkCopied(true);
+      setTimeout(() => setLinkCopied(false), 2000);
+    });
+  };
+
+  const canSubmit = newName.trim() && newEmail.trim() && newPassword.trim();
 
   return (
     <div className="space-y-8 max-w-3xl">
-      <PageHeader
-        title="Team Members"
-        description="Manage team access and permissions"
-      >
-        <Button onClick={() => setShowGenerate(true)} className="gap-1.5">
-          <KeyRound className="h-4 w-4" />
-          Generate Invite Code
+      <PageHeader title="Team Members" description="Manage team access and permissions">
+        <Button onClick={() => setShowAdd(true)} className="gap-1.5">
+          <UserPlus className="h-4 w-4" />
+          Add Member
         </Button>
       </PageHeader>
 
-      {/* Role descriptions */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {(Object.entries(ROLE_CONFIG) as [UserRole, typeof ROLE_CONFIG[UserRole]][]).map(([role, config]) => {
-          const Icon = config.icon;
-          return (
-            <div key={role} className="rounded-lg border border-zinc-800 bg-zinc-900 p-3">
-              <Icon className={`h-4 w-4 ${config.color} mb-2`} />
-              <p className={`text-sm font-semibold ${config.color}`}>{config.label}</p>
-              <p className="text-xs text-zinc-600 mt-0.5">
-                {role === "owner" && "Full access"}
-                {role === "admin" && "Manage team & settings"}
-                {role === "analyst" && "Run scans, manage findings"}
-                {role === "viewer" && "Read-only access"}
-              </p>
+      {/* Invite Link */}
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2 mb-0.5">
+              <Link2 className="h-4 w-4 text-blue-400" />
+              <p className="text-sm font-semibold text-zinc-200">Invite Link</p>
             </div>
-          );
-        })}
+            <p className="text-xs text-zinc-500">
+              Share this link so teammates can create their own account.
+            </p>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-xs text-zinc-500 hover:text-zinc-300 gap-1.5 shrink-0"
+            onClick={() => regenMutation.mutate()}
+            disabled={regenMutation.isPending}
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${regenMutation.isPending ? "animate-spin" : ""}`} />
+            Regenerate
+          </Button>
+        </div>
+
+        <div className="mt-3 flex items-center gap-2">
+          <div className="flex-1 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 min-w-0">
+            {linkLoading ? (
+              <Skeleton className="h-4 w-64" />
+            ) : (
+              <span className="text-xs font-mono text-zinc-400 truncate block">
+                {inviteLink ? getInviteUrl(inviteLink.code) : "—"}
+              </span>
+            )}
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            className="gap-1.5 shrink-0 border-zinc-700"
+            onClick={copyInviteLink}
+            disabled={!inviteLink}
+          >
+            {linkCopied ? (
+              <><Check className="h-3.5 w-3.5 text-emerald-400" /> Copied</>
+            ) : (
+              <><Copy className="h-3.5 w-3.5" /> Copy</>
+            )}
+          </Button>
+        </div>
       </div>
 
       {/* Members list */}
       <div className="space-y-2">
-        <h2 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider">
-          Members ({members?.length ?? 0})
+        <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider px-1">
+          Members ({members.length})
         </h2>
+
         {membersLoading
           ? Array.from({ length: 3 }).map((_, i) => (
-              <div key={i} className="flex items-center gap-3 p-4 rounded-lg border border-zinc-800">
+              <div key={i} className="flex items-center gap-3 p-4 rounded-xl border border-zinc-800">
                 <Skeleton className="h-10 w-10 rounded-full" />
                 <div className="flex-1 space-y-1.5">
                   <Skeleton className="h-4 w-32" />
@@ -259,53 +198,44 @@ export default function MembersPage() {
                 </div>
               </div>
             ))
-          : members?.map((member) => {
-              const roleConfig = ROLE_CONFIG[member.role] ?? ROLE_CONFIG.analyst;
-              const RoleIcon = roleConfig.icon;
-
+          : members.map((member) => {
+              const cfg = ROLE_CONFIG[member.role] ?? ROLE_CONFIG.analyst;
+              const RoleIcon = cfg.icon;
               return (
                 <div
                   key={member.user_id}
-                  className="flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900 p-4 hover:border-zinc-700 transition-colors"
+                  className="flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3 hover:border-zinc-700 transition-colors"
                 >
-                  <Avatar className="h-10 w-10">
-                    <AvatarFallback>{getInitials(member.full_name)}</AvatarFallback>
+                  <Avatar className="h-9 w-9 shrink-0">
+                    <AvatarFallback className="text-xs">{getInitials(member.full_name)}</AvatarFallback>
                   </Avatar>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-zinc-200">{member.full_name}</p>
-                    <p className="text-xs text-zinc-500">{member.email}</p>
+                    <p className="text-sm font-medium text-zinc-200 leading-none">{member.full_name}</p>
+                    <p className="text-xs text-zinc-500 mt-0.5">{member.email}</p>
                   </div>
-                  <div className="flex items-center gap-3">
-                    <div className={`flex items-center gap-1 text-xs font-medium ${roleConfig.color}`}>
-                      <RoleIcon className="h-3.5 w-3.5" />
-                      {roleConfig.label}
-                    </div>
-                    <span className="text-xs text-zinc-600">
-                      Joined {formatDate(member.joined_at)}
-                    </span>
+                  <div className={`flex items-center gap-1 text-xs font-medium ${cfg.color}`}>
+                    <RoleIcon className="h-3.5 w-3.5" />
+                    {cfg.label}
                   </div>
+                  <span className="text-xs text-zinc-600 hidden sm:block">
+                    {formatDate(member.joined_at)}
+                  </span>
 
                   {member.role !== "owner" && (
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="icon" className="h-8 w-8">
+                        <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0">
                           <MoreVertical className="h-4 w-4" />
                         </Button>
                       </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem
-                          onClick={() => updateRoleMutation.mutate({ userId: member.user_id, role: "admin" })}
-                        >
+                      <DropdownMenuContent align="end" className="w-44">
+                        <DropdownMenuItem onClick={() => updateRoleMutation.mutate({ userId: member.user_id, role: "admin" })}>
                           Make Admin
                         </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onClick={() => updateRoleMutation.mutate({ userId: member.user_id, role: "analyst" })}
-                        >
+                        <DropdownMenuItem onClick={() => updateRoleMutation.mutate({ userId: member.user_id, role: "analyst" })}>
                           Make Analyst
                         </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onClick={() => updateRoleMutation.mutate({ userId: member.user_id, role: "viewer" })}
-                        >
+                        <DropdownMenuItem onClick={() => updateRoleMutation.mutate({ userId: member.user_id, role: "viewer" })}>
                           Make Viewer
                         </DropdownMenuItem>
                         <DropdownMenuSeparator />
@@ -313,8 +243,8 @@ export default function MembersPage() {
                           className="text-red-400 focus:text-red-400 focus:bg-red-400/10"
                           onClick={() => removeMutation.mutate(member.user_id)}
                         >
-                          <Trash2 className="h-4 w-4 mr-2" />
-                          Remove from team
+                          <Trash2 className="h-3.5 w-3.5 mr-2" />
+                          Remove
                         </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
@@ -324,167 +254,84 @@ export default function MembersPage() {
             })}
       </div>
 
-      {/* Invite Codes section */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider">
-              Invite Codes
-            </h2>
-            <p className="text-xs text-zinc-600 mt-0.5">
-              Generate a code and share the link — anyone with it can join your org
-            </p>
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1.5"
-            onClick={() => setShowGenerate(true)}
-          >
-            <Plus className="h-3.5 w-3.5" />
-            New Code
-          </Button>
-        </div>
-
-        {codesLoading ? (
-          Array.from({ length: 2 }).map((_, i) => (
-            <div key={i} className="flex items-center gap-3 p-4 rounded-lg border border-zinc-800">
-              <Skeleton className="h-4 w-40" />
-              <Skeleton className="h-4 w-20 ml-auto" />
-            </div>
-          ))
-        ) : activeCodes.length === 0 && pastCodes.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-zinc-800 p-8 text-center">
-            <KeyRound className="h-8 w-8 text-zinc-700 mx-auto mb-3" />
-            <p className="text-sm text-zinc-500">No invite codes yet</p>
-            <p className="text-xs text-zinc-600 mt-1">
-              Generate a code to invite team members
-            </p>
-            <Button
-              size="sm"
-              className="mt-4 gap-1.5"
-              onClick={() => setShowGenerate(true)}
-            >
-              <KeyRound className="h-3.5 w-3.5" />
-              Generate first code
-            </Button>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {activeCodes.length > 0 && (
-              <>
-                <p className="text-xs text-zinc-600 font-medium uppercase tracking-wide pl-1">Active</p>
-                {activeCodes.map((item) => (
-                  <InviteCodeRow
-                    key={item.id}
-                    item={item}
-                    onRevoke={(id) => revokeMutation.mutate(id)}
-                  />
-                ))}
-              </>
-            )}
-            {pastCodes.length > 0 && (
-              <>
-                <p className="text-xs text-zinc-600 font-medium uppercase tracking-wide pl-1 mt-3">
-                  Past codes
-                </p>
-                {pastCodes.map((item) => (
-                  <InviteCodeRow
-                    key={item.id}
-                    item={item}
-                    onRevoke={(id) => revokeMutation.mutate(id)}
-                  />
-                ))}
-              </>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Generate Code Dialog */}
-      <Dialog open={showGenerate} onOpenChange={setShowGenerate}>
-        <DialogContent>
+      {/* Add Member Dialog */}
+      <Dialog open={showAdd} onOpenChange={setShowAdd}>
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <KeyRound className="h-4 w-4 text-blue-400" />
-              Generate Invite Code
+              <UserPlus className="h-4 w-4 text-blue-400" />
+              Add Team Member
             </DialogTitle>
             <DialogDescription>
-              Create a shareable invite link. The recipient uses it to register their account.
+              Create an account for your teammate. Share the credentials with them directly.
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4 py-2">
+          <div className="space-y-4 py-1">
+            <div className="space-y-1.5">
+              <Label>Full name</Label>
+              <Input
+                placeholder="Jane Smith"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Email</Label>
+              <Input
+                type="email"
+                placeholder="jane@company.com"
+                value={newEmail}
+                onChange={(e) => setNewEmail(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Temporary password</Label>
+              <Input
+                type="text"
+                placeholder="They can change this after login"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+              />
+            </div>
             <div className="space-y-1.5">
               <Label>Role</Label>
-              <Select value={codeRole} onValueChange={(v) => setCodeRole(v as UserRole)}>
+              <Select value={newRole} onValueChange={(v) => setNewRole(v as UserRole)}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="admin">Admin — Manage team & settings</SelectItem>
-                  <SelectItem value="analyst">Analyst — Run scans, manage findings</SelectItem>
-                  <SelectItem value="viewer">Viewer — Read-only access</SelectItem>
+                  {(["admin", "analyst", "viewer"] as UserRole[]).map((r) => {
+                    const c = ROLE_CONFIG[r];
+                    const Icon = c.icon;
+                    return (
+                      <SelectItem key={r} value={r}>
+                        <span className="flex items-center gap-2">
+                          <Icon className={`h-3.5 w-3.5 ${c.color}`} />
+                          <span>{c.label}</span>
+                          <span className="text-zinc-500 text-xs">— {c.desc}</span>
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
                 </SelectContent>
               </Select>
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="code-email">
-                Restrict to email{" "}
-                <span className="text-zinc-600 font-normal">(optional)</span>
-              </Label>
-              <Input
-                id="code-email"
-                type="email"
-                placeholder="colleague@company.com"
-                value={codeEmail}
-                onChange={(e) => setCodeEmail(e.target.value)}
-              />
-              <p className="text-xs text-zinc-600">
-                Leave blank to allow any email
-              </p>
-            </div>
-
-            <div className="space-y-1.5">
-              <Label>Expires in</Label>
-              <Select value={codeExpiry} onValueChange={setCodeExpiry}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="1">1 day</SelectItem>
-                  <SelectItem value="3">3 days</SelectItem>
-                  <SelectItem value="7">7 days</SelectItem>
-                  <SelectItem value="14">14 days</SelectItem>
-                  <SelectItem value="30">30 days</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2.5 flex items-center gap-2">
-              <Link2 className="h-3.5 w-3.5 text-zinc-500 shrink-0" />
-              <span className="text-xs text-zinc-500 font-mono truncate">
-                {typeof window !== "undefined" ? window.location.origin : ""}/register?code=AttackTrace-XXXX-XXXX
-              </span>
             </div>
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowGenerate(false)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setShowAdd(false)}>Cancel</Button>
             <Button
-              onClick={() => generateMutation.mutate()}
-              disabled={generateMutation.isPending}
+              onClick={() => createMutation.mutate()}
+              disabled={createMutation.isPending || !canSubmit}
               className="gap-1.5"
             >
-              {generateMutation.isPending ? (
+              {createMutation.isPending ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
-                <KeyRound className="h-4 w-4" />
+                <UserPlus className="h-4 w-4" />
               )}
-              Generate & Copy Link
+              Create Account
             </Button>
           </DialogFooter>
         </DialogContent>

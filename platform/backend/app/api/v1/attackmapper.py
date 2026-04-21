@@ -459,6 +459,171 @@ async def get_cves(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+class CorrelateRequest(BaseModel):
+    cve_ids: list[str]
+    infrastructure_type: str = "ad"
+
+    @field_validator("infrastructure_type")
+    @classmethod
+    def validate_infra_type(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in VALID_INFRA:
+            raise ValueError(f"infrastructure_type must be one of: {', '.join(sorted(VALID_INFRA))}")
+        return v
+
+    @field_validator("cve_ids")
+    @classmethod
+    def validate_cve_ids(cls, v: list[str]) -> list[str]:
+        import re
+        cleaned = []
+        for cve in v:
+            cve = cve.strip().upper()
+            if re.match(r"^CVE-\d{4}-\d+$", cve):
+                cleaned.append(cve)
+        if not cleaned:
+            raise ValueError("No valid CVE IDs provided (expected format: CVE-YYYY-NNNNN)")
+        return cleaned[:50]  # cap at 50
+
+
+def _tokenize(text: str) -> set[str]:
+    """Extract meaningful lowercase tokens from text, removing stop words."""
+    import re as _re
+    text = text.lower()
+    text = _re.sub(r"[^a-z0-9\s]", " ", text)
+    stopwords = {
+        "the", "a", "an", "and", "or", "in", "on", "at", "to", "for", "of",
+        "with", "this", "that", "is", "are", "was", "be", "by", "from", "it",
+        "its", "as", "can", "may", "via", "using", "use", "used", "allow",
+        "allows", "attacker", "attackers", "remote", "local", "access",
+        "could", "when", "which", "has", "have", "not", "if", "into",
+    }
+    return {w for w in text.split() if len(w) > 2 and w not in stopwords}
+
+
+@router.post("/correlate", summary="Correlate CVE IDs to attack techniques via keyword scoring")
+async def correlate_cves(
+    payload: CorrelateRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """
+    Match CVE IDs to relevant attack techniques using keyword overlap scoring.
+    Boosts: infrastructure match ×1.5, in-the-wild exploitation ×1.2, CVSS≥9 ×1.3.
+    """
+    import sqlite3 as _sqlite3
+
+    # ── 1. Load CVE details from SQLite cache ─────────────────────────────────
+    cve_map: dict[str, dict] = {}
+    if os.path.exists(_INTEL_DB):
+        conn = _sqlite3.connect(_INTEL_DB)
+        cursor = conn.cursor()
+        placeholders = ",".join("?" * len(payload.cve_ids))
+        cursor.execute(
+            f"SELECT cve_id, description, cvss_score, severity, affected_products, "
+            f"affected_infrastructure, exploitation_status FROM cves WHERE cve_id IN ({placeholders})",
+            payload.cve_ids,
+        )
+        for row in cursor.fetchall():
+            try:
+                products = json.loads(row[4]) if row[4] else []
+            except Exception:
+                products = []
+            try:
+                infra = json.loads(row[5]) if row[5] else []
+            except Exception:
+                infra = []
+            cve_map[row[0]] = {
+                "cve_id": row[0],
+                "description": row[1] or "",
+                "cvss_score": row[2] or 0.0,
+                "severity": row[3] or "unknown",
+                "affected_products": products,
+                "affected_infrastructure": infra,
+                "exploitation_status": row[6] or "",
+            }
+        conn.close()
+
+    # ── 2. Load techniques via CLI ─────────────────────────────────────────────
+    am_bin = shutil.which("attackmapper") or "attackmapper"
+    techniques: list[dict] = []
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+        tech_file = tmp.name
+    tech_data = await _run_attackmapper_cmd(
+        [am_bin, payload.infrastructure_type, "--format", "json", "--output", tech_file],
+        tech_file,
+    )
+    if tech_data:
+        techniques = tech_data.get("techniques", [])
+
+    # Pre-tokenize techniques once
+    tech_token_cache: list[tuple[dict, set[str]]] = []
+    for tech in techniques:
+        tokens: set[str] = _tokenize(tech.get("name", ""))
+        tokens |= _tokenize(tech.get("description", ""))
+        for item in tech.get("tools", []):
+            tokens |= _tokenize(item)
+        for item in tech.get("prerequisites", []):
+            tokens |= _tokenize(item)
+        tech_token_cache.append((tech, tokens))
+
+    # ── 3. Score each CVE ─────────────────────────────────────────────────────
+    results = []
+
+    for cve_id in payload.cve_ids:
+        cve = cve_map.get(cve_id)
+        if not cve:
+            results.append({
+                "cve": {"cve_id": cve_id, "not_found": True},
+                "techniques": [],
+                "error": "CVE not found in local cache — run Update Intel to populate the database.",
+            })
+            continue
+
+        cve_tokens = _tokenize(cve["description"])
+        for p in cve["affected_products"]:
+            cve_tokens |= _tokenize(p)
+
+        scored = []
+        for tech, tech_tokens in tech_token_cache:
+            if not cve_tokens or not tech_tokens:
+                continue
+            overlap = cve_tokens & tech_tokens
+            if not overlap:
+                continue
+
+            # Jaccard-like score normalised by geometric mean of token set sizes
+            base_score = len(overlap) / (len(cve_tokens) ** 0.5 * len(tech_tokens) ** 0.5 + 1e-9)
+
+            multiplier = 1.0
+            if payload.infrastructure_type in (tech.get("infrastructure") or "").lower():
+                multiplier *= 1.5
+            if cve["exploitation_status"] == "in-the-wild":
+                multiplier *= 1.2
+            if cve["cvss_score"] >= 9.0:
+                multiplier *= 1.3
+            elif cve["cvss_score"] >= 7.0:
+                multiplier *= 1.1
+
+            final_score = base_score * multiplier
+            if final_score >= 0.15:
+                confidence = "high"
+            elif final_score >= 0.07:
+                confidence = "medium"
+            else:
+                confidence = "low"
+
+            scored.append({
+                "technique": tech,
+                "score": round(final_score, 4),
+                "confidence": confidence,
+                "matched_keywords": sorted(list(overlap))[:10],
+            })
+
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        results.append({"cve": cve, "techniques": scored[:8]})
+
+    return {"results": results, "infrastructure_type": payload.infrastructure_type}
+
+
 @router.get("/stats", summary="Get AttackMapper cache statistics")
 async def get_attackmapper_stats(
     current_user: Annotated[User, Depends(get_current_user)],

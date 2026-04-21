@@ -20,6 +20,7 @@ from app.api.v1.ai_attack_suite import router as ai_attack_suite_router
 from app.api.v1.takeover import router as takeover_router
 from app.api.v1.suppression_rules import router as suppression_rules_router
 from app.api.v1.attackmapper import router as attackmapper_router
+from app.api.v1.testgen import router as testgen_router
 
 api_router = APIRouter()
 
@@ -40,3 +41,4 @@ api_router.include_router(ai_attack_suite_router)
 api_router.include_router(takeover_router)
 api_router.include_router(suppression_rules_router)
 api_router.include_router(attackmapper_router)
+api_router.include_router(testgen_router)
