@@ -2,6 +2,7 @@
   <img src="https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/Next.js-15-black?style=for-the-badge&logo=next.js&logoColor=white" alt="Next.js">
   <img src="https://img.shields.io/badge/Docker-required-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker">
+  <img src="https://img.shields.io/badge/Claude-AI-blueviolet?style=for-the-badge&logo=anthropic&logoColor=white" alt="Claude AI">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
   <img src="https://img.shields.io/badge/Status-Active-success?style=for-the-badge" alt="Status">
 </p>
@@ -13,7 +14,7 @@
 </p>
 
 <p align="center">
-  A full-stack web platform for external attack surface discovery, vulnerability scanning, and team-based security management. Point it at a domain and get a complete picture of your external footprint — subdomains, exposed services, vulnerabilities, cloud assets, and more.
+  A full-stack security platform for external attack surface discovery, vulnerability scanning, AI-powered triage, and team-based finding management. Point it at a domain and get a complete picture of your external footprint — subdomains, exposed services, vulnerabilities, cloud assets, and more.
 </p>
 
 ---
@@ -48,21 +49,61 @@
 
 ## Features
 
+### Platform
+
+| Category | Capabilities |
+|---|---|
+| **Dashboard** | Live risk score, asset/finding counts, risk trend chart, recent scans |
+| **Scans** | Full scan lifecycle management, real-time SSE progress streaming, cancel/delete |
+| **Assets** | Filterable asset inventory (domain, subdomain, IP, webapp, cloud), screenshot thumbnails |
+| **Findings** | Severity triage, status workflow (open → remediated), CVE linking, bulk operations, suppression rules |
+| **Reports** | Auto-generated HTML reports per scan with full asset and finding detail |
+| **Audit Log** | Immutable record of all platform actions by user, type-filtered, CSV export |
+
+### Scan Engine (24 modules)
+
 | Category | Capabilities |
 |---|---|
 | **Asset Discovery** | Subdomain enumeration, ASN/IP range mapping, certificate transparency, DNS resolution |
 | **Infrastructure** | Port scanning (100+ ports), service detection, banner grabbing |
-| **Web Analysis** | HTTP probing, technology fingerprinting (60+ signatures), automated screenshots |
+| **Web Analysis** | HTTP probing, technology fingerprinting (60+ signatures), Playwright screenshots |
 | **Cloud** | AWS S3, Azure Blob, GCP bucket enumeration |
-| **OSINT** | GitHub recon, employee discovery, leaked secrets in code |
-| **Threat Intel** | Shodan, Censys, SecurityTrails, AlienVault OTX, GreyNoise, URLScan |
-| **Vulnerability Scanning** | Nuclei integration with CVE/CVSS enrichment from NVD |
-| **Fuzzing** | ffuf integration with wordlist picker and live progress |
-| **Network** | Nmap scanner with 7 scan types and parsed results |
-| **Takeover Detection** | Subdomain takeover checker via CNAME chain analysis |
-| **Findings** | Severity triage, status workflow, CVE linking, bulk operations |
-| **Reports** | Auto-generated HTML reports per scan |
-| **Team** | Multi-user, invite codes, role-based access (Owner / Admin / Analyst / Viewer) |
+| **OSINT** | GitHub recon, employee discovery, leaked credential detection |
+| **Threat Intel** | Shodan, Censys, SecurityTrails, AlienVault OTX, GreyNoise, URLScan, PassiveTotal |
+| **Enrichment** | CVE/CVSS from NVD, KEV status, EPSS score, priority scoring |
+
+### Security Tools
+
+| Tool | Description |
+|---|---|
+| **Nmap Scanner** | 7 scan types, custom port ranges, parsed results with service/version |
+| **Nuclei Scanner** | Template-based scanning, severity filter, live stderr progress, CVE enrichment |
+| **ffuf Fuzzer** | Directory/param/subdomain fuzzing, 13 bundled wordlists, custom wordlists |
+| **Attack Suite** | 17-module adaptive web scanner — crawler + pattern library from 5700+ bug bounty reports |
+| **AI Attack Suite** | Shannon autonomous AI pentester — real exploit execution with CVSS reports |
+| **Takeover Checker** | CNAME chain analysis, 42+ service fingerprints, NS/MX takeover detection |
+| **Attack Path Mapper** | MITRE ATT&CK-mapped paths for AD, AWS, Azure, GCP, and network infrastructure |
+| **Test Case Generator** | OWASP WSTG-based test cases (Standard) or Claude-powered custom cases (AI-Assisted) |
+
+### AI Features (Claude-powered)
+
+| Feature | Description |
+|---|---|
+| **Finding Triage** | Auto-classify severity, detect false positives, confidence score |
+| **Executive Summary** | 3-bullet non-technical scan summary with risk posture and next steps |
+| **Jira Ticket Generator** | Structured remediation tickets with acceptance criteria and effort estimate |
+| **NL Search** | Natural-language query translation to structured asset/finding filters |
+| **AI Test Cases** | Customized security test cases based on target, stack, and threat model |
+
+### Team & Access
+
+| Feature | Description |
+|---|---|
+| **Multi-tenancy** | Organization isolation, per-org API keys and credentials |
+| **Roles** | Owner / Admin / Analyst / Viewer with enforced permissions |
+| **Team Management** | Direct user creation or shareable invite link (permanent, open, analyst role) |
+| **API Keys** | Generate platform API keys for CI/CD pipelines and custom integrations |
+| **Integrations** | Jira, Slack, webhook — configured per org with encrypted credential storage |
 
 ---
 
@@ -70,11 +111,14 @@
 
 | Layer | Technology |
 |---|---|
-| Backend | FastAPI + SQLAlchemy (async) |
-| Frontend | Next.js 15 + React 19 + Tailwind CSS |
-| Task Queue | Celery + Redis |
-| Database | PostgreSQL |
-| Scan Engine | AttackTrace Python CLI + nuclei + ffuf + nmap |
+| Backend | FastAPI + SQLAlchemy (async) + Alembic |
+| Frontend | Next.js 15 + React 19 + Tailwind CSS + shadcn/ui |
+| Task Queue | Celery + Redis (3 queues: default, scans, ai) |
+| Database | PostgreSQL 16 |
+| AI | Anthropic Claude (claude-haiku-4-5 default, configurable) |
+| Scan Engine | AttackTrace Python CLI + nuclei + ffuf + nmap + Playwright |
+| Monitoring | Celery Flower |
+| Deployment | Docker Compose (dev) · Kubernetes + KEDA (prod) |
 
 ---
 
@@ -121,7 +165,7 @@ The script will:
 4. Create the PostgreSQL database and user
 5. Run database migrations
 6. Create the default admin account
-7. Start backend, Celery worker, Celery beat, and Next.js
+7. Start backend, Celery worker, Celery beat, and Next.js dev server
 
 **Stop all services:**
 ```bash
@@ -161,6 +205,8 @@ Once running, open **http://localhost:3000**
 | Username | `admin` |
 | Password | `Ihate13$` |
 
+> Change the default password immediately after first login via **Settings → Profile**.
+
 ---
 
 ### Install scanning tools (optional but recommended)
@@ -175,9 +221,24 @@ Installs: `nuclei`, `ffuf`, `nmap`, `gowitness`, `SecLists`, `nuclei-templates`,
 
 ---
 
+### Configure AI features (optional)
+
+Set your Anthropic API key to enable AI triage, executive summaries, and the AI Attack Suite:
+
+**Native:** Add to `platform/backend/.env`:
+```
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+**Docker:** Add to `.env` at the repo root, then `make restart`.
+
+The platform works without an API key — AI features are gracefully disabled.
+
+---
+
 ## Updating
 
-Pull the latest changes from GitHub and restart:
+Pull the latest changes and restart:
 
 **Without Docker:**
 ```bash
@@ -202,80 +263,114 @@ make stop           # Stop all services
 
 # Docker
 make setup          # First-time Docker setup
-make update         # Pull + rebuild + restart (Docker)
+make update         # Pull + rebuild + restart
 make up             # Start containers
 make down           # Stop containers
 make logs           # Tail all container logs
 make ps             # Container status
+make backend-logs   # Backend logs only
+make worker-logs    # Worker logs only
 
-# Both modes
-make migrate        # Run database migrations
+# Database
+make migrate        # Run pending migrations
 make seed           # Re-run initial data seed
+make db-shell       # PostgreSQL interactive shell
+
+# Tools
 make install-tools  # Install nuclei, ffuf, nmap, etc.
+make lint           # Lint + type-check backend
 ```
 
 ---
 
-## Inviting Team Members
+## Team Members
 
-1. Go to **Settings → Members**
-2. Click **Generate Invite Code**
-3. Choose a role and expiry
-4. Copy the invite link and share it
+Go to **Settings → Team Members** to manage your organization:
 
-Recipients open the link, enter their details, and join your organization automatically.
+- **Direct create** — admins can create a user account directly with name, email, password, and role
+- **Invite link** — share a permanent invite link; anyone with the code can self-register as Analyst
 
 **Roles:**
 
 | Role | Permissions |
 |---|---|
-| Owner | Full access, cannot be removed |
-| Admin | Manage team, settings, all scans |
-| Analyst | Run scans, manage findings |
-| Viewer | Read-only access |
+| Owner | Full access, billing, cannot be removed |
+| Admin | Manage team, settings, all scans and findings |
+| Analyst | Run scans, manage findings, use all tools |
+| Viewer | Read-only access to scans, assets, findings |
 
 ---
 
-## API Keys (optional enrichment)
+## Third-Party API Keys
 
-Configure third-party API keys at **Settings → Integrations** to enable enrichment modules:
+Configure enrichment keys at **Settings → Integrations**:
 
 | Service | Used for |
 |---|---|
-| Shodan | Open ports, CVEs, banners |
-| Censys | Certificate & host discovery |
+| Shodan | Open ports, CVEs, service banners |
+| Censys | Certificate transparency, host discovery |
 | SecurityTrails | Passive DNS, subdomain history |
-| GitHub Token | Repo recon, secret detection |
+| GitHub Token | Repository recon, secret detection |
 | AlienVault OTX | Threat intelligence, IOCs |
 | PassiveTotal | Passive DNS, WHOIS history |
+| Jira | Automatic remediation ticket creation |
+| Slack | Scan completion and critical finding alerts |
 
 All credentials are encrypted with AES-256-GCM before storage.
+
+To generate **platform API keys** for CI/CD pipelines or custom integrations, go to **Settings → API Keys**.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│              Docker Compose                  │
-│                                              │
-│  ┌──────────┐    ┌──────────┐               │
-│  │ Next.js  │───▶│ FastAPI  │               │
-│  │ :3000    │    │ :8000    │               │
-│  └──────────┘    └────┬─────┘               │
-│                       │                      │
-│          ┌────────────┼────────────┐         │
-│          ▼            ▼            ▼         │
-│     ┌─────────┐  ┌────────┐  ┌────────┐    │
-│     │Postgres │  │ Redis  │  │ Celery │    │
-│     │  :5432  │  │ :6379  │  │ Worker │    │
-│     └─────────┘  └────────┘  └────────┘    │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│                   AttackTrace                        │
+│                                                      │
+│  ┌──────────────┐    ┌──────────────────────────┐  │
+│  │  Next.js 15  │───▶│    FastAPI + SQLAlchemy   │  │
+│  │   :3000      │    │        :8000              │  │
+│  └──────────────┘    └──────────┬───────────────┘  │
+│                                  │                   │
+│              ┌───────────────────┼──────────┐        │
+│              ▼                   ▼          ▼        │
+│       ┌──────────┐        ┌──────────┐  ┌────────┐  │
+│       │ Postgres │        │  Redis   │  │ Celery │  │
+│       │  :5432   │        │  :6379   │  │ Worker │  │
+│       └──────────┘        └──────────┘  └────────┘  │
+│                                          (3 queues)  │
+│                                     default·scans·ai │
+└─────────────────────────────────────────────────────┘
 ```
 
-- **Celery Worker** runs long scans asynchronously, streaming progress via Redis pub/sub
-- **Celery Beat** runs a watchdog every 5 minutes to recover stuck scans
+- **Celery Worker** runs long scans asynchronously, streaming progress via Redis pub/sub SSE
+- **Celery Beat** runs a watchdog every 5 minutes to recover stuck or crashed scans
+- **Redis** also stores dashboard stats cache, scan event replay buffer, and AI circuit breaker state
 - **Flower** (Celery monitoring UI) available at http://localhost:5555/flower
+
+---
+
+## Kubernetes Deployment
+
+Production manifests are in `k8s/`:
+
+```bash
+# Apply all manifests
+make k8s-apply
+
+# Run migrations in the cluster
+make k8s-migrate
+
+# Check status
+make k8s-status
+```
+
+Key files:
+- `k8s/configmap.yaml` — non-secret config (update `CORS_ORIGINS` and `NEXT_PUBLIC_API_URL` for your domain)
+- `k8s/secrets.yaml` — template for secrets (use External Secrets Operator in production)
+- `k8s/ingress.yaml` — nginx ingress with TLS (update `app.attacktrace.io` to your domain)
+- `k8s/keda-scaledobject.yaml` — worker autoscaling based on Redis queue depth
 
 ---
 
@@ -292,7 +387,7 @@ sed -i '' '/^CORS_ORIGINS=/d' platform/backend/.env
 
 **Backend fails to start — `ValueError: password cannot be longer than 72 bytes`**
 
-This is a bcrypt 5.x / passlib incompatibility. Reinstall the pinned version:
+bcrypt 5.x / passlib incompatibility. Reinstall the pinned version:
 ```bash
 platform/backend/.venv/bin/pip install 'bcrypt==4.0.1'
 ```
@@ -359,9 +454,13 @@ Reset it directly in the database:
 make db-shell
 # Native:
 psql -U attacktrace -d attacktrace
-# Inside psql:
-UPDATE users SET hashed_password = '<new-bcrypt-hash>' WHERE email = 'admin';
+# Inside psql — generate hash with: python3 -c "from passlib.context import CryptContext; print(CryptContext(['bcrypt']).hash('NewPassword!'))"
+UPDATE users SET hashed_password = '<bcrypt-hash>' WHERE email = 'admin';
 ```
+
+**Dashboard shows stale asset or finding counts after deleting a scan**
+
+This is fixed in the current version (Redis cache is invalidated on delete). If you're on an older version, click the **Refresh** button on the dashboard or wait up to 5 minutes for the cache to expire.
 
 ---
 
