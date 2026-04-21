@@ -377,6 +377,88 @@ async def update_intel(
     )
 
 
+_INTEL_DB = os.path.expanduser("~/.cache/attackmapper/intel_cache.db")
+
+
+@router.get("/cves", summary="Get CVEs from the local threat intel cache")
+async def get_cves(
+    current_user: Annotated[User, Depends(get_current_user)],
+    infra: str | None = None,
+    severity: str | None = None,
+    limit: int = 200,
+) -> dict:
+    """Query the attackmapper SQLite cache for CVEs directly — bypasses the CLI's hardcoded top-10 limit."""
+    import sqlite3 as _sqlite3
+    import re
+
+    if not os.path.exists(_INTEL_DB):
+        return {"items": [], "total": 0, "note": "Intel cache not found — run Update Intel first"}
+
+    try:
+        conn = _sqlite3.connect(_INTEL_DB)
+        cursor = conn.cursor()
+
+        query = "SELECT cve_id, description, cvss_score, severity, affected_products, affected_infrastructure, exploitation_status, references_json, published_date FROM cves WHERE 1=1"
+        params: list = []
+
+        if infra:
+            query += ' AND affected_infrastructure LIKE ?'
+            params.append(f'%"{infra}"%')
+
+        if severity:
+            query += " AND severity = ?"
+            params.append(severity.lower())
+
+        query += " ORDER BY cvss_score DESC LIMIT ?"
+        params.append(limit)
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+
+        # Count total without limit
+        count_q = "SELECT COUNT(*) FROM cves WHERE 1=1"
+        count_p: list = []
+        if infra:
+            count_q += ' AND affected_infrastructure LIKE ?'
+            count_p.append(f'%"{infra}"%')
+        if severity:
+            count_q += " AND severity = ?"
+            count_p.append(severity.lower())
+        cursor.execute(count_q, count_p)
+        total = cursor.fetchone()[0]
+        conn.close()
+
+        items = []
+        for row in rows:
+            try:
+                affected_products = json.loads(row[4]) if row[4] else []
+            except Exception:
+                affected_products = []
+            try:
+                affected_infra = json.loads(row[5]) if row[5] else []
+            except Exception:
+                affected_infra = []
+            try:
+                references = json.loads(row[7]) if row[7] else []
+            except Exception:
+                references = []
+            items.append({
+                "cve_id": row[0],
+                "description": row[1] or "",
+                "cvss_score": row[2] or 0.0,
+                "severity": row[3] or "unknown",
+                "affected_products": affected_products,
+                "affected_infrastructure": affected_infra,
+                "exploitation_status": row[6] or "",
+                "references": references,
+                "published_date": row[8] or "",
+            })
+
+        return {"items": items, "total": total, "returned": len(items)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.get("/stats", summary="Get AttackMapper cache statistics")
 async def get_attackmapper_stats(
     current_user: Annotated[User, Depends(get_current_user)],

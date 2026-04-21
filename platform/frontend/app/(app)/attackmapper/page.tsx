@@ -304,6 +304,328 @@ function TechniqueCard({ technique }: { technique: Technique }) {
   );
 }
 
+// ── Threat Intel Tab — fetches full CVE list from cache ──────────────────────
+
+const SEVERITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, unknown: 4 };
+
+function ThreatIntelTab({ infraType }: { infraType: string }) {
+  const [cves, setCves] = useState<CVE[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [severityFilter, setSeverityFilter] = useState("all");
+  const [search, setSearch] = useState("");
+  const [limit, setLimit] = useState(50);
+
+  useEffect(() => {
+    setLoading(true);
+    const params = new URLSearchParams({ infra: infraType, limit: String(limit) });
+    if (severityFilter !== "all") params.set("severity", severityFilter);
+    fetchWithAuth(API_BASE + "/attackmapper/cves?" + params.toString())
+      .then(r => r.json())
+      .then(d => { setCves(d.items ?? []); setTotal(d.total ?? 0); })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [infraType, severityFilter, limit]);
+
+  const filtered = cves.filter(c => {
+    if (!search) return true;
+    const q = search.toLowerCase();
+    return c.cve_id.toLowerCase().includes(q) || c.description.toLowerCase().includes(q);
+  });
+
+  const severityCounts = cves.reduce<Record<string, number>>((acc, c) => {
+    acc[c.severity] = (acc[c.severity] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  return (
+    <div className="space-y-3">
+      {/* Filters row */}
+      <div className="flex gap-2 items-center flex-wrap">
+        <Input
+          placeholder="Search CVE ID or description..."
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          className="h-8 text-sm bg-zinc-950 border-zinc-700 flex-1 min-w-48"
+        />
+        <div className="flex gap-1">
+          {["all", "critical", "high", "medium"].map(s => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => setSeverityFilter(s)}
+              className={cn(
+                "text-xs px-2.5 py-1 rounded border capitalize transition-colors",
+                severityFilter === s
+                  ? s === "critical" ? "bg-red-500/20 border-red-500/40 text-red-400"
+                    : s === "high" ? "bg-orange-500/20 border-orange-500/40 text-orange-400"
+                    : s === "medium" ? "bg-yellow-500/20 border-yellow-500/40 text-yellow-400"
+                    : "bg-blue-500/20 border-blue-500/40 text-blue-400"
+                  : "border-zinc-700 text-zinc-500 hover:border-zinc-600"
+              )}
+            >
+              {s === "all" ? "All" : s}
+              {s !== "all" && severityCounts[s] ? ` (${severityCounts[s]})` : ""}
+            </button>
+          ))}
+        </div>
+        <span className="text-xs text-zinc-500 shrink-0">{total.toLocaleString()} total CVEs</span>
+      </div>
+
+      {loading ? (
+        <div className="text-center py-8 text-zinc-500 text-sm">Loading CVEs from cache...</div>
+      ) : filtered.length === 0 ? (
+        <div className="text-center py-8 text-zinc-500 text-sm">No CVEs match your filter.</div>
+      ) : (
+        <>
+          <div className="space-y-2 max-h-[560px] overflow-y-auto pr-1">
+            {filtered.map(cve => <CVECard key={cve.cve_id} cve={cve} />)}
+          </div>
+          {filtered.length >= limit && (
+            <button
+              type="button"
+              onClick={() => setLimit(l => l + 50)}
+              className="w-full text-xs text-zinc-500 border border-zinc-800 rounded py-2 hover:bg-zinc-800 transition-colors"
+            >
+              Load more ({total - limit > 0 ? total - limit : "remaining"} more)
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+
+// ── Attack Chain SVG Graph ───────────────────────────────────────────────────
+
+const NODE_W = 240;
+const NODE_H = 76;
+const H_GAP = 60;   // horizontal gap between phases
+const V_GAP = 28;   // vertical gap between nodes in the same phase
+
+interface GraphNode {
+  id: string;
+  technique: Technique;
+  step: number;
+  col: number;
+  row: number;
+  x: number;
+  y: number;
+}
+
+function AttackChainGraph({ chain }: { chain: AttackChain }) {
+  const [hovered, setHovered] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+
+  // Group steps by phase for columnar layout
+  const phaseOrder: string[] = [];
+  const phaseGroups: Record<string, ChainStep[]> = {};
+  for (const step of chain.steps) {
+    const phase = step.technique.phase;
+    if (!phaseGroups[phase]) {
+      phaseGroups[phase] = [];
+      phaseOrder.push(phase);
+    }
+    phaseGroups[phase].push(step);
+  }
+
+  // Assign (col, row) and compute pixel positions
+  const nodes: GraphNode[] = [];
+  const nodeMap: Record<string, GraphNode> = {};
+  let col = 0;
+  for (const phase of phaseOrder) {
+    const steps = phaseGroups[phase];
+    steps.forEach((step, row) => {
+      const x = col * (NODE_W + H_GAP) + 20;
+      const y = row * (NODE_H + V_GAP) + 60;
+      const n: GraphNode = { id: step.technique.id, technique: step.technique, step: step.step_number, col, row, x, y };
+      nodes.push(n);
+      nodeMap[step.technique.id] = n;
+    });
+    col++;
+  }
+
+  // SVG canvas size
+  const svgW = col * (NODE_W + H_GAP) + 40;
+  const maxRows = Math.max(...phaseOrder.map(p => phaseGroups[p].length));
+  const svgH = maxRows * (NODE_H + V_GAP) + 100;
+
+  // Build edges from step ordering (each step → next step in sequence)
+  const edges: Array<{ from: GraphNode; to: GraphNode }> = [];
+  for (let i = 0; i < chain.steps.length - 1; i++) {
+    const fromId = chain.steps[i].technique.id;
+    const toId = chain.steps[i + 1].technique.id;
+    const from = nodeMap[fromId];
+    const to = nodeMap[toId];
+    if (from && to) edges.push({ from, to });
+  }
+
+  const phaseColor: Record<string, string> = {
+    reconnaissance: "#a855f7",
+    "initial-access": "#ef4444",
+    "initial_access": "#ef4444",
+    execution: "#f97316",
+    persistence: "#eab308",
+    "privilege-escalation": "#ec4899",
+    "privilege_escalation": "#ec4899",
+    "defense-evasion": "#6366f1",
+    "defense_evasion": "#6366f1",
+    "credential-access": "#06b6d4",
+    "credential_access": "#06b6d4",
+    discovery: "#14b8a6",
+    "lateral-movement": "#3b82f6",
+    "lateral_movement": "#3b82f6",
+    collection: "#10b981",
+    exfiltration: "#f43f5e",
+    impact: "#dc2626",
+  };
+
+  const selectedNode = selected ? nodeMap[selected] : null;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between text-sm text-zinc-400 mb-2">
+        <span>
+          <span className="text-zinc-200 font-medium">{chain.name}</span>
+          <span className="mx-2 text-zinc-600">•</span>
+          <span className="capitalize">{chain.start_phase.replace(/_/g, " ")}</span>
+          <span className="mx-1 text-zinc-600">→</span>
+          <span className="capitalize">{chain.end_phase.replace(/_/g, " ")}</span>
+        </span>
+        <span className="text-xs text-zinc-500">{chain.steps.length} steps • click a node to expand</span>
+      </div>
+
+      {/* SVG Graph */}
+      <div className="overflow-x-auto border border-zinc-800 rounded-lg bg-zinc-950">
+        <svg width={svgW} height={svgH} className="block">
+          {/* Phase header labels */}
+          {phaseOrder.map((phase, i) => {
+            const x = i * (NODE_W + H_GAP) + 20 + NODE_W / 2;
+            const color = phaseColor[phase] ?? "#71717a";
+            return (
+              <text key={phase} x={x} y={22} textAnchor="middle" fill={color} fontSize={10} fontWeight={600} className="uppercase tracking-widest" style={{ textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                {phase.replace(/[_-]/g, " ")}
+              </text>
+            );
+          })}
+
+          {/* Phase column backgrounds */}
+          {phaseOrder.map((phase, i) => {
+            const x = i * (NODE_W + H_GAP) + 16;
+            const color = phaseColor[phase] ?? "#71717a";
+            const rows = phaseGroups[phase].length;
+            const h = rows * (NODE_H + V_GAP) + 40;
+            return (
+              <rect key={phase + "-bg"} x={x} y={32} width={NODE_W + 8} height={h} rx={8} fill={color} fillOpacity={0.04} stroke={color} strokeOpacity={0.12} strokeWidth={1} />
+            );
+          })}
+
+          {/* Edges */}
+          {edges.map(({ from, to }, i) => {
+            const x1 = from.x + NODE_W;
+            const y1 = from.y + NODE_H / 2;
+            const x2 = to.x;
+            const y2 = to.y + NODE_H / 2;
+            const cx1 = x1 + (x2 - x1) * 0.5;
+            const cx2 = x2 - (x2 - x1) * 0.5;
+            const isActive = hovered === from.id || hovered === to.id || selected === from.id || selected === to.id;
+            return (
+              <g key={i}>
+                <path
+                  d={"M " + x1 + " " + y1 + " C " + cx1 + " " + y1 + " " + cx2 + " " + y2 + " " + x2 + " " + y2}
+                  fill="none"
+                  stroke={isActive ? "#3b82f6" : "#3f3f46"}
+                  strokeWidth={isActive ? 2 : 1.5}
+                  strokeDasharray={isActive ? "none" : "4 3"}
+                  markerEnd="url(#arrow)"
+                />
+              </g>
+            );
+          })}
+
+          {/* Arrow marker */}
+          <defs>
+            <marker id="arrow" markerWidth={8} markerHeight={8} refX={6} refY={3} orient="auto">
+              <path d="M0,0 L0,6 L8,3 z" fill="#52525b" />
+            </marker>
+          </defs>
+
+          {/* Nodes */}
+          {nodes.map((n) => {
+            const color = phaseColor[n.technique.phase] ?? "#71717a";
+            const isSelected = selected === n.id;
+            const isHovered = hovered === n.id;
+            const riskBg = n.technique.risk_level === "critical" ? "#ef4444" : n.technique.risk_level === "high" ? "#f97316" : n.technique.risk_level === "medium" ? "#eab308" : "#3b82f6";
+            return (
+              <g
+                key={n.id}
+                style={{ cursor: "pointer" }}
+                onMouseEnter={() => setHovered(n.id)}
+                onMouseLeave={() => setHovered(null)}
+                onClick={() => setSelected(isSelected ? null : n.id)}
+              >
+                <rect x={n.x} y={n.y} width={NODE_W} height={NODE_H} rx={8} fill={isSelected || isHovered ? "#27272a" : "#18181b"} stroke={isSelected ? "#3b82f6" : isHovered ? color : "#3f3f46"} strokeWidth={isSelected ? 2 : 1} />
+                {/* Step number badge */}
+                <circle cx={n.x + 16} cy={n.y + 16} r={10} fill={color} fillOpacity={0.2} />
+                <text x={n.x + 16} y={n.y + 20} textAnchor="middle" fill={color} fontSize={9} fontWeight={700}>{n.step}</text>
+                {/* Risk badge */}
+                <rect x={n.x + NODE_W - 52} y={n.y + 8} width={44} height={14} rx={4} fill={riskBg} fillOpacity={0.15} />
+                <text x={n.x + NODE_W - 30} y={n.y + 18.5} textAnchor="middle" fill={riskBg} fontSize={8} fontWeight={600}>{n.technique.risk_level.toUpperCase()}</text>
+                {/* Technique name */}
+                <text x={n.x + 32} y={n.y + 22} fill={isSelected || isHovered ? "#f4f4f5" : "#d4d4d8"} fontSize={11} fontWeight={600}>
+                  {n.technique.name.length > 22 ? n.technique.name.slice(0, 22) + "…" : n.technique.name}
+                </text>
+                {/* MITRE ID */}
+                <text x={n.x + 32} y={n.y + 37} fill="#71717a" fontSize={9}>{n.technique.mitre_id}</text>
+                {/* Tools */}
+                <text x={n.x + 32} y={n.y + 52} fill="#52525b" fontSize={8.5}>
+                  {n.technique.tools.slice(0, 3).join(" · ")}
+                </text>
+                {/* Next arrow hint */}
+                {n.technique.next_techniques.length > 0 && (
+                  <text x={n.x + NODE_W - 12} y={n.y + NODE_H - 8} fill="#52525b" fontSize={8}>→</text>
+                )}
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+
+      {/* Selected node detail panel */}
+      {selectedNode && (
+        <div className="border border-blue-500/20 bg-blue-500/5 rounded-lg p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-zinc-100 font-semibold text-sm">{selectedNode.technique.name}</span>
+              <Badge variant="outline" className="font-mono text-xs text-blue-400 border-blue-500/30">{selectedNode.technique.mitre_id}</Badge>
+              <span className={cn("text-xs px-2 py-0.5 rounded-full capitalize", PHASE_COLORS[selectedNode.technique.phase] ?? "bg-zinc-700 text-zinc-300")}>{selectedNode.technique.phase.replace(/[_-]/g, " ")}</span>
+            </div>
+            <button type="button" onClick={() => setSelected(null)} className="text-zinc-600 hover:text-zinc-400"><X className="h-4 w-4" /></button>
+          </div>
+          <p className="text-zinc-400 text-xs">{selectedNode.technique.description}</p>
+          {selectedNode.technique.tools.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {selectedNode.technique.tools.map(t => <span key={t} className="text-xs bg-zinc-800 border border-zinc-700 text-zinc-300 px-2 py-0.5 rounded">{t}</span>)}
+            </div>
+          )}
+          {selectedNode.technique.commands.length > 0 && (
+            <div className="bg-zinc-950 border border-zinc-800 rounded p-3 max-h-36 overflow-y-auto">
+              {selectedNode.technique.commands.map((cmd, i) => (
+                <div key={i} className={cn("text-xs font-mono", cmd.startsWith("#") ? "text-zinc-500 mt-1" : "text-emerald-400 break-all")}>{cmd}</div>
+              ))}
+            </div>
+          )}
+          {selectedNode.technique.detection && (
+            <p className="text-xs text-zinc-500"><span className="text-zinc-400 font-medium">Detection:</span> {selectedNode.technique.detection}</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function CVECard({ cve }: { cve: CVE }) {
   const severityColor =
     cve.severity === "critical"
@@ -896,8 +1218,8 @@ export default function AttackMapperPage() {
                     <Bug className="h-4 w-4 text-red-400" />
                     <span className="text-xs text-zinc-500">Critical CVEs</span>
                   </div>
-                  <p className="text-2xl font-bold text-zinc-100">{result.critical_cves}</p>
-                  <p className="text-xs text-zinc-500 mt-0.5">Active threats</p>
+                  <p className="text-2xl font-bold text-zinc-100">{intelStats?.cached_cves?.toLocaleString() ?? result.critical_cves}</p>
+                  <p className="text-xs text-zinc-500 mt-0.5">{intelStats?.cached_cves ? "In local cache" : "Active threats"}</p>
                 </CardContent>
               </Card>
             </div>
@@ -912,7 +1234,7 @@ export default function AttackMapperPage() {
                   [
                     { key: "techniques", label: "Attack Techniques", icon: Shield, count: result.technique_count },
                     { key: "chain", label: "Full Attack Chain", icon: Link2, count: result.chain_steps },
-                    { key: "intel", label: "Threat Intel", icon: AlertTriangle, count: result.critical_cves },
+                    { key: "intel", label: "Threat Intel", icon: AlertTriangle, count: intelStats?.cached_cves ?? result.critical_cves },
                   ] as const
                 ).map(({ key, label, icon: Icon, count }) => (
                   <button
@@ -982,36 +1304,7 @@ export default function AttackMapperPage() {
 
                 {/* ── Full Chain tab ── */}
                 {activeTab === "chain" && result.attack_chain && (
-                  <div className="space-y-3">
-                    <div className="flex items-center gap-3 mb-4">
-                      <div className="text-sm text-zinc-400">
-                        <span className="text-zinc-300 font-medium">{result.attack_chain.name}</span>
-                        <span className="mx-2 text-zinc-600">•</span>
-                        <span className="capitalize">{result.attack_chain.start_phase.replace(/-/g, " ")}</span>
-                        <span className="mx-1 text-zinc-600">→</span>
-                        <span className="capitalize">{result.attack_chain.end_phase.replace(/-/g, " ")}</span>
-                      </div>
-                    </div>
-
-                    <div className="space-y-3 max-h-[600px] overflow-y-auto pr-1">
-                      {result.attack_chain.steps.map((step) => (
-                        <div key={step.step_number} className="flex gap-3">
-                          {/* Step number connector */}
-                          <div className="flex flex-col items-center">
-                            <div className="h-6 w-6 rounded-full bg-blue-600/20 border border-blue-500/30 flex items-center justify-center shrink-0">
-                              <span className="text-xs font-bold text-blue-400">{step.step_number}</span>
-                            </div>
-                            {step.step_number < result.attack_chain!.steps.length && (
-                              <div className="w-px flex-1 bg-zinc-800 mt-1 mb-0 min-h-4" />
-                            )}
-                          </div>
-                          <div className="flex-1 pb-2">
-                            <TechniqueCard technique={step.technique} />
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
+                  <AttackChainGraph chain={result.attack_chain} />
                 )}
 
                 {activeTab === "chain" && !result.attack_chain && (
@@ -1021,24 +1314,8 @@ export default function AttackMapperPage() {
                 )}
 
                 {/* ── Threat Intel tab ── */}
-                {activeTab === "intel" && result.threat_intel && (
-                  <div className="space-y-3 max-h-[600px] overflow-y-auto pr-1">
-                    {result.threat_intel.critical_cves.length === 0 ? (
-                      <div className="text-center py-8 text-zinc-500 text-sm">
-                        No critical CVEs in the threat intelligence feed.
-                      </div>
-                    ) : (
-                      result.threat_intel.critical_cves.map((cve) => (
-                        <CVECard key={cve.cve_id} cve={cve} />
-                      ))
-                    )}
-                  </div>
-                )}
-
-                {activeTab === "intel" && !result.threat_intel && (
-                  <div className="text-center py-8 text-zinc-500 text-sm">
-                    No threat intelligence data available.
-                  </div>
+                {activeTab === "intel" && (
+                  <ThreatIntelTab infraType={result.infrastructure_type} />
                 )}
               </CardContent>
             </Card>
