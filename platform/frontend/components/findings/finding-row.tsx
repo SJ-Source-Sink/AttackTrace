@@ -158,10 +158,14 @@ export function FindingRow({ finding }: FindingRowProps) {
     <div className={cn("border-l-2 transition-colors", SEV_ACCENT[finding.severity] ?? "border-l-zinc-600",
       expanded ? "bg-zinc-900/60" : "hover:bg-zinc-800/30")}>
 
-      {/* Collapsed row */}
-      <button
-        className="w-full flex items-center gap-3 px-4 py-3 text-left"
+      {/* Collapsed row — div instead of button to avoid nested-button violation
+          (StatusWorkflow contains buttons; <button> cannot nest <button>) */}
+      <div
+        role="button"
+        tabIndex={0}
+        className="w-full flex items-center gap-3 px-4 py-3 text-left cursor-pointer"
         onClick={() => setExpanded(!expanded)}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setExpanded(!expanded); } }}
       >
         {expanded
           ? <ChevronDown className="h-3.5 w-3.5 text-zinc-500 shrink-0" />
@@ -212,7 +216,7 @@ export function FindingRow({ finding }: FindingRowProps) {
             {finding.age_days ?? 0}d
           </span>
         </div>
-      </button>
+      </div>
 
       {/* Expanded panel */}
       {expanded && (
