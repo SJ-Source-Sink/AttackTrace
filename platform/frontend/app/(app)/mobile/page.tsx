@@ -193,7 +193,7 @@ export default function MobileScannerPage() {
   const scans: MobileScan[] = statsData?.recent_scans ?? [];
   const totalScans = statsData?.total_scans ?? 0;
   const totalFindings = statsData?.total_findings ?? 0;
-  const completedScans = scans.filter((s) => s.status === "completed").length;
+  const completedScans = scans.filter((s) => s.status === "completed" || s.status === "done").length;
 
   return (
     <div className="flex flex-col gap-6 p-6">

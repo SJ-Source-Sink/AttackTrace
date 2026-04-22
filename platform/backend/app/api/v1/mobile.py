@@ -177,12 +177,12 @@ async def upload_file(
 
     file_bytes = await file.read()
 
-    # Forward as multipart/form-data to MSRA
+    # Forward as multipart/form-data to MSRA — MSRA expects the field name "apk"
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         try:
             resp = await client.post(
                 f"{settings.MSRA_URL}/api/upload",
-                files={"file": (file.filename, file_bytes, file.content_type or "application/octet-stream")},
+                files={"apk": (file.filename, file_bytes, file.content_type or "application/octet-stream")},
             )
         except httpx.ConnectError:
             raise HTTPException(
@@ -286,20 +286,20 @@ async def start_dynamic(
     return _proxy_response(resp)
 
 
+@router.get("/dynamic/jobs", summary="List all dynamic analysis jobs")
+async def dynamic_jobs(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> Response:
+    resp = await _msra_request("GET", "/api/dynamic/jobs")
+    return _proxy_response(resp)
+
+
 @router.get("/dynamic/{job_id}", summary="Poll dynamic analysis job")
 async def dynamic_job_status(
     job_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Response:
     resp = await _msra_request("GET", f"/api/dynamic/verify/{job_id}")
-    return _proxy_response(resp)
-
-
-@router.get("/dynamic/jobs", summary="List all dynamic analysis jobs")
-async def dynamic_jobs(
-    current_user: Annotated[User, Depends(get_current_user)],
-) -> Response:
-    resp = await _msra_request("GET", "/api/dynamic/jobs")
     return _proxy_response(resp)
 
 
