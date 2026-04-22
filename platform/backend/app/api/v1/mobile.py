@@ -183,7 +183,19 @@ async def upload_file(
             detail={"error": {"code": "INVALID_FILE_TYPE", "message": f"Unsupported file type. Allowed: {', '.join(sorted(allowed_suffixes))}"}},
         )
 
+    _MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
+    if file.size and file.size > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={"error": {"code": "FILE_TOO_LARGE", "message": "File exceeds 500 MB limit."}},
+        )
+
     file_bytes = await file.read()
+    if len(file_bytes) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={"error": {"code": "FILE_TOO_LARGE", "message": "File exceeds 500 MB limit."}},
+        )
 
     # Forward as multipart/form-data to MSRA — MSRA expects the field name "apk"
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
@@ -409,7 +421,10 @@ async def _sync_msra_to_db(org_id: str, db: AsyncSession) -> dict:
         stats_resp = await _msra_request("GET", "/api/dashboard/stats")
         if stats_resp.status_code != 200:
             return {"error": "MSRA unavailable", "inserted": 0, "updated": 0, "skipped": 0}
-        stats = stats_resp.json()
+        try:
+            stats = stats_resp.json()
+        except Exception:
+            return {"error": "MSRA returned invalid JSON for stats", "inserted": 0, "updated": 0, "skipped": 0}
     except Exception as exc:
         return {"error": str(exc), "inserted": 0, "updated": 0, "skipped": 0}
 
@@ -425,9 +440,16 @@ async def _sync_msra_to_db(org_id: str, db: AsyncSession) -> dict:
         try:
             findings_resp = await _msra_request("GET", f"/api/scans/{scan_id}/findings")
             if findings_resp.status_code != 200:
+                errors += 1
                 continue
-            findings_data = findings_resp.json()
-        except Exception:
+            try:
+                findings_data = findings_resp.json()
+            except Exception:
+                logger.warning("MSRA returned invalid JSON for scan %s findings", scan_id)
+                errors += 1
+                continue
+        except Exception as exc:
+            logger.warning("Failed to fetch MSRA findings for scan %s: %s", scan_id, exc)
             errors += 1
             continue
 
@@ -499,7 +521,7 @@ async def _sync_msra_to_db(org_id: str, db: AsyncSession) -> dict:
     except Exception as exc:
         await db.rollback()
         logger.error("MSRA sync commit failed: %s", exc)
-        return {"error": str(exc), "inserted": 0, "updated": 0, "skipped": skipped}
+        return {"error": str(exc), "inserted": inserted, "updated": updated, "skipped": skipped, "errors": errors + 1}
 
     return {"inserted": inserted, "updated": updated, "skipped": skipped, "errors": errors}
 

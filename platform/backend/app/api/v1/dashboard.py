@@ -44,134 +44,138 @@ async def get_dashboard_stats(
     cache_key = f"dashboard:stats:{org_id}"
     lock_key = f"dashboard:lock:{org_id}"
     redis = await _get_redis()
-    if redis:
-        try:
-            cached = await redis.get(cache_key)
-            if cached:
-                await redis.aclose()
-                return json.loads(cached)
-            # Stampede protection: acquire a short-lived lock so only one
-            # concurrent request rebuilds the cache. Others serve stale or fall
-            # through to the DB (acceptable on very first cold start).
-            acquired = await redis.set(lock_key, "1", nx=True, ex=10)
-            if not acquired:
-                stale = await redis.get(cache_key)
-                if stale:
-                    await redis.aclose()
-                    return json.loads(stale)
-        except Exception:
-            redis = None
+    try:
+        if redis:
+            try:
+                cached = await redis.get(cache_key)
+                if cached:
+                    return json.loads(cached)
+                # Stampede protection: acquire a short-lived lock so only one
+                # concurrent request rebuilds the cache. Others serve stale or fall
+                # through to the DB (acceptable on very first cold start).
+                acquired = await redis.set(lock_key, "1", nx=True, ex=10)
+                if not acquired:
+                    stale = await redis.get(cache_key)
+                    if stale:
+                        return json.loads(stale)
+            except Exception:
+                redis = None
 
-    # Total assets
-    total_assets = (
-        await db.execute(select(func.count()).where(Asset.org_id == org_id))
-    ).scalar_one()
+        # Total assets
+        total_assets = (
+            await db.execute(select(func.count()).where(Asset.org_id == org_id))
+        ).scalar_one()
 
-    # Active assets (is_active=True)
-    active_assets = (
-        await db.execute(select(func.count()).where(Asset.org_id == org_id, Asset.is_active == True))
-    ).scalar_one()
+        # Active assets (is_active=True)
+        active_assets = (
+            await db.execute(select(func.count()).where(Asset.org_id == org_id, Asset.is_active == True))
+        ).scalar_one()
 
-    # Findings by severity (open/in_progress only)
-    active_statuses = [FindingStatus.OPEN, FindingStatus.IN_PROGRESS]
-    findings_q = select(Finding.severity, func.count()).where(
-        Finding.org_id == org_id,
-        Finding.status.in_(active_statuses),
-    ).group_by(Finding.severity)
-    findings_rows = (await db.execute(findings_q)).all()
-    findings_by_sev = {row[0].value: row[1] for row in findings_rows}
+        # Findings by severity (open/in_progress only)
+        active_statuses = [FindingStatus.OPEN, FindingStatus.IN_PROGRESS]
+        findings_q = select(Finding.severity, func.count()).where(
+            Finding.org_id == org_id,
+            Finding.status.in_(active_statuses),
+        ).group_by(Finding.severity)
+        findings_rows = (await db.execute(findings_q)).all()
+        findings_by_sev = {row[0].value: row[1] for row in findings_rows}
 
-    total_findings = sum(findings_by_sev.values())
-    critical = findings_by_sev.get("critical", 0)
-    high = findings_by_sev.get("high", 0)
-    medium = findings_by_sev.get("medium", 0)
-    low = findings_by_sev.get("low", 0)
-    info = findings_by_sev.get("info", 0)
+        total_findings = sum(findings_by_sev.values())
+        critical = findings_by_sev.get("critical", 0)
+        high = findings_by_sev.get("high", 0)
+        medium = findings_by_sev.get("medium", 0)
+        low = findings_by_sev.get("low", 0)
+        info = findings_by_sev.get("info", 0)
 
-    # Risk score — log-scaled so it doesn't max out with just a few findings.
-    # Each severity tier uses diminishing returns: score grows quickly at first,
-    # then levels off. Max of ~100 only with many criticals + highs together.
-    # Weights: critical≈20pts base, high≈10pts, medium≈3pts, low≈0.5pts per first occurrence.
-    def _log_risk(count: int, weight: float) -> float:
-        return weight * math.log1p(count)  # log(1+count) → 0 when count=0
+        # Risk score — log-scaled so it doesn't max out with just a few findings.
+        # Each severity tier uses diminishing returns: score grows quickly at first,
+        # then levels off. Max of ~100 only with many criticals + highs together.
+        # Weights: critical≈20pts base, high≈10pts, medium≈3pts, low≈0.5pts per first occurrence.
+        def _log_risk(count: int, weight: float) -> float:
+            return weight * math.log1p(count)  # log(1+count) → 0 when count=0
 
-    raw = (
-        _log_risk(critical, 20) +
-        _log_risk(high,     10) +
-        _log_risk(medium,    3) +
-        _log_risk(low,     0.5)
-    )
-    risk_score = round(min(100, raw))
+        raw = (
+            _log_risk(critical, 20) +
+            _log_risk(high,     10) +
+            _log_risk(medium,    3) +
+            _log_risk(low,     0.5)
+        )
+        risk_score = round(min(100, raw))
 
-    # Active scans
-    active_scans = (
-        await db.execute(
-            select(func.count()).where(
-                ScanJob.org_id == org_id,
-                ScanJob.status.in_([ScanStatus.PENDING, ScanStatus.RUNNING]),
+        # Active scans
+        active_scans = (
+            await db.execute(
+                select(func.count()).where(
+                    ScanJob.org_id == org_id,
+                    ScanJob.status.in_([ScanStatus.PENDING, ScanStatus.RUNNING]),
+                )
             )
-        )
-    ).scalar_one()
+        ).scalar_one()
 
-    # Total scans
-    total_scans = (
-        await db.execute(select(func.count()).where(ScanJob.org_id == org_id))
-    ).scalar_one()
+        # Total scans
+        total_scans = (
+            await db.execute(select(func.count()).where(ScanJob.org_id == org_id))
+        ).scalar_one()
 
-    # Risk history (last 7 completed scans for trend)
-    recent_scans = (
-        await db.execute(
-            select(ScanJob.completed_at, ScanJob.findings_count)
-            .where(ScanJob.org_id == org_id, ScanJob.status == ScanStatus.COMPLETED)
-            .order_by(ScanJob.completed_at.desc())
-            .limit(7)
-        )
-    ).all()
+        # Risk history (last 7 completed scans for trend)
+        recent_scans = (
+            await db.execute(
+                select(ScanJob.completed_at, ScanJob.findings_count)
+                .where(ScanJob.org_id == org_id, ScanJob.status == ScanStatus.COMPLETED)
+                .order_by(ScanJob.completed_at.desc())
+                .limit(7)
+            )
+        ).all()
 
-    risk_history = []
-    for row in reversed(recent_scans):
-        fc = row[1] or {}
-        c, h, m, l_ = fc.get("critical", 0), fc.get("high", 0), fc.get("medium", 0), fc.get("low", 0)
-        score = round(min(100, _log_risk(c, 20) + _log_risk(h, 10) + _log_risk(m, 3) + _log_risk(l_, 0.5)))
-        risk_history.append({
-            "date": row[0].isoformat() if row[0] else None,
-            "score": score,
-        })
+        risk_history = []
+        for row in reversed(recent_scans):
+            fc = row[1] or {}
+            c, h, m, l_ = fc.get("critical", 0), fc.get("high", 0), fc.get("medium", 0), fc.get("low", 0)
+            score = round(min(100, _log_risk(c, 20) + _log_risk(h, 10) + _log_risk(m, 3) + _log_risk(l_, 0.5)))
+            risk_history.append({
+                "date": row[0].isoformat() if row[0] else None,
+                "score": score,
+            })
 
-    # Risk trend: compare current score vs previous scan score
-    if len(risk_history) >= 2:
-        prev_score = risk_history[-2]["score"]
-        if risk_score > prev_score:
-            risk_trend = "up"
-        elif risk_score < prev_score:
-            risk_trend = "down"
+        # Risk trend: compare current score vs previous scan score
+        if len(risk_history) >= 2:
+            prev_score = risk_history[-2]["score"]
+            if risk_score > prev_score:
+                risk_trend = "up"
+            elif risk_score < prev_score:
+                risk_trend = "down"
+            else:
+                risk_trend = "stable"
         else:
             risk_trend = "stable"
-    else:
-        risk_trend = "stable"
 
-    result = {
-        "total_assets": total_assets,
-        "active_assets": active_assets,
-        "total_findings": total_findings,
-        "critical_findings": critical,
-        "high_findings": high,
-        "medium_findings": medium,
-        "low_findings": low,
-        "info_findings": info,
-        "risk_score": risk_score,
-        "risk_trend": risk_trend,
-        "active_scans": active_scans,
-        "total_scans": total_scans,
-        "risk_score_history": risk_history,
-    }
+        result = {
+            "total_assets": total_assets,
+            "active_assets": active_assets,
+            "total_findings": total_findings,
+            "critical_findings": critical,
+            "high_findings": high,
+            "medium_findings": medium,
+            "low_findings": low,
+            "info_findings": info,
+            "risk_score": risk_score,
+            "risk_trend": risk_trend,
+            "active_scans": active_scans,
+            "total_scans": total_scans,
+            "risk_score_history": risk_history,
+        }
 
-    if redis:
-        try:
-            await redis.set(cache_key, json.dumps(result), ex=_CACHE_TTL)
-            await redis.delete(lock_key)
-            await redis.aclose()
-        except Exception:
-            pass
+        if redis:
+            try:
+                await redis.set(cache_key, json.dumps(result), ex=_CACHE_TTL)
+                await redis.delete(lock_key)
+            except Exception:
+                pass
 
-    return result
+        return result
+    finally:
+        if redis:
+            try:
+                await redis.aclose()
+            except Exception:
+                pass

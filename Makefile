@@ -47,6 +47,13 @@ start:
 stop:
 	@bash stop.sh
 
+## native-logs: Tail all native service logs (backend, worker, beat, frontend, MSRA)
+native-logs:
+	@mkdir -p logs
+	@echo "==> Tailing all AttackTrace service logs (Ctrl+C to stop)..."
+	@tail -f logs/backend.log logs/worker.log logs/beat.log logs/frontend.log logs/msra.log 2>/dev/null || \
+	 tail -f logs/backend.log logs/worker.log logs/beat.log logs/frontend.log 2>/dev/null
+
 ## install-tools: Install all required external tools (ffuf, nuclei, gowitness, SecLists, Playwright)
 install-tools:
 	@echo "==> Installing AttackTrace external tool dependencies..."
