@@ -26,15 +26,23 @@ Proxied endpoints:
   GET  /mobile/health                   — MSRA health check
 """
 
+import hashlib
+import logging
 from typing import Annotated
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.core.config import get_settings
-from app.core.dependencies import get_current_user
+from app.core.database import get_db
+from app.core.dependencies import get_current_user, get_current_org_id
 from app.models.db.user import User
+from app.models.db.finding import Finding, FindingSeverity, FindingStatus
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/mobile", tags=["Mobile Scanner"])
 settings = get_settings()
@@ -371,3 +379,136 @@ async def toggle_rule(
     body = await request.json()
     resp = await _msra_request("PATCH", f"/api/rules/{rule_id}/toggle", json=body)
     return _proxy_response(resp)
+
+
+# ── MSRA → Central findings sync ──────────────────────────────────────────────
+
+_SEVERITY_MAP = {
+    "critical": FindingSeverity.CRITICAL,
+    "high":     FindingSeverity.HIGH,
+    "medium":   FindingSeverity.MEDIUM,
+    "low":      FindingSeverity.LOW,
+    "info":     FindingSeverity.INFO,
+}
+
+
+def _msra_dedup_hash(org_id: str, scan_id: str, finding_id: int) -> str:
+    key = f"msra|{org_id}|{scan_id}|{finding_id}"
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+async def _sync_msra_to_db(org_id: str, db: AsyncSession) -> dict:
+    """Pull all completed MSRA scans and upsert their findings into the central DB."""
+    inserted = 0
+    updated = 0
+    skipped = 0
+    errors = 0
+
+    # Fetch MSRA scan list
+    try:
+        stats_resp = await _msra_request("GET", "/api/dashboard/stats")
+        if stats_resp.status_code != 200:
+            return {"error": "MSRA unavailable", "inserted": 0, "updated": 0, "skipped": 0}
+        stats = stats_resp.json()
+    except Exception as exc:
+        return {"error": str(exc), "inserted": 0, "updated": 0, "skipped": 0}
+
+    scans = stats.get("recent_scans", [])
+    done_scans = [s for s in scans if s.get("status") in ("done", "completed")]
+
+    for scan in done_scans:
+        scan_id = scan.get("scan_id")
+        if not scan_id:
+            continue
+
+        # Fetch findings for this MSRA scan
+        try:
+            findings_resp = await _msra_request("GET", f"/api/scans/{scan_id}/findings")
+            if findings_resp.status_code != 200:
+                continue
+            findings_data = findings_resp.json()
+        except Exception:
+            errors += 1
+            continue
+
+        msra_findings = findings_data.get("findings", [])
+        apk_name = findings_data.get("apk") or scan.get("apk", "")
+
+        for mf in msra_findings:
+            fid = mf.get("id")
+            if fid is None:
+                continue
+
+            dedup = _msra_dedup_hash(org_id, scan_id, fid)
+
+            # Check if already exists
+            result = await db.execute(select(Finding).where(Finding.dedup_hash == dedup))
+            existing = result.scalar_one_or_none()
+
+            # Map severity
+            raw_sev = (mf.get("severity") or "info").lower()
+            sev = _SEVERITY_MAP.get(raw_sev, FindingSeverity.INFO)
+
+            # Normalise evidence to dict (MSRA returns it as a dict already)
+            evidence = mf.get("evidence")
+            if isinstance(evidence, str):
+                evidence = {"raw": evidence}
+
+            # CWE list → cve-like array (stored in references; cve stays empty for mobile)
+            cwe_list = mf.get("cwe") or []
+            if isinstance(cwe_list, str):
+                cwe_list = [cwe_list]
+
+            refs = mf.get("references") or []
+
+            if existing is None:
+                db.add(Finding(
+                    org_id=org_id,
+                    scan_job_id=None,
+                    source="msra",
+                    source_scan_id=scan_id,
+                    title=mf.get("title", "Untitled"),
+                    description=mf.get("description", ""),
+                    severity=sev,
+                    category=mf.get("category", ""),
+                    affected_asset=apk_name,
+                    evidence=evidence,
+                    remediation=mf.get("remediation") or "",
+                    references=refs,
+                    cve=[],
+                    status=FindingStatus.OPEN,
+                    confidence="certain",
+                    dedup_hash=dedup,
+                ))
+                inserted += 1
+            else:
+                # Update mutable fields (evidence, remediation, triage_status)
+                existing.evidence = evidence
+                existing.remediation = mf.get("remediation") or existing.remediation
+                # Sync triage status from MSRA → AttackTrace
+                msra_triage = mf.get("triage_status", "")
+                if msra_triage == "true_positive":
+                    existing.false_positive = False
+                elif msra_triage == "false_positive":
+                    existing.false_positive = True
+                    existing.status = FindingStatus.FALSE_POSITIVE
+                updated += 1
+
+    try:
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.error("MSRA sync commit failed: %s", exc)
+        return {"error": str(exc), "inserted": 0, "updated": 0, "skipped": skipped}
+
+    return {"inserted": inserted, "updated": updated, "skipped": skipped, "errors": errors}
+
+
+@router.post("/sync", summary="Sync MSRA findings into central findings DB")
+async def sync_msra_findings(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: Annotated[str, Depends(get_current_org_id)],
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    result = await _sync_msra_to_db(str(org_id), db)
+    return result

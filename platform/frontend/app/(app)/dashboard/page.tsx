@@ -12,7 +12,6 @@ import { RecentFindings } from "@/components/dashboard/recent-findings";
 import { ScanActivity } from "@/components/dashboard/scan-activity";
 import { dashboardApi } from "@/lib/api";
 import { scansApi, findingsApi } from "@/lib/api";
-import { generateMockRiskHistory } from "@/lib/utils";
 import type { DashboardStats, ScanListResponse, FindingListResponse } from "@/types";
 
 export default function DashboardPage() {
@@ -35,8 +34,7 @@ export default function DashboardPage() {
     staleTime: 60_000,
   });
 
-  // Generate mock risk history for chart if API doesn't provide it
-  const riskHistory = stats?.risk_score_history ?? generateMockRiskHistory(30);
+  const riskHistory = stats?.risk_score_history ?? [];
 
   return (
     <div className="space-y-6">

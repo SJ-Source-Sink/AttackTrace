@@ -255,6 +255,7 @@ kill_if_running backend
 kill_if_running worker
 kill_if_running beat
 kill_if_running frontend
+kill_if_running msra
 sleep 1
 
 UVICORN="$VENV_DIR/bin/uvicorn"
@@ -292,6 +293,19 @@ npm --prefix "$FRONTEND_DIR" run dev \
   > "$LOGS_DIR/frontend.log" 2>&1 &
 echo $! > "$PIDS_DIR/frontend.pid"
 ok "Frontend started (pid $(cat "$PIDS_DIR/frontend.pid")) → logs/frontend.log"
+
+# MSRA (Mobile Security Review Assistant) — optional sidecar on port 5001
+MSRA_DIR="/Users/sai/Desktop/Coding/MSRA"
+if [ -f "$MSRA_DIR/server.py" ]; then
+  info "Starting MSRA mobile scanner sidecar..."
+  cd "$MSRA_DIR"
+  python3 server.py > "$LOGS_DIR/msra.log" 2>&1 &
+  echo $! > "$PIDS_DIR/msra.pid"
+  ok "MSRA started (pid $(cat "$PIDS_DIR/msra.pid")) → logs/msra.log"
+  cd "$REPO_ROOT"
+else
+  info "MSRA not found at $MSRA_DIR — mobile scanner will be unavailable"
+fi
 
 # ─── 8. Wait for backend to be ready ─────────────────────────────────────────
 info "Waiting for backend to be ready..."

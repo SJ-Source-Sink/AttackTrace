@@ -34,8 +34,10 @@ class FindingCommentResponse(BaseModel):
 class FindingResponse(BaseModel):
     id: str
     org_id: str
-    scan_job_id: str
+    scan_job_id: Optional[str] = None
     asset_id: Optional[str] = None
+    source: str = "attacktrace"
+    source_scan_id: Optional[str] = None
     title: str
     description: str
     severity: str
@@ -108,8 +110,10 @@ class FindingResponse(BaseModel):
         return cls(
             id=str(finding.id),
             org_id=str(finding.org_id),
-            scan_job_id=str(finding.scan_job_id),
+            scan_job_id=str(finding.scan_job_id) if finding.scan_job_id else None,
             asset_id=str(finding.asset_id) if finding.asset_id else None,
+            source=getattr(finding, "source", "attacktrace") or "attacktrace",
+            source_scan_id=getattr(finding, "source_scan_id", None),
             title=finding.title,
             description=finding.description,
             severity=finding.severity.value,
@@ -139,7 +143,7 @@ class FindingResponse(BaseModel):
             epss_score=getattr(finding, "epss_score", None),
             priority_score=getattr(finding, "priority_score", None),
             # Frontend-compatible aliases
-            scan_id=str(finding.scan_job_id),
+            scan_id=str(finding.scan_job_id) if finding.scan_job_id else "",
             organization_id=str(finding.org_id),
             asset_value=finding.affected_asset or "",
             asset_type=None,

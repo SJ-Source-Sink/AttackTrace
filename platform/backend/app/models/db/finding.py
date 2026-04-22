@@ -51,12 +51,16 @@ class Finding(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=False,
         index=True,
     )
-    scan_job_id: Mapped[UUID] = mapped_column(
+    scan_job_id: Mapped[Optional[UUID]] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("scan_jobs.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
+    # Source attribution — "attacktrace" (default), "msra", etc.
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="attacktrace", server_default="attacktrace", index=True)
+    source_scan_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+
     asset_id: Mapped[Optional[UUID]] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("assets.id", ondelete="SET NULL"),
@@ -119,7 +123,7 @@ class Finding(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     ticket_ref: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
 
     # Relationships
-    scan_job: Mapped["ScanJob"] = relationship(  # type: ignore[name-defined]
+    scan_job: Mapped[Optional["ScanJob"]] = relationship(  # type: ignore[name-defined]
         "ScanJob", back_populates="findings"
     )
     asset: Mapped[Optional["Asset"]] = relationship(  # type: ignore[name-defined]

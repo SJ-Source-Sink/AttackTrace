@@ -54,6 +54,7 @@ stop_service frontend
 stop_service beat
 stop_service worker
 stop_service backend
+stop_service msra
 
 echo ""
 ok "All services stopped."

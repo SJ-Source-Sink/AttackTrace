@@ -104,17 +104,26 @@ export function StatsCards({ stats, isLoading }: StatsCardsProps) {
       <StatsCard
         title="Risk Score"
         value={stats?.risk_score ?? 0}
-        subtext="organization-wide"
-        icon={TrendingUp}
+        subtext={
+          (stats?.risk_score ?? 0) >= 75 ? "Critical risk level" :
+          (stats?.risk_score ?? 0) >= 50 ? "High risk level" :
+          (stats?.risk_score ?? 0) >= 25 ? "Medium risk level" : "Low risk level"
+        }
+        icon={
+          (stats?.risk_score ?? 0) >= 75 ? TrendingUp :
+          (stats?.risk_score ?? 0) >= 25 ? TrendingDown : Minus
+        }
         iconClassName={
-          (stats?.risk_score ?? 0) >= 70
-            ? "bg-red-500/10 text-red-500"
-            : (stats?.risk_score ?? 0) >= 40
-              ? "bg-yellow-500/10 text-yellow-500"
-              : "bg-emerald-500/10 text-emerald-400"
+          (stats?.risk_score ?? 0) >= 75 ? "bg-red-500/10 text-red-500" :
+          (stats?.risk_score ?? 0) >= 50 ? "bg-orange-500/10 text-orange-500" :
+          (stats?.risk_score ?? 0) >= 25 ? "bg-yellow-500/10 text-yellow-500" :
+                                           "bg-emerald-500/10 text-emerald-400"
         }
         trend={stats?.risk_trend}
-        trendValue={`${stats?.risk_trend === "up" ? "↑" : stats?.risk_trend === "down" ? "↓" : "→"} trend`}
+        trendValue={
+          stats?.risk_trend === "up" ? "Rising since last scan" :
+          stats?.risk_trend === "down" ? "Improving since last scan" : "Stable"
+        }
         isLoading={isLoading}
       />
     </div>

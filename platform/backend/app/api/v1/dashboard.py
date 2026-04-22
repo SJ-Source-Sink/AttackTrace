@@ -4,6 +4,7 @@ Results are cached in Redis for 5 minutes per org to reduce DB load at scale.
 """
 
 import json
+import math
 from typing import Annotated
 from uuid import UUID
 
@@ -87,8 +88,20 @@ async def get_dashboard_stats(
     low = findings_by_sev.get("low", 0)
     info = findings_by_sev.get("info", 0)
 
-    # Risk score (simple: weighted avg based on finding severity)
-    risk_score = min(100, (critical * 25 + high * 10 + medium * 3 + low * 1))
+    # Risk score — log-scaled so it doesn't max out with just a few findings.
+    # Each severity tier uses diminishing returns: score grows quickly at first,
+    # then levels off. Max of ~100 only with many criticals + highs together.
+    # Weights: critical≈20pts base, high≈10pts, medium≈3pts, low≈0.5pts per first occurrence.
+    def _log_risk(count: int, weight: float) -> float:
+        return weight * math.log1p(count)  # log(1+count) → 0 when count=0
+
+    raw = (
+        _log_risk(critical, 20) +
+        _log_risk(high,     10) +
+        _log_risk(medium,    3) +
+        _log_risk(low,     0.5)
+    )
+    risk_score = round(min(100, raw))
 
     # Active scans
     active_scans = (
@@ -119,7 +132,7 @@ async def get_dashboard_stats(
     for row in reversed(recent_scans):
         fc = row[1] or {}
         c, h, m, l_ = fc.get("critical", 0), fc.get("high", 0), fc.get("medium", 0), fc.get("low", 0)
-        score = min(100, c * 25 + h * 10 + m * 3 + l_ * 1)
+        score = round(min(100, _log_risk(c, 20) + _log_risk(h, 10) + _log_risk(m, 3) + _log_risk(l_, 0.5)))
         risk_history.append({
             "date": row[0].isoformat() if row[0] else None,
             "score": score,

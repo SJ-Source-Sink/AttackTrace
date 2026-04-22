@@ -4,13 +4,12 @@ import React, { useState } from "react";
 import { ShieldAlert, ChevronLeft, ChevronRight, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/shared/empty-state";
-import { FindingsTable } from "@/components/findings/findings-table";
-import { FindingDetail } from "@/components/findings/finding-detail";
+import { FindingRow } from "@/components/findings/finding-row";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { useFindings } from "@/hooks/use-findings";
-import type { Finding, FindingFilters, FindingSeverity, FindingStatus } from "@/types";
+import type { FindingFilters, FindingSeverity, FindingStatus } from "@/types";
 
 const SEVERITIES: FindingSeverity[] = ["critical", "high", "medium", "low", "info"];
 const STATUSES: FindingStatus[] = ["open", "in_progress", "remediated", "accepted_risk", "false_positive"];
@@ -22,7 +21,6 @@ export default function FindingsPage() {
   const [kevOnly, setKevOnly] = useState(false);
   const [confidenceFilter, setConfidenceFilter] = useState("");
   const [page, setPage] = useState(1);
-  const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
 
   // Build query params based on view mode + filters
   const activeQueryFilters: FindingFilters & { page?: number; per_page?: number } = viewMode === 'active'
@@ -250,7 +248,21 @@ export default function FindingsPage() {
           </button>
         </div>
 
-        {findings.length === 0 && !isLoading ? (
+        {isLoading ? (
+          <div className="rounded-lg border border-zinc-800 divide-y divide-zinc-800">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div key={i} className="flex items-center gap-3 px-4 py-3">
+                <div className="h-3.5 w-3.5 rounded bg-zinc-800 animate-pulse shrink-0" />
+                <div className="h-6 w-20 rounded bg-zinc-800 animate-pulse shrink-0" />
+                <div className="flex-1 space-y-1.5">
+                  <div className="h-4 w-64 rounded bg-zinc-800 animate-pulse" />
+                  <div className="h-3 w-40 rounded bg-zinc-800 animate-pulse" />
+                </div>
+                <div className="h-6 w-24 rounded bg-zinc-800 animate-pulse shrink-0" />
+              </div>
+            ))}
+          </div>
+        ) : findings.length === 0 ? (
           <EmptyState
             icon={<ShieldAlert className="h-8 w-8" />}
             title={viewMode === 'suppressed' ? "No suppressed findings" : "No findings"}
@@ -261,12 +273,11 @@ export default function FindingsPage() {
             }
           />
         ) : (
-          <FindingsTable
-            findings={findings}
-            isLoading={isLoading}
-            onRowClick={setSelectedFinding}
-            showSuppressedReason={viewMode === 'suppressed'}
-          />
+          <div className="rounded-lg border border-zinc-800 overflow-hidden divide-y divide-zinc-800">
+            {findings.map((f) => (
+              <FindingRow key={f.id} finding={f} />
+            ))}
+          </div>
         )}
 
         {/* Pagination */}
@@ -303,23 +314,6 @@ export default function FindingsPage() {
         )}
       </div>
 
-      {/* Slide-over panel for finding detail */}
-      {selectedFinding && (
-        <>
-          {/* Backdrop */}
-          <div
-            className="fixed inset-0 z-40 bg-black/50"
-            onClick={() => setSelectedFinding(null)}
-          />
-          {/* Panel */}
-          <div className="fixed inset-y-0 right-0 z-50 w-full max-w-2xl border-l border-zinc-800 bg-zinc-950 shadow-2xl animate-slide-in">
-            <FindingDetail
-              finding={selectedFinding}
-              onClose={() => setSelectedFinding(null)}
-            />
-          </div>
-        </>
-      )}
     </div>
   );
 }

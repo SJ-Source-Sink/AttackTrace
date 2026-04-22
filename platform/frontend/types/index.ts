@@ -313,6 +313,9 @@ export interface Finding {
   suppressed?: boolean;
   suppressed_reason?: string | null;
   false_positive?: boolean;
+  // Source attribution
+  source?: string;
+  source_scan_id?: string | null;
 }
 
 export interface FindingListResponse {

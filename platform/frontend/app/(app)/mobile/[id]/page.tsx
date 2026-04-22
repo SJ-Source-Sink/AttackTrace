@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import React, { Suspense, useState, useEffect } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowLeft, Download, RefreshCw, ChevronDown, ChevronRight,
   CheckCircle2, Clock, XCircle, Shield, Smartphone,
@@ -50,16 +50,22 @@ const JOB_STATUS_COLOR: Record<string, string> = {
   failed:    "text-red-400",
 };
 
+interface EvidenceObj {
+  file?: string;
+  line?: number;
+  snippet?: string;
+}
+
 interface Finding {
   id: number;
   title: string;
   severity: string;
   category: string;
   description: string;
-  cwe?: string[];
+  cwe?: string | string[];
   triage_status?: string;
   poc?: string;
-  evidence?: string;
+  evidence?: string | EvidenceObj;
   remediation?: string;
 }
 
@@ -189,9 +195,23 @@ function FindingRow({
               <p className="text-xs font-medium text-zinc-500 mb-1 flex items-center gap-1.5">
                 <Code2 className="h-3.5 w-3.5" /> Evidence
               </p>
-              <pre className="bg-zinc-950 rounded-md p-3 text-xs text-zinc-300 font-mono overflow-x-auto border border-zinc-800 whitespace-pre-wrap">
-                {finding.evidence}
-              </pre>
+              {typeof finding.evidence === "object" ? (
+                <div className="bg-zinc-950 rounded-md border border-zinc-800 overflow-hidden">
+                  {finding.evidence.file && (
+                    <p className="text-xs text-zinc-500 font-mono px-3 pt-2 pb-1 border-b border-zinc-800 truncate">
+                      {finding.evidence.file}
+                      {finding.evidence.line != null && <span className="text-zinc-600">:{finding.evidence.line}</span>}
+                    </p>
+                  )}
+                  <pre className="p-3 text-xs text-zinc-300 font-mono overflow-x-auto whitespace-pre-wrap">
+                    {finding.evidence.snippet ?? ""}
+                  </pre>
+                </div>
+              ) : (
+                <pre className="bg-zinc-950 rounded-md p-3 text-xs text-zinc-300 font-mono overflow-x-auto border border-zinc-800 whitespace-pre-wrap">
+                  {finding.evidence}
+                </pre>
+              )}
             </div>
           )}
 
@@ -322,16 +342,108 @@ function DynJobCard({ job }: { job: DynJob }) {
   );
 }
 
+// ── Scan progress bar ─────────────────────────────────────────────────────────
+
+interface ScanProgress {
+  status: string;
+  progress: number;
+  message: string;
+}
+
+function ScanProgressBanner({ scanId, onComplete }: { scanId: string; onComplete: () => void }) {
+  const [justCompleted, setJustCompleted] = useState(false);
+
+  const { data } = useQuery<ScanProgress | null>({
+    queryKey: ["mobile", "scan-progress", scanId],
+    queryFn: async () => {
+      const res = await fetchWithAuth(`${API_BASE}/mobile/stats`);
+      if (!res.ok) return null;
+      const stats = await res.json();
+      const scan = (stats.recent_scans ?? []).find((s: { scan_id: string }) => s.scan_id === scanId);
+      if (!scan) return null;
+      return { status: scan.status, progress: scan.progress ?? 0, message: scan.message ?? "" };
+    },
+    refetchInterval: (query) => {
+      const d = query.state.data as ScanProgress | null | undefined;
+      if (!d) return 2000;
+      const done = d.status === "done" || d.status === "completed" || d.status === "failed" || d.status === "error";
+      return done ? false : 2000;
+    },
+  });
+
+  // When scan transitions to done, trigger findings reload once
+  const prevStatus = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (!data) return;
+    const isDone = data.status === "done" || data.status === "completed";
+    const wasPending = prevStatus.current && prevStatus.current !== "done" && prevStatus.current !== "completed";
+    if (isDone && wasPending) {
+      setJustCompleted(true);
+      onComplete();
+      // Sync MSRA findings into central DB on scan complete
+      fetchWithAuth(`${API_BASE}/mobile/sync`, { method: "POST" }).catch(() => {});
+      setTimeout(() => setJustCompleted(false), 3000);
+    }
+    prevStatus.current = data.status;
+  }, [data, onComplete]);
+
+  if (!data) return null;
+  const { status, progress, message } = data;
+  const isRunning = status !== "done" && status !== "completed" && status !== "failed" && status !== "error";
+  if (!isRunning && !justCompleted) return null;
+
+  if (justCompleted) {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-sm text-emerald-400">
+        <CheckCircle2 className="h-4 w-4 shrink-0" />
+        Scan complete — findings loaded
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 px-4 py-3 space-y-2">
+      <div className="flex items-center justify-between text-xs">
+        <span className="flex items-center gap-2 text-blue-400 font-medium">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Scanning in progress
+        </span>
+        <span className="text-zinc-400">{Math.round(progress)}%</span>
+      </div>
+      <div className="w-full h-1.5 rounded-full bg-zinc-800">
+        <div
+          className="h-full rounded-full bg-blue-500 transition-all duration-500"
+          style={{ width: `${Math.min(progress, 100)}%` }}
+        />
+      </div>
+      {message && (
+        <p className="text-xs text-zinc-500 truncate">{message}</p>
+      )}
+    </div>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 type Tab = "findings" | "dynamic";
 
-export default function MobileScanDetailPage() {
+function MobileScanDetailPageInner() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const queryClient = useQueryClient();
   const [sevFilter, setSevFilter] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("findings");
+
+  // Auto-switch tab from URL query param (?tab=dynamic)
+  useEffect(() => {
+    const tab = searchParams.get("tab");
+    if (tab === "dynamic") setActiveTab("dynamic");
+  }, [searchParams]);
+
+  const handleScanComplete = React.useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ["mobile", "scan", id] });
+  }, [queryClient, id]);
 
   // Findings
   const { data: scanData, isLoading, refetch } = useQuery<FindingsResponse>({
@@ -457,6 +569,9 @@ export default function MobileScanDetailPage() {
           </DropdownMenu>
         </div>
       </div>
+
+      {/* Scan progress banner */}
+      <ScanProgressBanner scanId={id} onComplete={handleScanComplete} />
 
       {/* Severity summary cards */}
       {scanData && (
@@ -605,6 +720,14 @@ export default function MobileScanDetailPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function MobileScanDetailPage() {
+  return (
+    <Suspense>
+      <MobileScanDetailPageInner />
+    </Suspense>
   );
 }
 

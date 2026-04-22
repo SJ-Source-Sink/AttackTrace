@@ -53,10 +53,10 @@
 
 | Category | Capabilities |
 |---|---|
-| **Dashboard** | Live risk score, asset/finding counts, risk trend chart, recent scans |
+| **Dashboard** | Live log-scaled risk score, asset/finding counts, risk trend chart, recent scans |
 | **Scans** | Full scan lifecycle management, real-time SSE progress streaming, cancel/delete |
 | **Assets** | Filterable asset inventory (domain, subdomain, IP, webapp, cloud), screenshot thumbnails |
-| **Findings** | Severity triage, status workflow (open → remediated), CVE linking, bulk operations, suppression rules |
+| **Findings** | Unified view: recon + mobile findings, expandable rows with evidence/PoC/remediation, severity triage, status workflow, CVE linking, suppression rules |
 | **Reports** | Auto-generated HTML reports per scan with full asset and finding detail |
 | **Audit Log** | Immutable record of all platform actions by user, type-filtered, CSV export |
 
@@ -79,11 +79,28 @@
 | **Nmap Scanner** | 7 scan types, custom port ranges, parsed results with service/version |
 | **Nuclei Scanner** | Template-based scanning, severity filter, live stderr progress, CVE enrichment |
 | **ffuf Fuzzer** | Directory/param/subdomain fuzzing, 13 bundled wordlists, custom wordlists |
-| **Attack Suite** | 17-module adaptive web scanner — crawler + pattern library from 5700+ bug bounty reports |
+| **Attack Suite** | 24-module adaptive web scanner — crawler + pattern library from 5700+ bug bounty reports |
 | **AI Attack Suite** | Shannon autonomous AI pentester — real exploit execution with CVSS reports |
 | **Takeover Checker** | CNAME chain analysis, 42+ service fingerprints, NS/MX takeover detection |
 | **Attack Path Mapper** | MITRE ATT&CK-mapped paths for AD, AWS, Azure, GCP, and network infrastructure |
+| **Mobile Scanner (MSRA)** | APK/IPA static analysis, dynamic analysis, AI PoC generation, findings federation into central dashboard |
 | **Test Case Generator** | OWASP WSTG-based test cases (Standard) or Claude-powered custom cases (AI-Assisted) |
+
+### Mobile Security (MSRA)
+
+MSRA (Mobile Security Review Assistant) is a sidecar service that integrates with AttackTrace for mobile app security analysis.
+
+| Feature | Description |
+|---|---|
+| **Static Analysis** | Upload APK/IPA/JAR — automated vulnerability scan with MobSF-style findings |
+| **Dynamic Analysis** | AI-driven runtime testing — spawns emulator sessions, generates payloads, intercepts traffic |
+| **AI PoC Generation** | Claude generates proof-of-concept exploit code for each finding |
+| **Findings Federation** | MSRA findings sync into the central Findings dashboard alongside recon findings |
+| **Unified View** | All mobile + recon findings in one expandable list with severity, evidence, remediation, and source badges |
+
+**Setup:** Start the MSRA server (automatically handled by `./start.sh`). Access the mobile scanner at `/mobile` in the AttackTrace frontend.
+
+---
 
 ### AI Features (Claude-powered)
 
@@ -165,7 +182,7 @@ The script will:
 4. Create the PostgreSQL database and user
 5. Run database migrations
 6. Create the default admin account
-7. Start backend, Celery worker, Celery beat, and Next.js dev server
+7. Start backend, Celery worker, Celery beat, Next.js dev server, and MSRA mobile sidecar (if present at `~/Desktop/Coding/MSRA`)
 
 **Stop all services:**
 ```bash

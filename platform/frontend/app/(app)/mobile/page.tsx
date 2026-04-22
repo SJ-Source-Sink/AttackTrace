@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useCallback, useRef } from "react";
+import React, { useState, useCallback, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import {
   Smartphone, Upload, Trash2, Eye, RefreshCw,
@@ -142,6 +142,11 @@ export default function MobileScannerPage() {
   const queryClient = useQueryClient();
   const [uploading, setUploading] = useState(false);
 
+  // Sync MSRA findings into central DB on page load
+  useEffect(() => {
+    fetchWithAuth(`${API_BASE}/mobile/sync`, { method: "POST" }).catch(() => {});
+  }, []);
+
   const { data: statsData, isLoading, refetch } = useQuery<StatsResponse>({
     queryKey: ["mobile", "stats"],
     queryFn: async () => {
@@ -179,6 +184,7 @@ export default function MobileScannerPage() {
         if (!res.ok) throw new Error(data?.error?.message ?? "Upload failed");
         toast.success(`Scan started for ${file.name}`);
         queryClient.invalidateQueries({ queryKey: ["mobile", "stats"] });
+        // Background sync once scan will eventually complete — also triggered by ScanProgressBanner
         const scanId = data.scan_id ?? data.id;
         if (scanId) router.push(`/mobile/${scanId}`);
       } catch (err: unknown) {

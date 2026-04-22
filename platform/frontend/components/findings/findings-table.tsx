@@ -14,6 +14,8 @@ import {
   ChevronDown,
   ChevronsUpDown,
   ExternalLink,
+  Smartphone,
+  Globe,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/shared/loading-skeleton";
@@ -99,6 +101,26 @@ export function FindingsTable({ findings, isLoading, onRowClick, showSuppressedR
           )}
         </div>
       ),
+    },
+    {
+      accessorKey: "source",
+      header: "Source",
+      cell: ({ row }) => {
+        const src = row.original.source ?? "attacktrace";
+        if (src === "msra") {
+          return (
+            <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded border border-violet-500/30 bg-violet-500/10 text-violet-400">
+              <Smartphone className="h-2.5 w-2.5" /> Mobile
+            </span>
+          );
+        }
+        return (
+          <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded border border-blue-500/30 bg-blue-500/10 text-blue-400">
+            <Globe className="h-2.5 w-2.5" /> Recon
+          </span>
+        );
+      },
+      enableSorting: false,
     },
     {
       accessorKey: "asset_value",
