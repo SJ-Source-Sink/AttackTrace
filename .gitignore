@@ -10,8 +10,9 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# lib/ and lib64/ are Python venv artifacts — scope to root only, not frontend
+/lib/
+/lib64/
 parts/
 sdist/
 var/
