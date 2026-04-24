@@ -42,101 +42,162 @@ WAF_SIGNATURES: list[dict] = [
     {
         "vendor": "Cloudflare",
         "header_patterns": [
-            (re.compile(r"^cf-ray$", re.I), None),
-            (re.compile(r"^server$", re.I), re.compile(r"cloudflare", re.I)),
+            (re.compile(r"^cf-ray$", re.I), None, 80),
+            (re.compile(r"^cf-cache-status$", re.I), None, 60),
+            (re.compile(r"^cf-request-id$", re.I), None, 60),
+            (re.compile(r"^server$", re.I), re.compile(r"cloudflare", re.I), 80),
         ],
-        "cookie_patterns": [re.compile(r"^__cfduid$", re.I), re.compile(r"^cf_clearance$", re.I)],
-        "body_patterns": [re.compile(r"cloudflare", re.I)],
-        "status_patterns": [],
+        "cookie_patterns": [
+            (re.compile(r"^__cfduid$", re.I), 60),
+            (re.compile(r"^cf_clearance$", re.I), 80),
+            (re.compile(r"^__cf_bm$", re.I), 80),
+        ],
+        "body_patterns": [
+            (re.compile(r"cloudflare", re.I), 40),
+            (re.compile(r"cf-ray", re.I), 30),
+        ],
     },
     {
         "vendor": "AWS WAF",
         "header_patterns": [
-            (re.compile(r"^x-amzn-requestid$", re.I), None),
-            (re.compile(r"^x-amz-cf-id$", re.I), None),
+            (re.compile(r"^x-amzn-requestid$", re.I), None, 70),
+            (re.compile(r"^x-amzn-trace-id$", re.I), None, 50),
         ],
-        "cookie_patterns": [],
-        "body_patterns": [re.compile(r"aws\s*waf", re.I)],
-        "status_patterns": [],
+        "cookie_patterns": [
+            (re.compile(r"^aws-waf-token$", re.I), 80),
+        ],
+        "body_patterns": [
+            (re.compile(r"aws\s*waf", re.I), 70),
+        ],
     },
     {
         "vendor": "Akamai",
         "header_patterns": [
-            (re.compile(r"^akamai-", re.I), None),
-            (re.compile(r"^x-akamai-", re.I), None),
-            (re.compile(r"^server$", re.I), re.compile(r"akamaighost", re.I)),
+            (re.compile(r"^x-akamai-", re.I), None, 80),
+            (re.compile(r"^akamai-", re.I), None, 80),
+            (re.compile(r"^x-check-cacheable$", re.I), None, 40),
+            (re.compile(r"^server$", re.I), re.compile(r"akamaighost", re.I), 80),
+            (re.compile(r"^server-timing$", re.I), re.compile(r"\bak_p\b", re.I), 80),
+            (re.compile(r"^server-timing$", re.I), re.compile(r"\bedge\b", re.I), 30),
         ],
-        "cookie_patterns": [re.compile(r"^ak_bmsc$", re.I)],
-        "body_patterns": [],
-        "status_patterns": [],
+        "cookie_patterns": [
+            (re.compile(r"^ak_bmsc$", re.I), 80),
+            (re.compile(r"^bm_sz$", re.I), 70),
+            (re.compile(r"^bm_mi$", re.I), 70),
+            (re.compile(r"^_abck$", re.I), 70),
+        ],
+        "body_patterns": [
+            (re.compile(r"akstat\.io", re.I), 60),
+            (re.compile(r"go-mpulse\.net", re.I), 60),
+            (re.compile(r"akamaized\.net", re.I), 50),
+            (re.compile(r"akamai", re.I), 40),
+        ],
     },
     {
         "vendor": "Imperva/Incapsula",
         "header_patterns": [
-            (re.compile(r"^x-iinfo$", re.I), None),
+            (re.compile(r"^x-iinfo$", re.I), None, 80),
+            (re.compile(r"^x-cdn$", re.I), re.compile(r"incapsula", re.I), 80),
         ],
         "cookie_patterns": [
-            re.compile(r"^visid_incap_", re.I),
-            re.compile(r"^incap_ses_", re.I),
+            (re.compile(r"^visid_incap_", re.I), 80),
+            (re.compile(r"^incap_ses_", re.I), 80),
+            (re.compile(r"^nlbi_", re.I), 60),
+            (re.compile(r"^reese84$", re.I), 50),
         ],
-        "body_patterns": [re.compile(r"incapsula", re.I)],
-        "status_patterns": [],
+        "body_patterns": [
+            (re.compile(r"incapsula", re.I), 70),
+            (re.compile(r"imperva", re.I), 60),
+        ],
     },
     {
         "vendor": "F5 BIG-IP",
         "header_patterns": [
-            (re.compile(r"^x-wa-info$", re.I), None),
+            (re.compile(r"^x-wa-info$", re.I), None, 80),
+            (re.compile(r"^x-cnection$", re.I), None, 60),
         ],
-        "cookie_patterns": [re.compile(r"^TS0[0-9a-f]", re.I)],
-        "body_patterns": [],
-        "status_patterns": [],
+        "cookie_patterns": [
+            (re.compile(r"^TS[0-9a-f]{8}$", re.I), 80),
+            (re.compile(r"^TS01", re.I), 70),
+            (re.compile(r"^BIGipServer", re.I), 80),
+        ],
+        "body_patterns": [
+            (re.compile(r"BIG-IP", re.I), 60),
+        ],
     },
     {
         "vendor": "Barracuda",
-        "header_patterns": [],
-        "cookie_patterns": [re.compile(r"^barra_counter_session$", re.I)],
-        "body_patterns": [],
-        "status_patterns": [],
+        "header_patterns": [
+            (re.compile(r"^x-barracuda-", re.I), None, 80),
+        ],
+        "cookie_patterns": [
+            (re.compile(r"^barra_counter_session$", re.I), 80),
+        ],
+        "body_patterns": [
+            (re.compile(r"barracuda", re.I), 60),
+        ],
     },
     {
         "vendor": "ModSecurity",
         "header_patterns": [
-            (re.compile(r"^x-mod-security$", re.I), None),
+            (re.compile(r"^x-mod-security$", re.I), None, 80),
         ],
         "cookie_patterns": [],
         "body_patterns": [
-            re.compile(r"modsecurity", re.I),
-            re.compile(r"mod_security", re.I),
+            (re.compile(r"modsecurity", re.I), 80),
+            (re.compile(r"mod_security", re.I), 80),
         ],
-        "status_patterns": [],
     },
     {
         "vendor": "Sucuri",
         "header_patterns": [
-            (re.compile(r"^x-sucuri-id$", re.I), None),
+            (re.compile(r"^x-sucuri-id$", re.I), None, 80),
+            (re.compile(r"^x-sucuri-cache$", re.I), None, 80),
         ],
-        "cookie_patterns": [re.compile(r"^sucuri_cloudproxy_uuid$", re.I)],
-        "body_patterns": [re.compile(r"sucuri", re.I)],
-        "status_patterns": [],
+        "cookie_patterns": [
+            (re.compile(r"^sucuri_cloudproxy_uuid$", re.I), 80),
+        ],
+        "body_patterns": [
+            (re.compile(r"sucuri", re.I), 70),
+        ],
     },
     {
         "vendor": "Fastly",
         "header_patterns": [
-            (re.compile(r"^fastly-", re.I), None),
-            (re.compile(r"^x-served-by$", re.I), re.compile(r"cache", re.I)),
+            (re.compile(r"^fastly-", re.I), None, 80),
+            (re.compile(r"^x-fastly-request-id$", re.I), None, 80),
+            (re.compile(r"^x-served-by$", re.I), re.compile(r"cache-[a-z]{2}", re.I), 70),
+            (re.compile(r"^via$", re.I), re.compile(r"varnish", re.I), 40),
         ],
         "cookie_patterns": [],
-        "body_patterns": [],
-        "status_patterns": [],
+        "body_patterns": [
+            (re.compile(r"fastly", re.I), 50),
+        ],
     },
     {
         "vendor": "Azure Application Gateway",
         "header_patterns": [
-            (re.compile(r"^x-ms-routing-name$", re.I), None),
+            (re.compile(r"^x-ms-routing-name$", re.I), None, 80),
+            (re.compile(r"^x-azure-ref$", re.I), None, 80),
+        ],
+        "cookie_patterns": [
+            (re.compile(r"^ARRAffinity$", re.I), 70),
+        ],
+        "body_patterns": [
+            (re.compile(r"application\s*gateway", re.I), 70),
+        ],
+    },
+    {
+        "vendor": "Amazon CloudFront",
+        "header_patterns": [
+            (re.compile(r"^x-amz-cf-pop$", re.I), None, 80),
+            (re.compile(r"^x-amz-cf-id$", re.I), None, 70),
+            (re.compile(r"^via$", re.I), re.compile(r"CloudFront", re.I), 80),
         ],
         "cookie_patterns": [],
-        "body_patterns": [re.compile(r"application\s*gateway", re.I)],
-        "status_patterns": [],
+        "body_patterns": [
+            (re.compile(r"CloudFront", re.I), 60),
+        ],
     },
 ]
 
@@ -145,18 +206,19 @@ def _score_response(
     normal_resp: httpx.Response | None,
     malicious_resp: httpx.Response | None,
 ) -> dict:
-    """
-    Check both responses against WAF signatures and return detection result.
-    """
+    """Score responses against WAF signatures with per-pattern weights."""
     indicators: list[str] = []
     vendor_scores: dict[str, int] = {}
 
     def _check_response(resp: httpx.Response, label: str) -> None:
         headers = dict(resp.headers)
         cookies = {k: v for k, v in resp.cookies.items()}
+        raw_cookie_header = " ".join(
+            v for k, v in resp.headers.multi_items() if k.lower() == "set-cookie"
+        )
         body = ""
         try:
-            body = resp.text
+            body = resp.text[:60000]
         except Exception:
             pass
 
@@ -164,31 +226,29 @@ def _score_response(
             v = sig["vendor"]
             score = 0
 
-            # Check headers
-            for hdr_rx, val_rx in sig["header_patterns"]:
+            for hdr_rx, val_rx, pts in sig.get("header_patterns", []):
                 for hdr_name, hdr_val in headers.items():
                     if hdr_rx.match(hdr_name):
-                        if val_rx is None or val_rx.search(hdr_val):
-                            score += 30
+                        if val_rx is None or val_rx.search(str(hdr_val)):
+                            score += pts
                             indicators.append(
-                                f"[{label}] {v}: header '{hdr_name}' matched"
+                                f"[{label}] {v}: header '{hdr_name}' matched (+{pts})"
                             )
+                            break
 
-            # Check cookies
-            for ck_rx in sig["cookie_patterns"]:
-                for ck_name in cookies:
-                    if ck_rx.match(ck_name):
-                        score += 25
-                        indicators.append(
-                            f"[{label}] {v}: cookie '{ck_name}' matched"
-                        )
+            for ck_rx, pts in sig.get("cookie_patterns", []):
+                matched = any(ck_rx.match(ck) for ck in cookies)
+                if not matched:
+                    matched = bool(ck_rx.search(raw_cookie_header))
+                if matched:
+                    score += pts
+                    indicators.append(f"[{label}] {v}: cookie pattern matched (+{pts})")
 
-            # Check body
-            for body_rx in sig["body_patterns"]:
+            for body_rx, pts in sig.get("body_patterns", []):
                 if body_rx.search(body):
-                    score += 20
+                    score += pts
                     indicators.append(
-                        f"[{label}] {v}: body pattern '{body_rx.pattern}' matched"
+                        f"[{label}] {v}: body '{body_rx.pattern}' matched (+{pts})"
                     )
 
             if score > 0:
@@ -199,32 +259,32 @@ def _score_response(
     if malicious_resp is not None:
         _check_response(malicious_resp, "malicious")
 
-    # Generic WAF heuristic: 403/406 on malicious but 200 on normal
     blocked_malicious = False
     if (
         normal_resp is not None
         and malicious_resp is not None
-        and normal_resp.status_code == 200
+        and normal_resp.status_code in (200, 301, 302)
         and malicious_resp.status_code in (403, 406, 429, 503)
     ):
         blocked_malicious = True
         if not vendor_scores:
             vendor_scores["Generic WAF"] = 40
-        indicators.append(
-            f"[generic] Normal GET returned 200 but malicious payload returned {malicious_resp.status_code}"
-        )
+            indicators.append(
+                f"[generic] Malicious payload blocked ({malicious_resp.status_code}) "
+                f"but normal request succeeded ({normal_resp.status_code}) (+40)"
+            )
 
     best_vendor: str | None = None
     confidence = 0
     if vendor_scores:
         best_vendor = max(vendor_scores, key=lambda k: vendor_scores[k])
-        raw_score = vendor_scores[best_vendor]
-        confidence = min(100, raw_score)
+        confidence = min(100, vendor_scores[best_vendor])
 
     return {
         "detected": bool(vendor_scores),
         "vendor": best_vendor,
         "confidence": confidence,
+        "vendor_scores": vendor_scores,
         "indicators": indicators,
         "blocked_malicious": blocked_malicious,
         "response_codes": {
