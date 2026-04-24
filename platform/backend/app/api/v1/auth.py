@@ -159,7 +159,7 @@ async def login(
 
     # Load first org membership for default context
     member_result = await db.execute(
-        select(OrgMember).where(OrgMember.user_id == user.id).limit(1)
+        select(OrgMember).where(OrgMember.user_id == user.id).order_by(OrgMember.created_at.asc()).limit(1)
     )
     member = member_result.scalar_one_or_none()
     org_id = str(member.org_id) if member else None
@@ -221,7 +221,7 @@ async def refresh_token(
 
     # Load org context
     member_result = await db.execute(
-        select(OrgMember).where(OrgMember.user_id == user.id).limit(1)
+        select(OrgMember).where(OrgMember.user_id == user.id).order_by(OrgMember.created_at.asc()).limit(1)
     )
     member = member_result.scalar_one_or_none()
     org_id = str(member.org_id) if member else None

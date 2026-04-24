@@ -13,7 +13,7 @@ from uuid import UUID
 
 import redis.asyncio as aioredis
 from fastapi import Request
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -156,6 +156,7 @@ async def list_scans(
     status: Optional[str] = None,
     workspace_id: Optional[str] = None,
     target_domain: Optional[str] = None,
+    search: Optional[str] = None,
     page: int = 1,
     per_page: int = 50,
 ) -> dict:
@@ -168,6 +169,14 @@ async def list_scans(
         query = query.where(ScanJob.workspace_id == UUID(workspace_id))
     if target_domain:
         query = query.where(ScanJob.target_domains.any(target_domain))
+    if search:
+        pattern = f"%{search}%"
+        query = query.where(
+            or_(
+                ScanJob.company_name.ilike(pattern),
+                cast(ScanJob.target_domains, String).ilike(pattern),
+            )
+        )
 
     # Count
     count_query = select(func.count()).select_from(query.subquery())

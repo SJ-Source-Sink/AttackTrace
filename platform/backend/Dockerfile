@@ -67,7 +67,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libappindicator3-1 \
     xdg-utils \
     ca-certificates \
+    nmap \
+    libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
+
+# Grant nmap raw socket capabilities so it can run ACK/SYN/fragmented scans
+# without running as root. The || true prevents build failure on systems where
+# setcap is unavailable (some CI environments).
+RUN setcap cap_net_raw,cap_net_admin=eip $(which nmap) || true
 
 # Copy the compiled venv from builder
 COPY --from=builder /opt/venv /opt/venv

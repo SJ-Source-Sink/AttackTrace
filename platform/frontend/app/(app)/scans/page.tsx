@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import { Plus, Search, Filter, Trash2, CheckSquare, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -16,24 +16,26 @@ import { toast } from "sonner";
 
 export default function ScansPage() {
   const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [search, setSearch] = useState("");
+  const [searchInput, setSearchInput] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  // Debounce search input 300 ms before sending to the API
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(searchInput), 300);
+    return () => clearTimeout(t);
+  }, [searchInput]);
 
   const { data, isLoading } = useScans({
     status: statusFilter === "all" ? undefined : statusFilter,
     per_page: 20,
+    search: debouncedSearch || undefined,
   });
 
   const { mutateAsync: deleteScan } = useDeleteScan();
 
   const scans = data?.items ?? [];
-  const filteredScans = search
-    ? scans.filter(
-        (s) =>
-          (s.company_name ?? "").toLowerCase().includes(search.toLowerCase()) ||
-          (s.target_domains ?? []).some((d) => d.includes(search.toLowerCase())),
-      )
-    : scans;
+  const filteredScans = scans;
 
   const selectableIds = filteredScans
     .filter((s) => s.status === "completed" || s.status === "failed" || s.status === "cancelled")
@@ -89,8 +91,8 @@ export default function ScansPage() {
           <Input
             placeholder="Search scans..."
             className="pl-9"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
           />
         </div>
         <Select value={statusFilter} onValueChange={setStatusFilter}>
@@ -163,12 +165,12 @@ export default function ScansPage() {
           icon={<Search className="h-8 w-8" />}
           title="No scans found"
           description={
-            search
-              ? `No scans match "${search}"`
+            debouncedSearch
+              ? `No scans match "${debouncedSearch}"`
               : "Start your first scan to discover your attack surface"
           }
           action={
-            !search ? (
+            !debouncedSearch ? (
               <Button asChild>
                 <Link href="/scans/new">Start your first scan</Link>
               </Button>

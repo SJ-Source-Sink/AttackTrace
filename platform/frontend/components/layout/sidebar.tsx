@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useCallback } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -170,7 +170,7 @@ interface SidebarProps {
   className?: string;
 }
 
-function NavLink({ item, isActive }: { item: NavItem; isActive: boolean }) {
+const NavLink = React.memo(function NavLink({ item, isActive }: { item: NavItem; isActive: boolean }) {
   const Icon = item.icon;
 
   return (
@@ -198,15 +198,18 @@ function NavLink({ item, isActive }: { item: NavItem; isActive: boolean }) {
       {isActive && <ChevronRight className="h-3 w-3 text-blue-400 shrink-0" />}
     </Link>
   );
-}
+});
 
 export function Sidebar({ className }: SidebarProps) {
   const pathname = usePathname();
 
-  const isActive = (href: string) => {
-    if (href === "/dashboard") return pathname === "/dashboard";
-    return pathname.startsWith(href);
-  };
+  const isActive = useCallback(
+    (href: string) => {
+      if (href === "/dashboard") return pathname === "/dashboard";
+      return pathname.startsWith(href);
+    },
+    [pathname],
+  );
 
   return (
     <aside

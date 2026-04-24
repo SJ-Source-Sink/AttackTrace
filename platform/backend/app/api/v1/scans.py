@@ -75,6 +75,7 @@ async def list_scan_jobs(
     scan_status: str = None,
     workspace_id: str = None,
     target_domain: str = None,
+    search: str = None,
     page: int = 1,
     per_page: int = 50,
 ) -> dict:
@@ -84,6 +85,7 @@ async def list_scan_jobs(
         status=scan_status,
         workspace_id=workspace_id,
         target_domain=target_domain,
+        search=search,
         page=page,
         per_page=per_page,
     )

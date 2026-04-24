@@ -18,7 +18,7 @@ export default function DashboardPage() {
   const { data: stats, isLoading: statsLoading, refetch } = useQuery({
     queryKey: ["dashboard", "stats"],
     queryFn: () => dashboardApi.stats() as Promise<DashboardStats>,
-    staleTime: 0,
+    staleTime: 5 * 60_000, // 5 minutes — matches the backend Redis cache TTL
   });
 
   const { data: scansData, isLoading: scansLoading } = useQuery({

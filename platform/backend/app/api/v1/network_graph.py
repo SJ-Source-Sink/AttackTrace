@@ -72,17 +72,20 @@ async def _fetch_assets(
     org_id: UUID,
     scan_id: UUID | None,
 ) -> list[Asset]:
-    """Fetch assets filtered by org and optionally by scan."""
+    """Fetch only the columns needed for graph construction (not full ORM objects)."""
+    cols = [Asset.id, Asset.asset_type, Asset.value, Asset.metadata_,
+            Asset.risk_score, Asset.scan_job_id, Asset.org_id, Asset.is_active]
     if scan_id is not None:
-        stmt = select(Asset).where(
+        stmt = select(*cols).where(
             and_(Asset.org_id == org_id, Asset.scan_job_id == scan_id)
         )
     else:
-        stmt = select(Asset).where(
+        stmt = select(*cols).where(
             and_(Asset.org_id == org_id, Asset.is_active == True)  # noqa: E712
-        )
+        ).limit(5000)  # safety cap — graph becomes unreadable beyond 5k nodes
     result = await db.execute(stmt)
-    return list(result.scalars().all())
+    # Return as lightweight row objects that have the same attribute access as ORM objects
+    return list(result.mappings().all())  # type: ignore[return-value]
 
 
 async def _fetch_findings_for_assets(
@@ -90,10 +93,10 @@ async def _fetch_findings_for_assets(
     org_id: UUID,
     asset_ids: list[UUID],
 ) -> list[Finding]:
-    """Fetch active findings for the given asset IDs."""
+    """Fetch only columns needed for the finding index."""
     if not asset_ids:
         return []
-    stmt = select(Finding).where(
+    stmt = select(Finding.id, Finding.asset_id, Finding.severity, Finding.status).where(
         and_(
             Finding.org_id == org_id,
             Finding.asset_id.in_(asset_ids),
@@ -101,7 +104,7 @@ async def _fetch_findings_for_assets(
         )
     )
     result = await db.execute(stmt)
-    return list(result.scalars().all())
+    return list(result.mappings().all())  # type: ignore[return-value]
 
 
 def _build_finding_index(

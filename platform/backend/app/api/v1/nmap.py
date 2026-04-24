@@ -64,6 +64,24 @@ SCAN_PRESETS: dict[str, list[str]] = {
     "custom": [],
 }
 
+# Presets that send raw packets — require CAP_NET_RAW or root
+_ROOT_REQUIRED_PRESETS = {"stealth_syn", "os_detection"}
+
+
+def _has_raw_socket_capability() -> bool:
+    """Return True if process can open raw sockets (root, setcap, or CAP_NET_RAW)."""
+    import os, socket
+    if os.geteuid() == 0:
+        return True
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+        s.close()
+        return True
+    except PermissionError:
+        return False
+    except Exception:
+        return False
+
 
 class NmapScanRequest(BaseModel):
     target: str
@@ -183,7 +201,7 @@ def _parse_nmap_output(raw: str) -> list[dict]:
     return hosts
 
 
-async def _stream_nmap(scan_id: str, req: NmapScanRequest) -> AsyncGenerator[str, None]:
+async def _stream_nmap(scan_id: str, req: NmapScanRequest, request: Request) -> AsyncGenerator[str, None]:
     cmd = _build_nmap_cmd(req)
 
     def _sse(event: str, data: dict) -> str:
@@ -214,9 +232,13 @@ async def _stream_nmap(scan_id: str, req: NmapScanRequest) -> AsyncGenerator[str
             stderr=asyncio.subprocess.STDOUT,
         )
 
-        assert proc.stdout is not None
+        if proc.stdout is None:
+            raise RuntimeError("Failed to open subprocess stdout pipe")
         async for line_bytes in proc.stdout:
             line = line_bytes.decode("utf-8", errors="replace").rstrip()
+            if await request.is_disconnected():
+                proc.terminate()
+                return
             raw_output.append(line)
             yield _sse("output", {"line": line})
             await asyncio.sleep(0)
@@ -262,6 +284,16 @@ async def run_nmap_scan(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="nmap is not installed on this server",
         )
+    if payload.scan_type in _ROOT_REQUIRED_PRESETS and not _has_raw_socket_capability():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Scan type '{payload.scan_type}' requires raw socket privileges (CAP_NET_RAW). "
+                "Fix options: (1) run `sudo setcap cap_net_raw,cap_net_admin=eip $(which nmap)` on the server, "
+                "(2) add `cap_add: [NET_RAW, NET_ADMIN]` to the Docker Compose service, "
+                "or (3) run the backend as root. Use 'quick', 'full_port', or 'service_version' scans without root."
+            ),
+        )
     scan_id = str(uuid.uuid4())
 
     log = AuditLog(
@@ -277,7 +309,7 @@ async def run_nmap_scan(
     await db.commit()
 
     return StreamingResponse(
-        _stream_nmap(scan_id, payload),
+        _stream_nmap(scan_id, payload, request),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -154,8 +154,9 @@ export default function MobileScannerPage() {
       if (!res.ok) throw new Error("Failed to fetch mobile stats");
       return res.json();
     },
-    staleTime: 0,
+    staleTime: 5_000,
     refetchInterval: 5000, // poll so in-progress scans update
+    refetchIntervalInBackground: false,
   });
 
   const deleteMutation = useMutation({

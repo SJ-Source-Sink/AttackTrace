@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import shutil
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,10 @@ from app.models.db.user import User
 
 # Cache CVSS scores to avoid hammering NVD for duplicate CVEs across scans
 _cvss_cache: dict[str, float | None] = {}
+
+# Circuit breaker: skip NVD lookups after 3 consecutive failures for 5 minutes
+_cvss_fail_count = 0
+_cvss_fail_until: float = 0.0
 
 _CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 
@@ -47,10 +52,17 @@ async def _lookup_cvss(cve_id: str) -> float | None:
                         if entries:
                             score = entries[0].get("cvssData", {}).get("baseScore")
                             if score is not None:
+                                if len(_cvss_cache) > 4096:
+                                    for k in list(_cvss_cache.keys())[:512]:
+                                        del _cvss_cache[k]
                                 _cvss_cache[cve_upper] = float(score)
                                 return float(score)
     except Exception:
         pass
+    if len(_cvss_cache) > 4096:
+        # Evict oldest 512 entries
+        for k in list(_cvss_cache.keys())[:512]:
+            del _cvss_cache[k]
     _cvss_cache[cve_upper] = None
     return None
 
@@ -233,7 +245,7 @@ def _parse_nuclei_line(line: str) -> dict | None:
         return None
 
 
-async def _stream_nuclei(scan_id: str, req: NucleiScanRequest) -> AsyncGenerator[str, None]:
+async def _stream_nuclei(scan_id: str, req: NucleiScanRequest, request: Request) -> AsyncGenerator[str, None]:
     cmd = _build_nuclei_cmd(req)
 
     def _sse(event: str, data: dict) -> str:
@@ -266,8 +278,10 @@ async def _stream_nuclei(scan_id: str, req: NucleiScanRequest) -> AsyncGenerator
             stderr=asyncio.subprocess.PIPE,
         )
 
-        assert proc.stdout is not None
-        assert proc.stderr is not None
+        if proc.stdout is None:
+            raise RuntimeError("Failed to open subprocess stdout pipe")
+        if proc.stderr is None:
+            raise RuntimeError("Failed to open subprocess stderr pipe")
 
         # Merge stdout (JSONL findings) and stderr (progress/stats) into one queue
         queue: asyncio.Queue[tuple[str, bytes] | None] = asyncio.Queue()
@@ -297,6 +311,10 @@ async def _stream_nuclei(scan_id: str, req: NucleiScanRequest) -> AsyncGenerator
             if not line:
                 continue
 
+            if await request.is_disconnected():
+                proc.terminate()
+                return
+
             if kind == "out":
                 finding = _parse_nuclei_line(line)
                 if finding:
@@ -304,7 +322,18 @@ async def _stream_nuclei(scan_id: str, req: NucleiScanRequest) -> AsyncGenerator
                     cves = _extract_cves(finding)
                     finding["cve"] = cves
                     if cves:
-                        cvss = await _lookup_cvss(cves[0])
+                        global _cvss_fail_count, _cvss_fail_until
+                        if time.monotonic() < _cvss_fail_until:
+                            cvss = None
+                        else:
+                            try:
+                                cvss = await asyncio.wait_for(_lookup_cvss(cves[0]), timeout=3.0)
+                                _cvss_fail_count = 0
+                            except (asyncio.TimeoutError, Exception):
+                                _cvss_fail_count += 1
+                                if _cvss_fail_count >= 3:
+                                    _cvss_fail_until = time.monotonic() + 300  # 5 min
+                                cvss = None
                         finding["cvss_score"] = cvss
                     findings.append(finding)
                     sev = finding.get("severity", "info").lower()
@@ -370,7 +399,7 @@ async def run_nuclei_scan(
     await db.commit()
 
     return StreamingResponse(
-        _stream_nuclei(scan_id, payload),
+        _stream_nuclei(scan_id, payload, request),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

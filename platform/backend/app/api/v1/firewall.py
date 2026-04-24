@@ -296,18 +296,24 @@ def _score_response(
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
+def _normalize_url(v: str) -> str:
+    v = v.strip()
+    if not v:
+        raise ValueError("Target is required")
+    if re.search(r"[;&|`$(){}<>]", v):
+        raise ValueError("Target contains invalid characters")
+    if not re.match(r"^https?://", v, re.I):
+        v = "https://" + v
+    return v
+
+
 class WafDetectRequest(BaseModel):
     target: str
 
     @field_validator("target")
     @classmethod
     def validate_target(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("Target is required")
-        if re.search(r"[;&|`$(){}<>]", v):
-            raise ValueError("Target contains invalid characters")
-        return v
+        return _normalize_url(v)
 
 
 class WafBypassRequest(BaseModel):
@@ -318,12 +324,7 @@ class WafBypassRequest(BaseModel):
     @field_validator("target")
     @classmethod
     def validate_target(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("Target is required")
-        if re.search(r"[;&|`$(){}<>]", v):
-            raise ValueError("Target contains invalid characters")
-        return v
+        return _normalize_url(v)
 
     @field_validator("path")
     @classmethod
@@ -503,52 +504,44 @@ async def _stream_bypass(
                 error = str(exc)
 
             if error:
-                result_label = "error"
+                result_label = "ERROR"
             elif probe_status in BLOCKED_STATUSES:
-                result_label = "blocked"
+                result_label = "BLOCKED"
             elif probe_status == 200:
-                result_label = "bypass"
+                result_label = "BYPASS"
             else:
-                result_label = "uncertain"
+                result_label = "UNCERTAIN"
 
             probe_result = {
                 "technique": technique,
                 "payload": payload,
-                "status": probe_status,
+                "status_code": probe_status,
                 "result": result_label,
                 "error": error,
             }
             results.append(probe_result)
 
-            yield _sse("probe", {"data": probe_result})
+            yield _sse("probe", probe_result)
             await asyncio.sleep(0.05)
 
-    bypass_count = sum(1 for r in results if r["result"] == "bypass")
-    blocked_count = sum(1 for r in results if r["result"] == "blocked")
-    uncertain_count = sum(1 for r in results if r["result"] == "uncertain")
+    bypass_count = sum(1 for r in results if r["result"] == "BYPASS")
+    blocked_count = sum(1 for r in results if r["result"] == "BLOCKED")
+    uncertain_count = sum(1 for r in results if r["result"] == "UNCERTAIN")
 
     completed_at = datetime.now(timezone.utc).isoformat()
     _scan_history[scan_id].update({
         "status": "completed",
         "completed_at": completed_at,
         "probes": results,
-        "summary": {
-            "total": len(results),
-            "bypass": bypass_count,
-            "blocked": blocked_count,
-            "uncertain": uncertain_count,
-        },
     })
 
     yield _sse("complete", {
         "scan_id": scan_id,
         "target": req.target,
-        "summary": {
-            "total": len(results),
-            "bypass": bypass_count,
-            "blocked": blocked_count,
-            "uncertain": uncertain_count,
-        },
+        "bypassed": bypass_count,
+        "blocked": blocked_count,
+        "uncertain": uncertain_count,
+        "total": len(results),
         "probes": results,
         "timestamp": completed_at,
     })
@@ -715,11 +708,64 @@ async def _run_single_mode(
     return hosts, raw, proc.returncode or 0
 
 
+# Modes that send raw packets — require root/sudo
+_ROOT_REQUIRED_MODES = {"acl_probe", "fin_null_xmas", "fragmented"}
+
+
+def _can_run_raw_sockets() -> bool:
+    """
+    Return True if the process can create raw sockets (CAP_NET_RAW).
+    Tries three methods in order:
+      1. Already root (uid 0)
+      2. nmap has setcap cap_net_raw (Linux capability bits)
+      3. Passwordless sudo nmap is available
+    """
+    import os, socket
+    # Method 1: running as root
+    if os.geteuid() == 0:
+        return True
+    # Method 2: try opening a raw socket (requires CAP_NET_RAW)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+        s.close()
+        return True
+    except PermissionError:
+        pass
+    except Exception:
+        pass
+    return False
+
+
+async def _nmap_prefix() -> list[str]:
+    """
+    Return the prefix needed to run privileged nmap scans.
+    Priority: (1) no prefix if raw sockets already available via setcap/root,
+              (2) ['sudo'] if passwordless sudo works,
+              (3) [] — caller will skip and show a clear message.
+    """
+    if _can_run_raw_sockets():
+        return []  # nmap already has the capability — no prefix needed
+    nmap_bin = shutil.which("nmap") or "nmap"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "-n", nmap_bin, "--version",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+        if proc.returncode == 0:
+            return ["sudo"]
+    except Exception:
+        pass
+    return []
+
+
 async def _stream_port_map(
     scan_id: str,
     req: PortFirewallRequest,
 ) -> AsyncGenerator[str, None]:
     nmap_bin = shutil.which("nmap") or "nmap"
+    sudo_prefix = await _nmap_prefix()
     started_at = datetime.now(timezone.utc).isoformat()
 
     _scan_history[scan_id] = {
@@ -750,13 +796,33 @@ async def _stream_port_map(
     for mode in modes_to_run:
         mode_info = PORT_MAP_MODES[mode]
         flags = mode_info["flags"]
-        cmd_preview = " ".join([nmap_bin] + flags + ["--system-dns", req.target])
 
+        # Modes that send raw packets need root; use sudo if available
+        needs_root = mode in _ROOT_REQUIRED_MODES
+        prefix = sudo_prefix if needs_root else []
+
+        if needs_root and not sudo_prefix:
+            yield _sse("output", {
+                "line": f"[{mode}] SKIPPED: This scan mode ({mode_info['label']}) requires "
+                        f"root privileges. Run: sudo visudo and add nmap NOPASSWD, or run "
+                        f"the server as root.",
+            })
+            modes_run.append({
+                "mode": mode,
+                "label": mode_info["label"],
+                "exit_code": -1,
+                "hosts": [],
+                "skipped": True,
+                "skip_reason": "root_required",
+            })
+            continue
+
+        cmd_preview = " ".join(prefix + [nmap_bin] + flags + ["--system-dns", req.target])
         yield _sse("output", {
             "line": f"[{mode}] Running: {cmd_preview}",
         })
 
-        cmd = [nmap_bin] + flags + ["--system-dns", req.target]
+        cmd = prefix + [nmap_bin] + flags + ["--system-dns", req.target]
         raw_lines: list[str] = []
 
         try:
@@ -769,7 +835,14 @@ async def _stream_port_map(
             async for line_bytes in proc.stdout:
                 line = line_bytes.decode("utf-8", errors="replace").rstrip()
                 raw_lines.append(line)
-                yield _sse("output", {"line": f"[{mode}] {line}"})
+                # Catch root-error even if sudo was thought available
+                if "requires root" in line or "QUITTING" in line:
+                    yield _sse("output", {
+                        "line": f"[{mode}] ERROR: {mode_info['label']} requires root/sudo. "
+                                f"Configure passwordless sudo for nmap to enable this mode.",
+                    })
+                else:
+                    yield _sse("output", {"line": f"[{mode}] {line}"})
                 await asyncio.sleep(0)
 
             await proc.wait()

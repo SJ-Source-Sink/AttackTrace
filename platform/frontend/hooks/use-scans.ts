@@ -13,14 +13,14 @@ export const scanKeys = {
   detail: (id: string) => [...scanKeys.details(), id] as const,
 };
 
-export function useScans(params?: { page?: number; per_page?: number; status?: string }) {
+export function useScans(params?: { page?: number; per_page?: number; status?: string; search?: string }) {
   return useQuery({
     queryKey: scanKeys.list(params ?? {}),
     queryFn: () =>
       scansApi.list(
         params
           ? Object.fromEntries(
-              Object.entries(params).filter(([, v]) => v !== undefined),
+              Object.entries(params).filter(([, v]) => v !== undefined && v !== ""),
             ) as Record<string, string | number>
           : undefined,
       ) as Promise<ScanListResponse>,
@@ -39,7 +39,7 @@ export function useScan(id: string | null) {
       if (data?.status === "running") return 5_000;
       return false;
     },
-    refetchIntervalInBackground: true,
+    refetchIntervalInBackground: false,
   });
 }
 

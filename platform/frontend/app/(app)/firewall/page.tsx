@@ -45,8 +45,8 @@ interface WAFDetectResult {
   confidence: number;
   blocked_malicious: boolean;
   indicators: string[];
-  normal_code: number | null;
-  malicious_code: number | null;
+  response_codes: { normal: number | null; malicious: number | null } | null;
+  vendor_scores?: Record<string, number>;
 }
 
 interface BypassProbeResult {
@@ -112,11 +112,11 @@ const STATE_COLOR: Record<string, string> = {
 };
 
 const FIREWALL_MODES = [
-  { value: "acl_probe", label: "ACK Probe", desc: "Detects stateful vs stateless filtering" },
-  { value: "fin_null_xmas", label: "FIN / NULL / XMAS", desc: "Bypasses stateless packet filters" },
-  { value: "source_port", label: "Source Port Trust", desc: "Tests DNS port trust (port 53)" },
-  { value: "fragmented", label: "Fragmented Packets", desc: "Fragment reassembly evasion test" },
-  { value: "full_suite", label: "Full Suite", desc: "Runs all modes combined" },
+  { value: "acl_probe", label: "ACK Probe", desc: "Detects stateful vs stateless filtering", rootRequired: true },
+  { value: "fin_null_xmas", label: "FIN / NULL / XMAS", desc: "Bypasses stateless packet filters", rootRequired: true },
+  { value: "source_port", label: "Source Port Trust", desc: "Tests DNS port trust (port 53)", rootRequired: false },
+  { value: "fragmented", label: "Fragmented Packets", desc: "Fragment reassembly evasion test", rootRequired: true },
+  { value: "full_suite", label: "Full Suite", desc: "Runs all modes combined", rootRequired: true },
 ];
 
 async function sseStream(
@@ -290,7 +290,7 @@ function WAFDetectionTab() {
               <div className="rounded-md bg-zinc-800/60 border border-zinc-700 px-4 py-3">
                 <p className="text-xs text-zinc-500 font-semibold uppercase tracking-wider mb-1">Normal Code</p>
                 <p className="text-xl font-bold text-zinc-100 font-mono">
-                  {result.normal_code ?? "—"}
+                  {result.response_codes?.normal ?? "—"}
                 </p>
               </div>
               <div className="rounded-md bg-zinc-800/60 border border-zinc-700 px-4 py-3">
@@ -298,12 +298,12 @@ function WAFDetectionTab() {
                 <p
                   className={cn(
                     "text-xl font-bold font-mono",
-                    result.malicious_code && result.malicious_code >= 400
+                    (result.response_codes?.malicious ?? 0) >= 400
                       ? "text-red-400"
                       : "text-zinc-100"
                   )}
                 >
-                  {result.malicious_code ?? "—"}
+                  {result.response_codes?.malicious ?? "—"}
                 </p>
               </div>
             </div>
@@ -615,11 +615,17 @@ function PortFirewallMapperTab() {
             const d = data as { line: string };
             setLogLines((prev) => [...prev, d.line]);
           } else if (eventType === "complete") {
-            const d = data as { results: PortMapRow[] };
-            setPortRows(d.results ?? []);
+            const d = data as { all_hosts?: Array<{ host: string; ports: Array<{ port: number; protocol: string; state: string; service: string; firewall_interpretation: string }> }> };
+            const rows: PortMapRow[] = [];
+            for (const host of d.all_hosts ?? []) {
+              for (const p of host.ports ?? []) {
+                rows.push({ host: host.host, port: p.port, protocol: p.protocol, state: p.state, service: p.service, firewall_interpretation: p.firewall_interpretation ?? "" });
+              }
+            }
+            setPortRows(rows);
             setRunning(false);
             setCompleted(true);
-            toast.success(`Firewall map complete — ${d.results?.length ?? 0} entry/entries`);
+            toast.success(`Firewall map complete — ${rows.length} port${rows.length !== 1 ? "s" : ""}`);
           } else if (eventType === "error") {
             const e = data as { message: string };
             setRunning(false);
@@ -699,13 +705,32 @@ function PortFirewallMapperTab() {
                     : "border-zinc-800 bg-zinc-900/40 hover:border-zinc-700"
                 )}
               >
-                <p className={cn("text-xs font-semibold", mode === m.value ? "text-blue-300" : "text-zinc-300")}>
-                  {m.label}
-                </p>
+                <div className="flex items-center gap-1.5">
+                  <p className={cn("text-xs font-semibold flex-1", mode === m.value ? "text-blue-300" : "text-zinc-300")}>
+                    {m.label}
+                  </p>
+                  {m.rootRequired && (
+                    <span className="text-[9px] font-bold px-1 py-0.5 rounded bg-orange-500/20 text-orange-400 border border-orange-500/30">
+                      root
+                    </span>
+                  )}
+                </div>
                 <p className="text-[10px] text-zinc-500 mt-0.5">{m.desc}</p>
               </button>
             ))}
           </div>
+
+          {/* Root warning for selected mode */}
+          {FIREWALL_MODES.find((m) => m.value === mode)?.rootRequired && (
+            <div className="flex items-start gap-2 rounded-md border border-orange-500/30 bg-orange-500/10 px-3 py-2">
+              <AlertTriangle className="h-4 w-4 text-orange-400 shrink-0 mt-0.5" />
+              <p className="text-xs text-orange-300">
+                This mode sends raw packets and requires <strong>root / sudo</strong> access to nmap.
+                The server will auto-use <code className="font-mono">sudo nmap</code> if passwordless sudo is configured,
+                otherwise this mode will be skipped with a message in the log.
+              </p>
+            </div>
+          )}
 
           <div className="flex gap-3">
             {running ? (
@@ -847,6 +872,7 @@ function RuleAnalyzerTab() {
         throw new Error(typeof err.detail === "string" ? err.detail : JSON.stringify(err.detail));
       }
       const data: RuleAnalysisResult = await res.json();
+      data.anomalies = data.anomalies ?? [];
       setResult(data);
       if (data.anomalies.length === 0) {
         toast.success("No anomalies detected — ruleset looks clean");

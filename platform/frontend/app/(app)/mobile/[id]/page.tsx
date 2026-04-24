@@ -369,6 +369,7 @@ function ScanProgressBanner({ scanId, onComplete }: { scanId: string; onComplete
       const done = d.status === "done" || d.status === "completed" || d.status === "failed" || d.status === "error";
       return done ? false : 2000;
     },
+    refetchIntervalInBackground: false,
   });
 
   // When scan transitions to done, trigger findings reload once
@@ -470,6 +471,7 @@ function MobileScanDetailPageInner() {
       const hasRunning = jobs.some((j) => j.status === "running" || j.status === "queued");
       return hasRunning ? 2000 : 10000;
     },
+    refetchIntervalInBackground: false,
   });
 
   // Start dynamic analysis for a finding
@@ -739,6 +741,7 @@ function AdbDevicesCard() {
       return res.json();
     },
     refetchInterval: 15000,
+    refetchIntervalInBackground: false,
   });
 
   const devices: Array<{ serial: string; model: string }> = data?.devices ?? [];

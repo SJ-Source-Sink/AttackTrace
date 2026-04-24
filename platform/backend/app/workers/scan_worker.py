@@ -63,10 +63,22 @@ if str(_ATTACKTRACE_ROOT) not in sys.path:
 
 # --- Sync DB session for Celery workers ---
 
+_sync_engine = None
+
+
 def _get_sync_engine():
-    db_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
-    from sqlalchemy import create_engine
-    return create_engine(db_url, pool_pre_ping=True, pool_size=3)
+    global _sync_engine
+    if _sync_engine is None:
+        db_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
+        from sqlalchemy import create_engine
+        _sync_engine = create_engine(
+            db_url,
+            pool_pre_ping=True,
+            pool_size=3,
+            max_overflow=5,
+            pool_recycle=1800,  # recycle connections every 30 min
+        )
+    return _sync_engine
 
 
 def _get_session_factory(engine):
@@ -392,10 +404,12 @@ def _matches_suppression_rule(finding_title: str, affected_asset: str, rules: li
 def _enrich_kev_epss(db_session, scan_job_id_str: str) -> None:
     """
     Enrich all findings for this scan that have CVEs with KEV/EPSS data.
-    Runs synchronously using httpx. Called after _persist_session_results.
+    Runs synchronously. Uses a single batch EPSS API call instead of per-CVE requests.
+    Called after _persist_session_results.
     """
+    import requests as _requests
     from app.models.db.finding import Finding as DBFinding
-    from app.services.kev_epss_sync import load_kev, get_epss_sync, compute_priority_score
+    from app.services.kev_epss_sync import load_kev, compute_priority_score
     from sqlalchemy import select as sync_select
 
     try:
@@ -413,13 +427,34 @@ def _enrich_kev_epss(db_session, scan_job_id_str: str) -> None:
             )
         ).scalars().all()
 
+        # Collect all unique CVEs across findings for a single batch API call
+        all_cves = []
+        for finding in findings_with_cves:
+            all_cves.extend(finding.cve or [])
+        all_cves = list(set(all_cves))
+
+        epss_data: dict = {}
+        if all_cves:
+            cve_param = ",".join(all_cves[:100])  # API limit
+            try:
+                resp = _requests.get(
+                    f"https://api.first.org/data/v1/epss?cve={cve_param}",
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    for item in resp.json().get("data", []):
+                        epss_data[item["cve"].upper()] = float(item.get("epss", 0))
+            except Exception as _epss_err:
+                logger.warning(f"Batch EPSS fetch failed: {_epss_err}")
+
         enriched = 0
         for finding in findings_with_cves:
             cve_list = finding.cve or []
             if not cve_list:
                 continue
             kev_status = any(cve in kev_set for cve in cve_list)
-            epss_score = get_epss_sync(cve_list[0])
+            # Look up EPSS score from batch result; use first CVE as representative
+            epss_score = epss_data.get(cve_list[0].upper(), None)
             priority = compute_priority_score(finding.cvss_score, epss_score, kev_status)
             finding.kev_status = kev_status
             finding.epss_score = epss_score
@@ -762,7 +797,8 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
             logger.error(f"ScanJob {scan_job_id} not found")
             return {"error": "scan_job_not_found"}
 
-        if job.status in (DBScanStatus.CANCELLED, DBScanStatus.COMPLETED, DBScanStatus.FAILED):
+        if job.status in (DBScanStatus.CANCELLED, DBScanStatus.COMPLETED, DBScanStatus.FAILED, DBScanStatus.RUNNING):
+            logger.info(f"Scan {scan_job_id} already in status {job.status.value} — skipping duplicate")
             return {"status": job.status.value}
 
         # Per-org concurrency limit: max 3 running scans per org at a time.

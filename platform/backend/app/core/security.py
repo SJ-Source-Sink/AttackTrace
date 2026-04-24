@@ -125,7 +125,14 @@ async def revoke_all_user_tokens(user_id: str) -> None:
     """Revoke all refresh tokens for a user (logout all sessions)."""
     r = _get_redis()
     pattern = f"refresh_token:{user_id}:*"
-    keys = await r.keys(pattern)
+    # Use SCAN instead of KEYS to avoid blocking Redis on large keyspaces
+    keys = []
+    cursor = 0
+    while True:
+        cursor, partial = await r.scan(cursor, match=pattern, count=100)
+        keys.extend(partial)
+        if cursor == 0:
+            break
     if keys:
         await r.delete(*keys)
 

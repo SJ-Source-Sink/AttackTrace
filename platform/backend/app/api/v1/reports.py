@@ -2,6 +2,7 @@
 Reports API: generate HTML reports and retrieve them.
 """
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Optional
@@ -121,6 +122,23 @@ async def download_report(
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> FileResponse:
+    # Check if a report already exists for this scan to avoid redundant regeneration
+    report_dir = Path(settings.ATTACKTRACE_WORKSPACE_DIR) / "reports" / str(org_id)
+    existing_reports = sorted(
+        report_dir.glob(f"report_{scan_job_id}_*.html"),
+        key=lambda x: x.stat().st_mtime,
+        reverse=True,
+    ) if report_dir.exists() else []
+
+    if existing_reports:
+        existing_path = existing_reports[0]
+        if os.path.getsize(existing_path) > 0:
+            return FileResponse(
+                path=str(existing_path),
+                filename=existing_path.name,
+                media_type="text/html",
+            )
+
     try:
         report_meta = await generate_report(
             db=db,

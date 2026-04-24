@@ -309,7 +309,7 @@ def _parse_ejson_file(path: str) -> list[dict]:
         return []
 
 
-async def _stream_ffuf(scan_id: str, req: FfufScanRequest, wordlist_path: str) -> AsyncGenerator[str, None]:
+async def _stream_ffuf(scan_id: str, req: FfufScanRequest, wordlist_path: str, request: Request) -> AsyncGenerator[str, None]:
     # ffuf -of ejson -o <file> writes a single JSON object at exit (not streaming lines).
     # Stdout receives plain-text matched paths in real-time — useful for live progress.
     # We stream stdout as discovery events, then parse the JSON file for full results.
@@ -350,8 +350,10 @@ async def _stream_ffuf(scan_id: str, req: FfufScanRequest, wordlist_path: str) -
             stderr=asyncio.subprocess.PIPE,
         )
 
-        assert proc.stdout is not None
-        assert proc.stderr is not None
+        if proc.stdout is None:
+            raise RuntimeError("Failed to open subprocess stdout pipe")
+        if proc.stderr is None:
+            raise RuntimeError("Failed to open subprocess stderr pipe")
 
         # Queue for SSE events: stdout plain-text paths + stderr progress
         queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
@@ -382,6 +384,9 @@ async def _stream_ffuf(scan_id: str, req: FfufScanRequest, wordlist_path: str) -
                 continue
 
             kind, line = item
+            if await request.is_disconnected():
+                proc.terminate()
+                return
             if kind == "out":
                 # stdout: plain-text path discovered — send as a live discovery hint
                 yield _sse("progress", {"message": f"Found: {line}", "scan_id": scan_id})
@@ -504,7 +509,7 @@ async def run_ffuf_scan(
     await db.commit()
 
     return StreamingResponse(
-        _stream_ffuf(scan_id, payload, wordlist),
+        _stream_ffuf(scan_id, payload, wordlist, request),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
