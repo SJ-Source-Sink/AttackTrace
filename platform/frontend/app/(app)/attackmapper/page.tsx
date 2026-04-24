@@ -1205,7 +1205,9 @@ export default function AttackMapperPage() {
     cached_threat_actors: number;
     last_updated: string | null;
     techniques: Record<string, number>;
+    total_items: number;
   } | null>(null);
+  const [lastUpdateFetched, setLastUpdateFetched] = useState<number | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -1293,9 +1295,11 @@ export default function AttackMapperPage() {
           } else if (eventType === "progress") {
             setIntelLog((p) => [...p, { icon: String(payload.icon ?? "⟳"), line: String(payload.line ?? "") }]);
           } else if (eventType === "complete") {
+            const fetched = Number(payload.items_fetched ?? payload.total_items ?? 0);
+            if (fetched > 0) setLastUpdateFetched(fetched);
             setIntelLog((p) => [...p, {
               icon: "✓",
-              line: `Update complete — ${payload.items_fetched} items fetched, ${payload.cached_cves} CVEs cached`,
+              line: `Update complete — ${fetched.toLocaleString()} items fetched (${Number(payload.cached_cves ?? 0).toLocaleString()} CVEs)`,
             }]);
             toast.success("Threat intelligence updated from internet");
             loadStats();
@@ -1497,12 +1501,27 @@ export default function AttackMapperPage() {
               <div ref={intelLogEndRef} />
             </div>
             {intelStats && !isUpdatingIntel && (
-              <div className="flex gap-4 mt-3 text-xs text-zinc-400">
-                <span className="flex items-center gap-1"><Database className="h-3 w-3" />{intelStats.cached_cves.toLocaleString()} CVEs cached</span>
-                <span className="flex items-center gap-1"><Shield className="h-3 w-3" />{intelStats.cached_threat_actors} threat actors</span>
-                {Object.entries(intelStats.techniques).map(([k, v]) => (
-                  <span key={k} className="capitalize">{k}: {v} techniques</span>
-                ))}
+              <div className="mt-3 space-y-1.5">
+                <div className="flex flex-wrap gap-3 text-xs">
+                  <span className="flex items-center gap-1 text-blue-400 font-medium">
+                    <Database className="h-3 w-3" />
+                    {(lastUpdateFetched ?? intelStats.total_items ?? intelStats.cached_cves).toLocaleString()} total items cached
+                  </span>
+                  <span className="flex items-center gap-1 text-zinc-400">
+                    <Shield className="h-3 w-3" />{intelStats.cached_cves.toLocaleString()} CVEs
+                  </span>
+                  <span className="flex items-center gap-1 text-zinc-400">
+                    {intelStats.cached_threat_actors} threat actors
+                  </span>
+                  {Object.entries(intelStats.techniques).map(([k, v]) => (
+                    <span key={k} className="text-zinc-500 capitalize">{k}: {v} techniques</span>
+                  ))}
+                </div>
+                {intelStats.last_updated && (
+                  <div className="text-xs text-zinc-500">
+                    Last updated: <span className="text-zinc-300">{intelStats.last_updated}</span>
+                  </div>
+                )}
               </div>
             )}
           </CardContent>

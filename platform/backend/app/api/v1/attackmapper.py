@@ -351,6 +351,7 @@ async def _stream_update_intel() -> AsyncGenerator[str, None]:
             "failed_sources": failed,
             "last_updated": last_updated,
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "total_items": items_total,
         })
 
     except Exception as exc:
@@ -662,6 +663,11 @@ async def get_attackmapper_stats(
             if m4:
                 stats["last_updated"] = m4.group(1)
 
+        stats["total_items"] = (
+            sum(stats["techniques"].values())
+            + stats["cached_cves"]
+            + stats["cached_threat_actors"]
+        )
         return stats
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
