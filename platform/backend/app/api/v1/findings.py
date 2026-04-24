@@ -26,6 +26,7 @@ from app.models.db.user import User
 from app.models.schemas.finding import (
     FindingCommentCreate,
     FindingCommentResponse,
+    FindingCreate,
     FindingFilter,
     FindingResponse,
     FindingUpdate,
@@ -39,6 +40,70 @@ def _get_client_ip(request: Request) -> str:
     if forwarded:
         return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
+
+
+@router.post(
+    "",
+    response_model=FindingResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a manual finding",
+)
+async def create_finding(
+    payload: FindingCreate,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> FindingResponse:
+    try:
+        severity_enum = FindingSeverity(payload.severity)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"code": "INVALID_SEVERITY", "message": f"Invalid severity: {payload.severity}"}},
+        )
+    try:
+        status_enum = FindingStatus(payload.status)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"code": "INVALID_STATUS", "message": f"Invalid status: {payload.status}"}},
+        )
+
+    finding = Finding(
+        org_id=org_id,
+        source="manual",
+        title=payload.title,
+        description=payload.description,
+        severity=severity_enum,
+        category=payload.category,
+        affected_asset=payload.affected_asset,
+        evidence=payload.evidence,
+        remediation=payload.remediation,
+        references=payload.references,
+        cve=payload.cve,
+        cvss_score=payload.cvss_score,
+        status=status_enum,
+        ticket_ref=payload.ticket_ref,
+    )
+    db.add(finding)
+    await db.flush()
+    await db.refresh(finding)
+
+    log = AuditLog(
+        org_id=org_id,
+        user_id=current_user.id,
+        action="finding.created",
+        resource_type="finding",
+        resource_id=str(finding.id),
+        before_state=None,
+        after_state={"source": "manual", "title": finding.title, "severity": payload.severity},
+        ip_address=_get_client_ip(request),
+    )
+    db.add(log)
+    await db.flush()
+
+    return FindingResponse.from_orm(finding)
 
 
 @router.get(

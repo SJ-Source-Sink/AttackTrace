@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
   ChevronRight, ChevronDown, Code2, Zap, Activity,
@@ -15,6 +15,7 @@ import { KevBadge } from "@/components/findings/kev-badge";
 import { fetchWithAuth } from "@/lib/auth";
 import { cn, formatRelativeTime } from "@/lib/utils";
 import { toast } from "sonner";
+import { useUpdateFinding } from "@/hooks/use-findings";
 import type { Finding } from "@/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
@@ -85,13 +86,38 @@ interface FindingRowProps {
   finding: Finding;
 }
 
+const SEVERITIES = ["critical", "high", "medium", "low", "info"] as const;
+
+const SEV_MENU_COLORS: Record<string, string> = {
+  critical: "text-red-400 hover:bg-red-500/10",
+  high: "text-orange-400 hover:bg-orange-500/10",
+  medium: "text-yellow-400 hover:bg-yellow-500/10",
+  low: "text-blue-400 hover:bg-blue-500/10",
+  info: "text-zinc-400 hover:bg-zinc-500/10",
+};
+
 export function FindingRow({ finding }: FindingRowProps) {
   const router = useRouter();
   const [expanded, setExpanded] = useState(false);
   const [loadingPoc, setLoadingPoc] = useState(false);
   const [poc, setPoc] = useState<string | null>(null);
+  const [severityMenuOpen, setSeverityMenuOpen] = useState(false);
+  const severityMenuRef = useRef<HTMLDivElement>(null);
+  const updateFinding = useUpdateFinding();
+
+  useEffect(() => {
+    if (!severityMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (severityMenuRef.current && !severityMenuRef.current.contains(e.target as Node)) {
+        setSeverityMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [severityMenuOpen]);
 
   const isMobile = finding.source === "msra";
+  const isManual = finding.source === "manual";
 
   const generatePoc = async () => {
     setLoadingPoc(true);
@@ -172,8 +198,38 @@ export function FindingRow({ finding }: FindingRowProps) {
           : <ChevronRight className="h-3.5 w-3.5 text-zinc-500 shrink-0" />}
 
         {/* Severity + confidence stacked */}
-        <div className="flex flex-col gap-1 shrink-0">
-          <SeverityBadge severity={finding.severity} />
+        <div className="flex flex-col gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+          <div className="relative" ref={severityMenuRef}>
+            <button
+              title="Click to adjust severity"
+              onClick={() => setSeverityMenuOpen((o) => !o)}
+              className="focus:outline-none"
+            >
+              <SeverityBadge severity={finding.severity} />
+            </button>
+            {severityMenuOpen && (
+              <div className="absolute left-0 top-full mt-1 z-50 w-28 rounded-md border border-zinc-700 bg-zinc-900 shadow-lg py-1">
+                {SEVERITIES.map((sev) => (
+                  <button
+                    key={sev}
+                    className={cn(
+                      "w-full text-left px-3 py-1.5 text-xs font-medium capitalize transition-colors",
+                      SEV_MENU_COLORS[sev],
+                      sev === finding.severity && "bg-zinc-800"
+                    )}
+                    onClick={() => {
+                      setSeverityMenuOpen(false);
+                      if (sev !== finding.severity) {
+                        updateFinding.mutate({ id: finding.id, data: { severity: sev } });
+                      }
+                    }}
+                  >
+                    {sev}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <ConfidenceBadge confidence={finding.confidence ?? null} />
         </div>
 
@@ -188,6 +244,10 @@ export function FindingRow({ finding }: FindingRowProps) {
             {isMobile ? (
               <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded border border-violet-500/30 bg-violet-500/10 text-violet-400">
                 <Smartphone className="h-2.5 w-2.5" /> Mobile
+              </span>
+            ) : isManual ? (
+              <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded border border-emerald-500/30 bg-emerald-500/10 text-emerald-400">
+                <Shield className="h-2.5 w-2.5" /> Manual
               </span>
             ) : (
               <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded border border-blue-500/30 bg-blue-500/10 text-blue-400">

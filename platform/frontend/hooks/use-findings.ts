@@ -57,6 +57,20 @@ export function useFinding(id: string | null) {
   });
 }
 
+export function useCreateFinding() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: unknown) => findingsApi.create(data) as Promise<Finding>,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: findingKeys.lists() });
+      toast.success("Finding created");
+    },
+    onError: (error: Error) => {
+      toast.error(`Failed to create finding: ${error.message}`);
+    },
+  });
+}
+
 export function useUpdateFinding() {
   const queryClient = useQueryClient();
 

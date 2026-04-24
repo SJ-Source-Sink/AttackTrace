@@ -160,6 +160,21 @@ class FindingResponse(BaseModel):
         )
 
 
+class FindingCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+    severity: str  # critical / high / medium / low / info
+    category: str = ""
+    affected_asset: str = ""
+    description: str = ""
+    evidence: Optional[dict[str, Any]] = None
+    remediation: str = ""
+    references: list[str] = []
+    cve: list[str] = []
+    cvss_score: Optional[float] = Field(None, ge=0.0, le=10.0)
+    status: str = "open"
+    ticket_ref: Optional[str] = None
+
+
 class FindingUpdate(BaseModel):
     status: Optional[str] = None
     severity: Optional[str] = None

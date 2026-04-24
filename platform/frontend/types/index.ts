@@ -344,6 +344,12 @@ export interface FindingFilters {
 
 export interface UpdateFindingRequest {
   status?: FindingStatus;
+  severity?: FindingSeverity;
+  false_positive?: boolean;
+  suppressed?: boolean;
+  suppressed_reason?: string;
+  ticket_ref?: string;
+  remediation?: string;
   assigned_to?: string;
   accept_risk_info?: Omit<AcceptRiskInfo, "accepted_at" | "accepted_by">;
   tags?: string[];
