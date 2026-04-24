@@ -1,7 +1,8 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/Next.js-15-black?style=for-the-badge&logo=next.js&logoColor=white" alt="Next.js">
-  <img src="https://img.shields.io/badge/Docker-required-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker">
+  <img src="https://img.shields.io/badge/FastAPI-0.100+-009688?style=for-the-badge&logo=fastapi&logoColor=white" alt="FastAPI">
+  <img src="https://img.shields.io/badge/Docker-ready-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker">
   <img src="https://img.shields.io/badge/Claude-AI-blueviolet?style=for-the-badge&logo=anthropic&logoColor=white" alt="Claude AI">
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
   <img src="https://img.shields.io/badge/Status-Active-success?style=for-the-badge" alt="Status">
@@ -10,11 +11,11 @@
 <h1 align="center">AttackTrace</h1>
 
 <p align="center">
-  <b>External Attack Surface Management Platform</b>
+  <b>External Attack Surface Management &amp; Security Testing Platform</b>
 </p>
 
 <p align="center">
-  A full-stack security platform for external attack surface discovery, vulnerability scanning, AI-powered triage, and team-based finding management. Point it at a domain and get a complete picture of your external footprint — subdomains, exposed services, vulnerabilities, cloud assets, and more.
+  AttackTrace is a full-stack security platform for external attack surface discovery, vulnerability scanning, AI-powered triage, and collaborative finding management. Point it at a domain and get a complete picture of your external footprint — subdomains, exposed services, vulnerabilities, cloud assets, mobile apps, and more.
 </p>
 
 ---
@@ -47,82 +48,88 @@
 
 ---
 
+## What AttackTrace Does
+
+| | |
+|---|---|
+| 🔍 **Discover** | Enumerate subdomains, IPs, web apps, cloud buckets, and employee identities from a single domain |
+| 🛡️ **Scan** | Run Nuclei, Nmap, ffuf, WAF detection, and custom attack modules against discovered assets |
+| 📊 **Track** | Unified findings dashboard across recon, manual, and mobile scans — with KEV/EPSS enrichment |
+| 🤖 **Triage** | Claude AI auto-classifies severity, detects false positives, generates PoC and remediation tickets |
+| 🗺️ **Map** | Visualize attack paths with MITRE ATT&CK mapping, APT group intelligence, and network graphs |
+| 📱 **Mobile** | Static + dynamic analysis of APK/IPA files with findings federated into the central dashboard |
+| 👥 **Collaborate** | Multi-tenant, role-based access for pentest teams with audit logging and ticket integration |
+
+---
+
 ## Features
 
-### Platform
+### Platform Dashboard & Findings
 
-| Category | Capabilities |
+| Feature | Description |
 |---|---|
-| **Dashboard** | Findings Dashboard with 7d/14d/30d/90d presets + custom date range, stacked severity bar chart, asset/finding counts, recent scans |
-| **Scans** | Full scan lifecycle management, real-time SSE progress streaming, cancel/delete |
-| **Assets** | Filterable asset inventory (domain, subdomain, IP, webapp, cloud), screenshot thumbnails |
-| **Findings** | Unified view: recon + mobile + manual findings; inline severity editing; Create Finding form; expandable rows with evidence/PoC/remediation; status workflow; CVE linking; suppression rules |
-| **Reports** | Auto-generated HTML reports per scan with full asset and finding detail |
-| **Audit Log** | Immutable record of all platform actions by user, type-filtered, CSV export |
+| **Findings Dashboard** | Stacked severity bar chart with 7d / 14d / 30d / 90d presets and custom date range picker |
+| **Risk Creation** | Manually create findings with full details — title, severity, category, affected asset, evidence, CVEs, CVSS, remediation, ticket ref; shows alongside scan findings |
+| **Inline Severity Edit** | Click any severity badge in the findings list to instantly adjust severity via PATCH |
+| **Finding Sources** | Source badges distinguish Recon (scan), Mobile (MSRA), and Manual findings in one unified view |
+| **KEV / EPSS Enrichment** | CISA Known Exploited Vulnerabilities status + FIRST.org EPSS scores on every finding |
+| **Suppression Rules** | Org-scoped, pattern-matched, expiry-aware suppression rules applied during scan ingestion |
+| **Deduplication** | SHA-256 dedup hash prevents duplicate findings within the same scan |
+| **Finding Workflow** | Status lifecycle: Open → In Progress → Remediated / Accepted Risk / False Positive |
+| **Notification Bell** | Live scan status notifications in the topbar — unread badge, click-to-navigate, 30s polling |
+| **Scan Event Replay** | Redis-backed event buffer replays progress on reconnect — no reset to 0% on nav back |
+| **Partial Persistence** | Scan worker persists module results incrementally — no data loss if a scan crashes mid-way |
 
-### Scan Engine (24 modules)
+### Scan Engine (24 Modules)
 
-| Category | Capabilities |
+| Category | Modules |
 |---|---|
-| **Asset Discovery** | Subdomain enumeration, ASN/IP range mapping, certificate transparency, DNS resolution |
-| **Infrastructure** | Port scanning (100+ ports), service detection, banner grabbing |
-| **Web Analysis** | HTTP probing, technology fingerprinting (60+ signatures), Playwright screenshots |
+| **Seed** | WHOIS, ASN/IP range discovery, certificate transparency |
+| **Domain** | Subdomain enumeration (wordlist + CT), DNS resolution |
+| **Infrastructure** | Port scanner (100+ ports), service/banner detection |
+| **Web** | HTTP probing, tech fingerprinting (60+ signatures), Playwright screenshots of all alive apps |
 | **Cloud** | AWS S3, Azure Blob, GCP bucket enumeration |
-| **OSINT** | GitHub recon, employee discovery, leaked credential detection |
+| **OSINT** | GitHub recon, employee discovery, breach/credential detection |
 | **Threat Intel** | Shodan, Censys, SecurityTrails, AlienVault OTX, GreyNoise, URLScan, PassiveTotal |
-| **Enrichment** | CVE/CVSS from NVD, KEV status, EPSS score, priority scoring |
+| **Enrichment** | CVE/CVSS from NVD, CISA KEV status, FIRST.org EPSS scores, priority scoring |
 
 ### Security Tools
 
 | Tool | Description |
 |---|---|
-| **Nmap Scanner** | 7 scan types, custom port ranges, timing T0-T5, parsed results with service/version, scan history |
-| **Nuclei Scanner** | Template-based scanning, severity filter, live streaming, CVE enrichment, scan history |
-| **ffuf Fuzzer** | Directory/param/subdomain fuzzing, bundled + SecLists + custom wordlists, scan history |
-| **Firewall & WAF Scanner** | WAF detection (10 vendors), WAF bypass probe (13 techniques), Port Firewall Mapper (5 modes), Rule Analyzer (iptables/Cisco/pfSense); scan history persisted per tab |
-| **Attack Suite** | 24-module adaptive web scanner — crawler + pattern library from 5700+ bug bounty reports |
-| **AI Attack Suite** | Shannon autonomous AI pentester — real exploit execution with CVSS reports |
+| **Nmap Scanner** | 7 scan types (Quick, Full Port, Service Version, OS Detection, Stealth SYN, Aggressive, Custom), timing T0–T5, parsed host/port table, raw output, export, scan history |
+| **Nuclei Scanner** | 3-mode template selector (All / Categories / Specific), severity filter, live streaming progress, CVE enrichment, export JSON/CSV/Markdown, scan history |
+| **ffuf Fuzzer** | Bundled / SecLists / custom wordlist modes, live progress log, results table with status/size/words/lines, base64-decoded FUZZ inputs, scan history |
+| **Firewall & WAF Scanner** | 4 tabs: WAF Detection (10 vendors, confidence score), WAF Bypass Probe (13 evasion techniques, live SSE), Port Firewall Mapper (5 nmap modes), Rule Analyzer (iptables/Cisco ACL/pfSense XML); scan history persisted in localStorage |
+| **Attack Suite** | 24-module adaptive web scanner — crawl, headers, CORS, CSRF, XSS, SQLi, SSRF, IDOR, JWT, GraphQL, NoSQL, SSTI, XXE, deserialization, file upload, and more |
+| **AI Attack Suite** | Autonomous AI pentester — real exploit execution, CVSS scoring, structured reports |
 | **Takeover Checker** | CNAME chain analysis, 42+ service fingerprints, NS/MX takeover detection |
-| **Attack Path Mapper** | MITRE ATT&CK paths for AD/AWS/Azure/GCP; APT Groups browser (187 threat actors, country attribution, MITRE descriptions); CVE correlation; intel sync |
-| **Mobile Scanner (MSRA)** | APK/IPA static analysis, dynamic analysis, AI PoC generation, findings federation into central dashboard |
-| **Test Case Generator** | 169 test cases across 18 categories sourced from HackerOne/Bugcrowd reports, PortSwigger research, OWASP WSTG — Standard or AI-Assisted mode |
-| **Network Map** | Interactive WebGL graph of assets/findings per scan; severity-colored nodes; attack path highlighting |
-
-### Mobile Security (MSRA)
-
-MSRA (Mobile Security Review Assistant) is a sidecar service that integrates with AttackTrace for mobile app security analysis.
-
-| Feature | Description |
-|---|---|
-| **Static Analysis** | Upload APK/IPA/JAR — automated vulnerability scan with MobSF-style findings |
-| **Dynamic Analysis** | AI-driven runtime testing — spawns emulator sessions, generates payloads, intercepts traffic |
-| **AI PoC Generation** | Claude generates proof-of-concept exploit code for each finding |
-| **Findings Federation** | MSRA findings sync into the central Findings dashboard alongside recon findings |
-| **Unified View** | All mobile + recon findings in one expandable list with severity, evidence, remediation, and source badges |
-
-**Setup:** Start the MSRA server (automatically handled by `./start.sh`). Access the mobile scanner at `/mobile` in the AttackTrace frontend.
-
----
+| **Attack Path Mapper** | MITRE ATT&CK path mapping for AD/AWS/Azure/GCP; APT Groups browser (187 threat actors with country attribution and MITRE descriptions); CVE correlation; intel sync with 26k+ items |
+| **Network Map** | Interactive WebGL graph (xyflow); severity-colored nodes; domain→subdomain→IP→webapp hierarchy; attack path animation; scan selector; node detail panel with actions |
+| **Mobile Scanner (MSRA)** | APK/IPA/JAR static analysis, AI-driven dynamic analysis, Claude PoC generation, findings federation into central dashboard |
+| **Test Case Generator** | 169 test cases across 18 categories (Authorization, Injection, Deserialization, Business Logic, API, Cloud, Mobile, and more) sourced from HackerOne/Bugcrowd reports, PortSwigger, OWASP WSTG; Standard or AI-Assisted mode |
 
 ### AI Features (Claude-powered)
 
 | Feature | Description |
 |---|---|
-| **Finding Triage** | Auto-classify severity, detect false positives, confidence score |
+| **Finding Triage** | Auto-classify severity, detect false positives, assign confidence score |
 | **Executive Summary** | 3-bullet non-technical scan summary with risk posture and next steps |
 | **Jira Ticket Generator** | Structured remediation tickets with acceptance criteria and effort estimate |
 | **NL Search** | Natural-language query translation to structured asset/finding filters |
 | **AI Test Cases** | Customized security test cases based on target, stack, and threat model |
+| **Mobile PoC** | Claude generates proof-of-concept exploit code for mobile findings |
 
 ### Team & Access
 
 | Feature | Description |
 |---|---|
-| **Multi-tenancy** | Organization isolation, per-org API keys and credentials |
-| **Roles** | Owner / Admin / Analyst / Viewer with enforced permissions |
-| **Team Management** | Direct user creation or shareable invite link (permanent, open, analyst role) |
+| **Multi-tenancy** | Complete organization isolation — scans, assets, findings, credentials, and API keys are org-scoped |
+| **Roles** | Owner / Admin / Analyst / Viewer with enforced permissions at every API endpoint |
+| **Team Management** | Direct user creation or shareable invite link (permanent, self-service, Analyst role) |
 | **API Keys** | Generate platform API keys for CI/CD pipelines and custom integrations |
-| **Integrations** | Jira, Slack, webhook — configured per org with encrypted credential storage |
+| **Integrations** | Shodan, Censys, SecurityTrails, GitHub, AlienVault OTX, PassiveTotal, Jira, Slack — all encrypted AES-256-GCM |
+| **Audit Log** | Immutable record of every platform action — user, action type, before/after state, IP address, CSV export |
 
 ---
 
@@ -130,41 +137,48 @@ MSRA (Mobile Security Review Assistant) is a sidecar service that integrates wit
 
 | Layer | Technology |
 |---|---|
-| Backend | FastAPI + SQLAlchemy (async) + Alembic |
-| Frontend | Next.js 15 + React 19 + Tailwind CSS + shadcn/ui |
-| Task Queue | Celery + Redis (3 queues: default, scans, ai) |
-| Database | PostgreSQL 16 |
-| AI | Anthropic Claude (claude-haiku-4-5 default, configurable) |
-| Scan Engine | AttackTrace Python CLI + nuclei + ffuf + nmap + Playwright |
-| Monitoring | Celery Flower |
-| Deployment | Docker Compose (dev) · Kubernetes + KEDA (prod) |
+| **Backend** | FastAPI + SQLAlchemy (async) + Alembic migrations |
+| **Frontend** | Next.js 15 + React 19 + Tailwind CSS + shadcn/ui + TanStack Query |
+| **Task Queue** | Celery + Redis (3 queues: `default`, `scans`, `ai`) + Celery Beat watchdog |
+| **Database** | PostgreSQL 16 |
+| **AI** | Anthropic Claude (claude-haiku-4-5 default, configurable) |
+| **Scan Engine** | AttackTrace Python CLI + nuclei + ffuf + nmap + Playwright |
+| **Monitoring** | Celery Flower at `/flower` |
+| **Deployment** | Docker Compose (dev/prod) · Kubernetes + KEDA autoscaling (prod) |
 
 ---
 
 ## Installation
 
-Choose the method that works for your environment.
+Two options — native (recommended for local dev) or Docker.
 
 ---
 
-### Option A — Without Docker (recommended for most users)
+### Option A — Native (no Docker)
 
-**Prerequisites:** Python 3.11+, Node.js 18+, PostgreSQL, Redis
+**Prerequisites:** Python 3.11+, Node.js 18+, PostgreSQL 14+, Redis 7+
 
-Install prerequisites on macOS:
+<details>
+<summary><b>macOS (Homebrew)</b></summary>
+
 ```bash
 brew install python@3.11 node postgresql@16 redis
 brew services start postgresql@16
 brew services start redis
 ```
+</details>
 
-Install prerequisites on Ubuntu/Debian:
+<details>
+<summary><b>Ubuntu / Debian / Kali</b></summary>
+
 ```bash
-sudo apt update && sudo apt install -y python3.11 python3.11-venv nodejs npm postgresql redis-server
+sudo apt update
+sudo apt install -y python3.11 python3.11-venv nodejs npm postgresql redis-server
 sudo systemctl start postgresql redis-server
 ```
+</details>
 
-**Then:**
+**Clone and start:**
 
 ```bash
 git clone https://github.com/BaymaxPop23/AttackTrace.git
@@ -172,30 +186,34 @@ cd AttackTrace
 chmod +x start.sh && ./start.sh
 ```
 
-Or using Make:
-```bash
-make start
-```
+`start.sh` handles everything automatically:
+1. Creates a Python virtual environment and installs all backend dependencies
+2. Installs frontend Node modules
+3. Generates a `.env` with random secrets
+4. Creates the `attacktrace` PostgreSQL database and user
+5. Runs all Alembic database migrations
+6. Seeds the default admin account
+7. Starts: FastAPI backend, Celery worker, Celery beat, Next.js dev server
+8. Starts the MSRA mobile sidecar if found on the system
 
-The script will:
-1. Create a Python virtual environment and install all dependencies
-2. Install frontend Node modules
-3. Generate a `.env` with random secrets
-4. Create the PostgreSQL database and user
-5. Run database migrations
-6. Create the default admin account
-7. Start backend, Celery worker, Celery beat, Next.js dev server, and MSRA mobile sidecar (if present at `~/Desktop/Coding/MSRA`)
-
-**Stop all services:**
+**Stop:**
 ```bash
 ./stop.sh   # or: make stop
 ```
 
+**View logs:**
+```bash
+make native-logs         # tail all services
+tail -f logs/backend.log
+tail -f logs/worker.log
+tail -f logs/frontend.log
+```
+
 ---
 
-### Option B — With Docker
+### Option B — Docker
 
-**Prerequisites:** [Docker Desktop](https://docs.docker.com/get-docker/) (includes Compose)
+**Prerequisites:** [Docker Desktop](https://docs.docker.com/get-docker/)
 
 ```bash
 git clone https://github.com/BaymaxPop23/AttackTrace.git
@@ -203,10 +221,12 @@ cd AttackTrace
 chmod +x setup.sh && ./setup.sh
 ```
 
-Or using Make:
+Or:
 ```bash
 make setup
 ```
+
+`setup.sh` builds all images, starts Postgres + Redis, runs migrations, seeds the admin account, and starts all services in one command.
 
 **Stop:**
 ```bash
@@ -215,271 +235,257 @@ make down
 
 ---
 
-### Log in
+### First Login
 
-Once running, open **http://localhost:3000**
+Open **http://localhost:3000**
 
 | Field | Value |
 |---|---|
 | Username | `admin` |
 | Password | `Ihate13$` |
 
-> Change the default password immediately after first login via **Settings → Profile**.
+> Change the default password immediately via **Settings → Profile**.
 
 ---
 
-### Install scanning tools (optional but recommended)
+### Install Scanning Tools
 
-To use Nuclei, ffuf, Nmap, and other scanners:
+To use Nuclei, ffuf, Nmap, and SecLists:
 
 ```bash
 make install-tools
 ```
 
-Installs: `nuclei`, `ffuf`, `nmap`, `gowitness`, `SecLists`, `nuclei-templates`, and Playwright browsers.
+Installs on macOS (Homebrew) and Linux (apt + go install):
+- `nuclei` + nuclei-templates (~10,000 templates)
+- `ffuf`
+- `nmap`
+- `gowitness` (screenshots)
+- `SecLists`
+- Playwright Chromium (web screenshots during scans)
 
 ---
 
-### Configure AI features (optional)
+### Enable AI Features
 
-Set your Anthropic API key to enable AI triage, executive summaries, and the AI Attack Suite:
+Add your Anthropic API key to unlock finding triage, executive summaries, AI Attack Suite, and mobile PoC generation.
 
 **Native:** Add to `platform/backend/.env`:
 ```
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-**Docker:** Add to `.env` at the repo root, then `make restart`.
+**Docker:** Add to `.env` at repo root, then `make restart`.
 
-The platform works without an API key — AI features are gracefully disabled.
+The platform runs fully without an API key — AI features are gracefully skipped.
 
 ---
 
 ## Updating
 
-Pull the latest changes and restart:
-
-**Without Docker:**
+**Native:**
 ```bash
 git pull && ./start.sh
 ```
 
-**With Docker:**
+**Docker:**
 ```bash
 make update
 ```
 
-Both automatically run new database migrations before restarting.
+Both automatically detect which services changed, rebuild only those, and run any new database migrations.
 
 ---
 
-## Useful Commands
+## Common Commands
 
 ```bash
-# Native (no Docker)
-make start          # Start all services
-make stop           # Stop all services
+# ── Native ──────────────────────────────────────
+make start              # Start all services
+make stop               # Stop all services
+make native-logs        # Tail all service logs
 
-# Docker
-make setup          # First-time Docker setup
-make update         # Pull + rebuild + restart
-make up             # Start containers
-make down           # Stop containers
-make logs           # Tail all container logs
-make ps             # Container status
-make backend-logs   # Backend logs only
-make worker-logs    # Worker logs only
+# ── Docker ──────────────────────────────────────
+make setup              # First-time Docker setup
+make up                 # Start containers
+make down               # Stop containers
+make update             # Pull + rebuild + migrate + restart
+make logs               # Tail all container logs
+make ps                 # Container status
 
-# Database
-make migrate        # Run pending migrations
-make seed           # Re-run initial data seed
-make db-shell       # PostgreSQL interactive shell
+# ── Database ────────────────────────────────────
+make migrate            # Run pending Alembic migrations
+make seed               # Re-run initial data seed
+make db-shell           # PostgreSQL interactive shell
 
-# Tools
-make install-tools  # Install nuclei, ffuf, nmap, etc.
-make lint           # Lint + type-check backend
+# ── Development ─────────────────────────────────
+make backend-logs       # Backend logs only
+make worker-logs        # Worker logs only
+make backend-shell      # Shell inside backend container
+make lint               # ruff + mypy on backend
+make test-backend       # Full pytest suite with coverage
+make install-tools      # Install nuclei, ffuf, nmap, etc.
 ```
 
 ---
 
-## Team Members
+## Third-Party Integrations
 
-Go to **Settings → Team Members** to manage your organization:
-
-- **Direct create** — admins can create a user account directly with name, email, password, and role
-- **Invite link** — share a permanent invite link; anyone with the code can self-register as Analyst
-
-**Roles:**
-
-| Role | Permissions |
-|---|---|
-| Owner | Full access, billing, cannot be removed |
-| Admin | Manage team, settings, all scans and findings |
-| Analyst | Run scans, manage findings, use all tools |
-| Viewer | Read-only access to scans, assets, findings |
-
----
-
-## Third-Party API Keys
-
-Configure enrichment keys at **Settings → Integrations**:
+Configure at **Settings → Integrations** (all credentials encrypted AES-256-GCM):
 
 | Service | Used for |
 |---|---|
-| Shodan | Open ports, CVEs, service banners |
-| Censys | Certificate transparency, host discovery |
-| SecurityTrails | Passive DNS, subdomain history |
-| GitHub Token | Repository recon, secret detection |
-| AlienVault OTX | Threat intelligence, IOCs |
-| PassiveTotal | Passive DNS, WHOIS history |
-| Jira | Automatic remediation ticket creation |
-| Slack | Scan completion and critical finding alerts |
+| **Shodan** | Open ports, CVEs, service banners per IP |
+| **Censys** | Certificate transparency, host discovery |
+| **SecurityTrails** | Passive DNS, subdomain history |
+| **GitHub Token** | Repository recon, exposed secret detection |
+| **AlienVault OTX** | Threat intelligence, IOC correlation |
+| **PassiveTotal** | Passive DNS, WHOIS history |
+| **Jira** | Automatic remediation ticket creation from findings |
+| **Slack** | Scan completion and critical finding alerts |
 
-All credentials are encrypted with AES-256-GCM before storage.
+Generate **platform API keys** for CI/CD at **Settings → API Keys**.
 
-To generate **platform API keys** for CI/CD pipelines or custom integrations, go to **Settings → API Keys**.
+---
+
+## Team Roles
+
+| Role | Capabilities |
+|---|---|
+| **Owner** | Full access including billing; cannot be removed |
+| **Admin** | Manage team, settings, all scans and findings |
+| **Analyst** | Run scans, manage findings, use all security tools |
+| **Viewer** | Read-only access to scans, assets, and findings |
+
+Add team members at **Settings → Team Members** — direct create or shareable invite link.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   AttackTrace                        │
-│                                                      │
-│  ┌──────────────┐    ┌──────────────────────────┐  │
-│  │  Next.js 15  │───▶│    FastAPI + SQLAlchemy   │  │
-│  │   :3000      │    │        :8000              │  │
-│  └──────────────┘    └──────────┬───────────────┘  │
-│                                  │                   │
-│              ┌───────────────────┼──────────┐        │
-│              ▼                   ▼          ▼        │
-│       ┌──────────┐        ┌──────────┐  ┌────────┐  │
-│       │ Postgres │        │  Redis   │  │ Celery │  │
-│       │  :5432   │        │  :6379   │  │ Worker │  │
-│       └──────────┘        └──────────┘  └────────┘  │
-│                                          (3 queues)  │
-│                                     default·scans·ai │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                      AttackTrace                          │
+│                                                           │
+│  ┌────────────────┐      ┌──────────────────────────┐    │
+│  │  Next.js 15    │─────▶│   FastAPI + SQLAlchemy   │    │
+│  │  :3000         │      │   :8000  (async)         │    │
+│  └────────────────┘      └──────────┬───────────────┘    │
+│                                      │                    │
+│               ┌──────────────────────┼──────────┐         │
+│               ▼                      ▼          ▼         │
+│        ┌──────────┐          ┌──────────┐  ┌─────────┐   │
+│        │ Postgres │          │  Redis   │  │ Celery  │   │
+│        │  :5432   │          │  :6379   │  │ Workers │   │
+│        └──────────┘          └──────────┘  └─────────┘   │
+│                                            queues:        │
+│                                      default · scans · ai │
+│                                                           │
+│  ┌──────────────┐  ┌───────────┐  ┌────────────────────┐ │
+│  │ MSRA :5001   │  │  Flower   │  │  AttackTrace CLI   │ │
+│  │ (mobile)     │  │  :5555    │  │  (scan engine)     │ │
+│  └──────────────┘  └───────────┘  └────────────────────┘ │
+└──────────────────────────────────────────────────────────┘
 ```
 
-- **Celery Worker** runs long scans asynchronously, streaming progress via Redis pub/sub SSE
-- **Celery Beat** runs a watchdog every 5 minutes to recover stuck or crashed scans
-- **Redis** also stores dashboard stats cache, scan event replay buffer, and AI circuit breaker state
-- **Flower** (Celery monitoring UI) available at http://localhost:5555/flower
+**Key design decisions:**
+- Scans run as Celery tasks on the `scans` queue — long-running, isolated, resumable
+- Progress streams to the frontend via Redis pub/sub → Server-Sent Events
+- Redis also acts as a scan event replay buffer (reconnect without losing progress)
+- Celery Beat runs a watchdog every 5 minutes — requeues stuck PENDING scans, marks stale RUNNING scans as failed
+- All org credentials encrypted with AES-256-GCM before DB storage (KMS-style master key)
+- Dashboard stats cached in Redis (5 min TTL) with parallel DB queries
 
 ---
 
-## Kubernetes Deployment
+## Kubernetes (Production)
 
-Production manifests are in `k8s/`:
+Manifests are in `k8s/`:
 
 ```bash
-# Apply all manifests
-make k8s-apply
-
-# Run migrations in the cluster
-make k8s-migrate
-
-# Check status
-make k8s-status
+make k8s-apply          # Deploy everything
+make k8s-migrate        # Run migrations in cluster
+make k8s-status         # Check pod/service status
+make k8s-delete         # Remove all resources (destructive)
 ```
 
 Key files:
-- `k8s/configmap.yaml` — non-secret config (update `CORS_ORIGINS` and `NEXT_PUBLIC_API_URL` for your domain)
-- `k8s/secrets.yaml` — template for secrets (use External Secrets Operator in production)
-- `k8s/ingress.yaml` — nginx ingress with TLS (update `app.attacktrace.io` to your domain)
-- `k8s/keda-scaledobject.yaml` — worker autoscaling based on Redis queue depth
+- `k8s/configmap.yaml` — update `CORS_ORIGINS` and `NEXT_PUBLIC_API_URL` for your domain
+- `k8s/secrets.yaml` — template for secrets (use External Secrets Operator in prod)
+- `k8s/ingress.yaml` — nginx ingress with TLS (update `app.attacktrace.io`)
+- `k8s/keda-scaledobject.yaml` — worker autoscaling on Redis queue depth
 
 ---
 
 ## Troubleshooting
 
-### Native (no Docker)
+### Backend fails to start — `SettingsError: error parsing CORS_ORIGINS`
 
-**Backend fails to start — `SettingsError: error parsing CORS_ORIGINS`**
-
-Remove the `CORS_ORIGINS` line from `platform/backend/.env` — the default in `config.py` already covers `localhost:3000`:
 ```bash
 sed -i '' '/^CORS_ORIGINS=/d' platform/backend/.env
 ```
 
-**Backend fails to start — `ValueError: password cannot be longer than 72 bytes`**
+### Backend fails — `ValueError: password cannot be longer than 72 bytes`
 
-bcrypt 5.x / passlib incompatibility. Reinstall the pinned version:
+bcrypt/passlib version conflict. Pin the version:
 ```bash
 platform/backend/.venv/bin/pip install 'bcrypt==4.0.1'
 ```
 
-**`psql` not found on macOS**
+### Port 8000 already in use
 
-Homebrew PostgreSQL isn't in PATH. Add it:
-```bash
-export PATH="/opt/homebrew/opt/postgresql@16/bin:$PATH"
-```
-Or re-run `start.sh` — it patches PATH automatically.
-
-**`npm ci` fails with lock file error (Node 25+)**
-
-Use `npm install` instead — `start.sh` does this by default.
-
-**Backend port 8000 already in use**
 ```bash
 lsof -ti :8000 | xargs kill -9
 ```
 
-**Scanning tools not found (nuclei / ffuf / nmap)**
+### `psql` not found on macOS
+
+```bash
+export PATH="/opt/homebrew/opt/postgresql@16/bin:$PATH"
+```
+`start.sh` patches PATH automatically on each run.
+
+### Nuclei / ffuf / nmap not found
+
 ```bash
 make install-tools
 ```
 
-**View logs**
-```bash
-tail -f logs/backend.log
-tail -f logs/worker.log
-tail -f logs/frontend.log
-```
+### Forgot the admin password
 
----
-
-### Docker
-
-**Containers won't start**
-```bash
-make logs          # Check what's failing
-make down && make up
-```
-
-**Database migration errors**
-```bash
-make migrate
-```
-
-**Backend not responding after update**
-```bash
-make backend-logs  # Check for errors
-make restart
-```
-
----
-
-### Both modes
-
-**Forgot the admin password**
-
-Reset it directly in the database:
 ```bash
 # Docker:
 make db-shell
 # Native:
 psql -U attacktrace -d attacktrace
-# Inside psql — generate hash with: python3 -c "from passlib.context import CryptContext; print(CryptContext(['bcrypt']).hash('NewPassword!'))"
-UPDATE users SET hashed_password = '<bcrypt-hash>' WHERE email = 'admin';
+
+# Generate a bcrypt hash first:
+python3 -c "from passlib.context import CryptContext; print(CryptContext(['bcrypt']).hash('NewPassword123!'))"
+
+# Then in psql:
+UPDATE users SET hashed_password = '<hash>' WHERE email = 'admin';
 ```
 
-**Dashboard shows stale asset or finding counts after deleting a scan**
+### View logs
 
-This is fixed in the current version (Redis cache is invalidated on delete). If you're on an older version, click the **Refresh** button on the dashboard or wait up to 5 minutes for the cache to expire.
+```bash
+# Native:
+tail -f logs/backend.log
+tail -f logs/worker.log
+tail -f logs/frontend.log
+tail -f logs/msra.log
+
+# Docker:
+make logs
+make backend-logs
+```
+
+### Containers won't start (Docker)
+
+```bash
+make logs
+make down && make up
+```
 
 ---
 
