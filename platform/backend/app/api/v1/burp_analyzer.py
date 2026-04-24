@@ -354,7 +354,7 @@ _PARAM_VULN_MAP: list[tuple[frozenset[str], dict]] = [
             "cwe": "CWE-640",
             "owasp": "A07:2021 - Identification and Authentication Failures",
             "description": "Email parameters in password reset or email-change flows may be manipulated to reroute tokens to attacker-controlled addresses.",
-            "payloads": [t["description"] for t in ATO_PASSWORD_RESET_TESTS[:6]],
+            "payloads": [f"{list(t.keys())[0]}: {list(t.values())[0]}" for t in ATO_PASSWORD_RESET_TESTS[:6]],
             "steps": [
                 "In the password-reset flow, set {param} to target a victim email",
                 "Check if the reset link arrives at the attacker-controlled address",
@@ -842,7 +842,7 @@ def generate_test_cases(profile: EndpointProfile) -> list[TestCase]:
             parameters=["file", "upload", "attachment"],
             payloads=(
                 [f"shell{ext}  →  <?php system($_GET['cmd']); ?>" for ext in FILE_UPLOAD_BYPASS_EXTENSIONS[:6]]
-                + FILE_UPLOAD_MALICIOUS_CONTENT[:3]
+                + [v.decode() if isinstance(v, bytes) else v for v in list(FILE_UPLOAD_MALICIOUS_CONTENT.values())[:3]]
             ),
             severity="critical", priority=10,
             cwe="CWE-434", owasp="A04:2021 - Insecure Design",
@@ -943,7 +943,7 @@ def generate_test_cases(profile: EndpointProfile) -> list[TestCase]:
             title="Mass Assignment / Unauthorised Parameter Binding",
             description="JSON APIs that don't whitelist fields may accept extra keys like role, admin, or verified, escalating privileges.",
             parameters=list(profile.all_params)[:5],
-            payloads=[f'{{"{f}": "admin"}}' for f in MASS_ASSIGNMENT_ROLE_FIELDS[:8]],
+            payloads=[json.dumps(f) for f in MASS_ASSIGNMENT_ROLE_FIELDS[:8]],
             severity="high", priority=7,
             cwe="CWE-915", owasp="A01:2021 - Broken Access Control",
             rationale=f"JSON body at {profile.method} {profile.path}. Extra keys may be bound by the framework.",

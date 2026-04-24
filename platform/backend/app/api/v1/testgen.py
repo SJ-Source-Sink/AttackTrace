@@ -27,7 +27,7 @@ from app.api.v1.attack_patterns import (
     REDIRECT_PARAMS, REDIRECT_PAYLOADS,
     SSTI_PAYLOADS, SSTI_TEST_FIELDS,
     NOSQL_INJECTION_PAYLOADS, NOSQL_URL_PAYLOADS, NOSQL_SLEEP_PAYLOADS,
-    XXE_PAYLOADS, FILE_UPLOAD_PATHS, FILE_UPLOAD_BYPASS_EXTENSIONS, FILE_UPLOAD_MALICIOUS_CONTENT,
+    XXE_PAYLOADS, FILE_UPLOAD_PATHS, FILE_UPLOAD_BYPASS_EXTENSIONS,
     INFO_DISCLOSURE_PATHS, PRIV_ESC_PARAMS, PRIV_ESC_ADMIN_PATHS,
     MASS_ASSIGNMENT_ROLE_FIELDS, ATO_PASSWORD_RESET_TESTS, ATO_RESET_ENDPOINTS,
     WEAK_CREDENTIAL_PAIRS, JWT_WEAK_SECRETS, JWT_ALG_NONE_VARIANTS, JWT_KID_PAYLOADS,
@@ -3293,7 +3293,7 @@ PATTERN_TEST_CASES: list[dict] = [
         "steps": [
             f"Config paths: {', '.join(COMMON_SENSITIVE_PATHS[:8])}",
             f"Debug/admin paths: {', '.join(INFO_DISCLOSURE_PATHS[:8])}",
-            f"Monitoring paths: {', '.join(MONITORING_PATHS[:6])}",
+            f"Monitoring paths: {', '.join(p for p, _ in MONITORING_PATHS[:6])}",
             "ffuf -u TARGET/FUZZ -w wordlist.txt -mc 200,301,302 -t 40",
             "Check .env — look for DB passwords, API keys, SECRET_KEY",
             "Check /actuator/env, /actuator/heapdump for Spring Boot apps",
@@ -3317,7 +3317,7 @@ PATTERN_TEST_CASES: list[dict] = [
         ),
         "attack_pattern": "Inject role/permission fields in requests; access admin paths as low-privilege user.",
         "steps": [
-            f"Privilege params: {', '.join(PRIV_ESC_PARAMS[:10])}",
+            f"Privilege params: {', '.join(list(p.keys())[0] + '=' + str(list(p.values())[0]) for p in PRIV_ESC_PARAMS[:10])}",
             f"Admin paths: {', '.join(PRIV_ESC_ADMIN_PATHS[:8])}",
             "Add role=admin or isAdmin=true to request body",
             "Access admin paths authenticated as regular user — check for 200 vs 403",
@@ -3343,7 +3343,7 @@ PATTERN_TEST_CASES: list[dict] = [
         ),
         "attack_pattern": "Add extra fields to JSON PUT/PATCH requests; observe if server accepts and persists them.",
         "steps": [
-            f"Privileged fields to inject: {', '.join(MASS_ASSIGNMENT_ROLE_FIELDS[:10])}",
+            f"Privileged fields to inject: {', '.join(list(f.keys())[0] + '=' + str(list(f.values())[0]) for f in MASS_ASSIGNMENT_ROLE_FIELDS[:10])}",
             'Add {"role": "admin"} to existing update request body',
             'Try: {"is_admin": true, "verified": true, "subscription_tier": "enterprise"}',
             "Check /api-docs or /swagger for undocumented internal fields",
@@ -3369,7 +3369,7 @@ PATTERN_TEST_CASES: list[dict] = [
         ),
         "attack_pattern": "Manipulate password reset flow to receive reset link at attacker-controlled address.",
         "steps": [
-            *[f"Test: {t['description']}" for t in ATO_PASSWORD_RESET_TESTS[:8]],
+            *[f"Inject header: {list(t.keys())[0]}: {list(t.values())[0]}" for t in ATO_PASSWORD_RESET_TESTS[:8]],
             f"Reset endpoints to test: {', '.join(ATO_RESET_ENDPOINTS)}",
             "Host header injection: change Host: to attacker.com during reset — check link domain",
             "Parameter pollution: send email=victim@x.com&email=attacker@x.com",
@@ -3474,7 +3474,7 @@ PATTERN_TEST_CASES: list[dict] = [
         ),
         "attack_pattern": "Inject __proto__ or constructor.prototype fields to pollute the Object prototype and alter application behaviour.",
         "steps": [
-            *_fmt_payloads(PROTOTYPE_POLLUTION_PAYLOADS, 6),
+            *[f"Payload: {json.dumps(p)}" for p in PROTOTYPE_POLLUTION_PAYLOADS[:6]],
             'POST body: {"__proto__":{"isAdmin":true}}',
             'Query: ?__proto__[isAdmin]=true  or  ?constructor[prototype][isAdmin]=true',
             "Check if subsequent requests return elevated privileges",
@@ -3501,12 +3501,12 @@ PATTERN_TEST_CASES: list[dict] = [
         ),
         "attack_pattern": "Manipulate financial parameters client-side; attempt to purchase items at zero or negative cost.",
         "steps": [
-            *[f"Test: {t['test']} — {t['description']}" for t in BUSINESS_LOGIC_TESTS[:6]],
+            *[f"Test field={t['field']} with value={t['value']}" for t in BUSINESS_LOGIC_TESTS[:6]],
             "Set quantity=-1 and checkout — check if balance increases",
             "Set price=0.01 in request body — check if server recalculates server-side",
             f"Try coupon codes: {', '.join(COUPON_CODES[:6])}",
             "Apply same coupon twice in rapid succession (race condition)",
-            f"Basket attacks: {', '.join(str(a) for a in BUSINESS_LOGIC_BASKET_ATTACKS[:3])}",
+            f"Basket attacks: {', '.join(json.dumps(a) for a in BUSINESS_LOGIC_BASKET_ATTACKS[:3])}",
         ],
         "expected_result": "All pricing and business rule enforcement is server-side. Coupons validated once.",
         "cwe": "CWE-840", "owasp": "A04:2021",
