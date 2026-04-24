@@ -3,7 +3,8 @@ Findings API: list, filter, update lifecycle, add comments, and manage suppressi
 """
 
 import math
-from datetime import datetime, timezone
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, List, Optional
 from uuid import UUID
 
@@ -104,6 +105,82 @@ async def create_finding(
     await db.flush()
 
     return FindingResponse.from_orm(finding)
+
+
+@router.get(
+    "/timeline",
+    summary="Get daily finding counts by severity for a date range",
+)
+async def findings_timeline(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+    days: Optional[int] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+) -> dict:
+    now = datetime.now(timezone.utc)
+
+    if from_date and to_date:
+        try:
+            start = datetime.fromisoformat(from_date).replace(tzinfo=timezone.utc)
+            end = datetime.fromisoformat(to_date).replace(tzinfo=timezone.utc).replace(
+                hour=23, minute=59, second=59
+            )
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": {"code": "INVALID_DATE", "message": "Dates must be YYYY-MM-DD"}},
+            )
+    else:
+        lookback = max(1, min(days or 30, 365))
+        start = (now - timedelta(days=lookback - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = now
+
+    result = await db.execute(
+        select(Finding.severity, Finding.created_at)
+        .where(
+            Finding.org_id == org_id,
+            Finding.created_at >= start,
+            Finding.created_at <= end,
+        )
+        .order_by(Finding.created_at.asc())
+    )
+    rows = result.all()
+
+    # Build a dict of {date_str: {severity: count}}
+    day_map: dict = defaultdict(lambda: {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0})
+    totals = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+
+    for row in rows:
+        day = row.created_at.strftime("%Y-%m-%d")
+        sev = row.severity.value
+        day_map[day][sev] += 1
+        totals[sev] += 1
+
+    # Fill every calendar day in the range (even if no findings)
+    data = []
+    current_day = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    while current_day.date() <= end.date():
+        day_str = current_day.strftime("%Y-%m-%d")
+        counts = day_map[day_str]
+        data.append({
+            "date": day_str,
+            "critical": counts["critical"],
+            "high": counts["high"],
+            "medium": counts["medium"],
+            "low": counts["low"],
+            "info": counts["info"],
+            "total": sum(counts.values()),
+        })
+        current_day += timedelta(days=1)
+
+    return {
+        "data": data,
+        "totals": totals,
+        "from_date": start.strftime("%Y-%m-%d"),
+        "to_date": end.strftime("%Y-%m-%d"),
+    }
 
 
 @router.get(

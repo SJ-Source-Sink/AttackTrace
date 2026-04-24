@@ -7,11 +7,10 @@ import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/shared/page-header";
 import { StatsCards } from "@/components/dashboard/stats-cards";
-import { RiskScoreChart } from "@/components/dashboard/risk-score-chart";
+import { FindingsDashboard } from "@/components/dashboard/findings-dashboard";
 import { RecentFindings } from "@/components/dashboard/recent-findings";
 import { ScanActivity } from "@/components/dashboard/scan-activity";
-import { dashboardApi } from "@/lib/api";
-import { scansApi, findingsApi } from "@/lib/api";
+import { dashboardApi, scansApi, findingsApi } from "@/lib/api";
 import type { DashboardStats, ScanListResponse, FindingListResponse } from "@/types";
 
 export default function DashboardPage() {
@@ -34,8 +33,6 @@ export default function DashboardPage() {
     staleTime: 60_000,
   });
 
-  const riskHistory = stats?.risk_score_history ?? [];
-
   return (
     <div className="space-y-6">
       <PageHeader
@@ -57,8 +54,8 @@ export default function DashboardPage() {
       {/* Stats Cards */}
       <StatsCards stats={stats} isLoading={statsLoading} />
 
-      {/* Risk Score Chart */}
-      <RiskScoreChart data={riskHistory} isLoading={statsLoading} />
+      {/* Findings Dashboard */}
+      <FindingsDashboard />
 
       {/* Two column grid: findings + scans */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">

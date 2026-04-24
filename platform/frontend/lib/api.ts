@@ -167,6 +167,8 @@ export const findingsApi = {
   update: (id: string, data: unknown) => api.patch(`/findings/${id}`, data),
   addComment: (id: string, content: string) =>
     api.post(`/findings/${id}/comments`, { body: content }),
+  timeline: (params: Record<string, string | number | undefined>) =>
+    api.get("/findings/timeline", params),
 };
 
 export const reportsApi = {
