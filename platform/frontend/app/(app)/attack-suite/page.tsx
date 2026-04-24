@@ -16,6 +16,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import { PageHeader } from "@/components/shared/page-header";
+import { BurpImport } from "@/components/attack-suite/burp-import";
 import { cn } from "@/lib/utils";
 import { fetchWithAuth, getAccessToken } from "@/lib/auth";
 import { toast } from "sonner";
@@ -237,6 +238,8 @@ function SectionToggle({
 // Main page
 // ─────────────────────────────────────────────────────────────
 export default function AttackSuitePage() {
+  const [activeTab, setActiveTab] = useState<"scanner" | "burp">("scanner");
+
   // Target + basic options
   const [target, setTarget] = useState("");
   const [followRedirects, setFollowRedirects] = useState(true);
@@ -522,7 +525,41 @@ export default function AttackSuitePage() {
         </div>
       </PageHeader>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+      {/* ── Tab switcher ── */}
+      <div className="flex items-center gap-1 rounded-lg bg-zinc-900 border border-zinc-800 p-1 w-fit">
+        <button
+          onClick={() => setActiveTab("scanner")}
+          className={cn(
+            "flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors",
+            activeTab === "scanner"
+              ? "bg-zinc-700 text-zinc-100"
+              : "text-zinc-500 hover:text-zinc-300"
+          )}
+        >
+          <Swords className="h-3.5 w-3.5" />
+          Scanner
+        </button>
+        <button
+          onClick={() => setActiveTab("burp")}
+          className={cn(
+            "flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors",
+            activeTab === "burp"
+              ? "bg-orange-600 text-white"
+              : "text-zinc-500 hover:text-zinc-300"
+          )}
+        >
+          <Network className="h-3.5 w-3.5" />
+          Burp Import
+        </button>
+      </div>
+
+      {/* ── Burp Import tab ── */}
+      {activeTab === "burp" && (
+        <BurpImport />
+      )}
+
+      {/* ── Scanner tab ── */}
+      {activeTab === "scanner" && <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
 
         {/* ── Config Panel ── */}
         <div className="space-y-4">
@@ -1234,10 +1271,10 @@ export default function AttackSuitePage() {
             </div>
           )}
         </div>
-      </div>
+      </div>}{/* end scanner grid */}
 
       {/* History */}
-      {showHistory && (
+      {activeTab === "scanner" && showHistory && (
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-sm font-semibold text-zinc-300 flex items-center gap-2">

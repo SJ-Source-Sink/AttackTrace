@@ -28,7 +28,7 @@ from typing import Annotated, AsyncGenerator, Optional
 from urllib.parse import urljoin, urlparse, urlunparse, urlencode, parse_qs
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 
@@ -3012,3 +3012,37 @@ async def list_modules(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
     return {"modules": MODULES_META}
+
+
+# ─── Burp Suite analyser ──────────────────────────────────────────────────────
+
+@router.post("/burp/analyze")
+async def analyze_burp_file(
+    file: UploadFile = File(...),
+    ai_analysis: bool = Form(default=True),
+    current_user: Annotated[User, Depends(get_current_user)] = None,
+) -> StreamingResponse:
+    """
+    Upload a Burp Suite HTTP History XML export and receive a streaming SSE
+    analysis: parsed stats → endpoint profiles → response findings →
+    per-endpoint test cases → Claude AI insights → completion summary.
+
+    Export from Burp: Proxy → HTTP history → Ctrl-A → Right-click → Save items
+    """
+    from app.api.v1.burp_analyzer import run_burp_analysis  # local import avoids circular deps
+
+    content = await file.read()
+    if len(content) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large — maximum 50 MB")
+
+    api_key = settings.ANTHROPIC_API_KEY or ""
+
+    return StreamingResponse(
+        run_burp_analysis(content, ai_analysis, api_key),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
