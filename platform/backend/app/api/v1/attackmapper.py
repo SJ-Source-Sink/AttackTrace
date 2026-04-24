@@ -380,6 +380,146 @@ async def update_intel(
 
 _INTEL_DB = os.path.expanduser("~/.cache/attackmapper/intel_cache.db")
 
+# Country/attribution keywords parsed from MITRE ATT&CK descriptions
+_COUNTRY_PATTERNS: list[tuple[str, str]] = [
+    ("Russia", "🇷🇺 Russia"),
+    ("Russian", "🇷🇺 Russia"),
+    ("China", "🇨🇳 China"),
+    ("Chinese", "🇨🇳 China"),
+    ("North Korea", "🇰🇵 North Korea"),
+    ("North Korean", "🇰🇵 North Korea"),
+    ("Iran", "🇮🇷 Iran"),
+    ("Iranian", "🇮🇷 Iran"),
+    ("Israel", "🇮🇱 Israel"),
+    ("Pakistan", "🇵🇰 Pakistan"),
+    ("India", "🇮🇳 India"),
+    ("Vietnam", "🇻🇳 Vietnam"),
+    ("Turkey", "🇹🇷 Turkey"),
+    ("Belarus", "🇧🇾 Belarus"),
+    ("United States", "🇺🇸 United States"),
+    ("Gaza", "🇵🇸 Gaza"),
+]
+
+
+def _extract_country(description: str) -> str:
+    """Infer country attribution from MITRE-style description text."""
+    for keyword, label in _COUNTRY_PATTERNS:
+        if keyword in description:
+            return label
+    return "Unknown"
+
+
+def _strip_mitre_links(text: str) -> str:
+    """Remove [Label](url) markdown links, keep only the label."""
+    import re as _re
+    return _re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+
+
+def _extract_active_since(description: str) -> str | None:
+    """Parse 'active since at least YYYY' from description."""
+    import re as _re
+    m = _re.search(r"active since at least (\w+ \d{4}|\d{4})", description)
+    return m.group(1) if m else None
+
+
+@router.get("/apt-groups", summary="List APT groups / threat actors from the local intel cache")
+async def get_apt_groups(
+    current_user: Annotated[User, Depends(get_current_user)],
+    search: str | None = None,
+    country: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
+    """Return threat actor records from the attackmapper SQLite cache with parsed attribution."""
+    import sqlite3 as _sqlite3
+    import re as _re
+
+    if not os.path.exists(_INTEL_DB):
+        return {"items": [], "total": 0, "note": "Intel cache not found — run Update Intel first"}
+
+    try:
+        conn = _sqlite3.connect(_INTEL_DB)
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT name, aliases, description, targeted_infrastructure, ttps, "
+            "recent_activity, references_json, cached_at FROM threat_actors"
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        items = []
+        for row in rows:
+            name, aliases_raw, description, infra_raw, ttps_raw, recent_activity, refs_raw, cached_at = row
+            description = description or ""
+            clean_desc = _strip_mitre_links(description)
+
+            try:
+                aliases: list[str] = json.loads(aliases_raw) if aliases_raw else []
+            except Exception:
+                aliases = []
+            # Remove the name itself from aliases list
+            aliases = [a for a in aliases if a.lower() != name.lower()]
+
+            try:
+                ttps: list[str] = json.loads(ttps_raw) if ttps_raw else []
+            except Exception:
+                ttps = []
+            try:
+                references: list[str] = json.loads(refs_raw) if refs_raw else []
+            except Exception:
+                references = []
+
+            attribution = _extract_country(clean_desc)
+            active_since = _extract_active_since(clean_desc)
+
+            # Derive activity status
+            status = "active"
+            if recent_activity == "inactive" or "disbanded" in clean_desc.lower():
+                status = "inactive"
+            elif not active_since:
+                status = "unknown"
+
+            # Build a 2-sentence excerpt (strip citation noise)
+            excerpt = _re.sub(r"\(Citation:[^)]+\)", "", clean_desc).strip()
+            sentences = [s.strip() for s in excerpt.split(".") if len(s.strip()) > 20]
+            excerpt = ". ".join(sentences[:2]) + ("." if sentences else "")
+
+            items.append({
+                "name": name,
+                "aliases": aliases[:6],
+                "attribution": attribution,
+                "active_since": active_since,
+                "status": status,
+                "excerpt": excerpt[:400],
+                "techniques_count": len(ttps),
+                "references_count": len(references),
+                "cached_at": cached_at,
+            })
+
+        # Filter
+        if search:
+            q = search.lower()
+            items = [
+                it for it in items
+                if q in it["name"].lower()
+                or any(q in a.lower() for a in it["aliases"])
+                or q in it["excerpt"].lower()
+                or q in it["attribution"].lower()
+            ]
+        if country:
+            items = [it for it in items if country.lower() in it["attribution"].lower()]
+
+        # Sort: active first, then alphabetically
+        STATUS_ORDER = {"active": 0, "unknown": 1, "inactive": 2}
+        items.sort(key=lambda x: (STATUS_ORDER.get(x["status"], 1), x["name"]))
+
+        total = len(items)
+        return {"items": items[offset: offset + limit], "total": total}
+
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 @router.get("/cves", summary="Get CVEs from the local threat intel cache")
 async def get_cves(

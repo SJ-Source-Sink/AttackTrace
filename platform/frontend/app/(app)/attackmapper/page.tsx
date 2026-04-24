@@ -24,6 +24,9 @@ import {
   Database,
   Globe,
   X,
+  Users,
+  Search,
+  Flag,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1180,6 +1183,208 @@ function CVECorrelationTab({ infraType }: { infraType: string }) {
   );
 }
 
+// ── APT Groups tab ─────────────────────────────────────────────────────────────
+
+interface AptGroup {
+  name: string;
+  aliases: string[];
+  attribution: string;
+  active_since: string | null;
+  status: "active" | "inactive" | "unknown";
+  excerpt: string;
+  techniques_count: number;
+  references_count: number;
+}
+
+const STATUS_STYLES: Record<string, string> = {
+  active: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
+  inactive: "bg-zinc-700/30 text-zinc-500 border-zinc-600/20",
+  unknown: "bg-yellow-500/10 text-yellow-400 border-yellow-500/20",
+};
+
+const COUNTRY_COLORS: Record<string, string> = {
+  "🇷🇺 Russia": "bg-red-500/10 text-red-400 border-red-500/20",
+  "🇨🇳 China": "bg-yellow-500/10 text-yellow-300 border-yellow-500/20",
+  "🇰🇵 North Korea": "bg-purple-500/10 text-purple-400 border-purple-500/20",
+  "🇮🇷 Iran": "bg-orange-500/10 text-orange-400 border-orange-500/20",
+};
+
+function AptGroupCard({ group }: { group: AptGroup }) {
+  const [expanded, setExpanded] = useState(false);
+  const countryStyle = COUNTRY_COLORS[group.attribution] ?? "bg-zinc-700/30 text-zinc-400 border-zinc-600/20";
+
+  return (
+    <div className="border border-zinc-800 rounded-lg overflow-hidden">
+      <button
+        type="button"
+        className="w-full flex items-start gap-3 p-4 text-left hover:bg-zinc-800/30 transition-colors"
+        onClick={() => setExpanded((e) => !e)}
+      >
+        <div className="h-8 w-8 rounded-lg bg-zinc-800 flex items-center justify-center shrink-0 mt-0.5">
+          <Users className="h-4 w-4 text-zinc-400" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex flex-wrap items-center gap-2 mb-1">
+            <span className="text-zinc-100 font-medium text-sm">{group.name}</span>
+            <Badge variant="outline" className={cn("text-xs border", STATUS_STYLES[group.status])}>
+              {group.status}
+            </Badge>
+            <Badge variant="outline" className={cn("text-xs border", countryStyle)}>
+              {group.attribution}
+            </Badge>
+            {group.active_since && (
+              <span className="text-xs text-zinc-500">since {group.active_since}</span>
+            )}
+          </div>
+          {group.aliases.length > 0 && (
+            <div className="flex flex-wrap gap-1 mb-1.5">
+              {group.aliases.map((a) => (
+                <span key={a} className="text-xs bg-zinc-800 text-zinc-400 px-1.5 py-0.5 rounded font-mono">
+                  {a}
+                </span>
+              ))}
+            </div>
+          )}
+          <p className="text-xs text-zinc-500 line-clamp-2">{group.excerpt}</p>
+        </div>
+        {expanded ? (
+          <ChevronUp className="h-4 w-4 text-zinc-500 shrink-0 mt-1" />
+        ) : (
+          <ChevronDown className="h-4 w-4 text-zinc-500 shrink-0 mt-1" />
+        )}
+      </button>
+
+      {expanded && (
+        <div className="border-t border-zinc-800 px-4 py-3 space-y-2 bg-zinc-950/30">
+          <p className="text-xs text-zinc-400 leading-relaxed">{group.excerpt}</p>
+          <div className="flex gap-4 text-xs text-zinc-500">
+            {group.techniques_count > 0 && (
+              <span className="flex items-center gap-1">
+                <Shield className="h-3 w-3" />{group.techniques_count} TTPs documented
+              </span>
+            )}
+            {group.references_count > 0 && (
+              <span className="flex items-center gap-1">
+                <BookOpen className="h-3 w-3" />{group.references_count} references
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AptGroupsTab() {
+  const [groups, setGroups] = useState<AptGroup[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [countryFilter, setCountryFilter] = useState("all");
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const res = await fetchWithAuth(`${API_BASE}/attackmapper/apt-groups?limit=200`);
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        setGroups(data.items ?? []);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to load APT groups");
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  const countries = Array.from(new Set(groups.map((g) => g.attribution))).sort();
+
+  const filtered = groups.filter((g) => {
+    const matchCountry = countryFilter === "all" || g.attribution === countryFilter;
+    const q = search.toLowerCase();
+    const matchSearch =
+      !q ||
+      g.name.toLowerCase().includes(q) ||
+      g.aliases.some((a) => a.toLowerCase().includes(q)) ||
+      g.attribution.toLowerCase().includes(q) ||
+      g.excerpt.toLowerCase().includes(q);
+    return matchCountry && matchSearch;
+  });
+
+  const activeCnt = filtered.filter((g) => g.status === "active").length;
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-12 gap-2 text-zinc-500 text-sm">
+        <RefreshCw className="h-4 w-4 animate-spin" />
+        Loading APT groups...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="border border-red-500/20 bg-red-500/5 rounded-lg p-4 text-sm text-red-400">{error}</div>
+    );
+  }
+
+  if (groups.length === 0) {
+    return (
+      <div className="flex flex-col items-center py-10 text-zinc-500 text-sm gap-2">
+        <Users className="h-8 w-8 opacity-25" />
+        <p>No APT groups found in the intel cache</p>
+        <p className="text-xs text-zinc-600">Run <span className="text-zinc-400">Update Intel</span> to populate threat actor data</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* Filters */}
+      <div className="flex gap-2">
+        <div className="relative flex-1">
+          <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-zinc-500" />
+          <Input
+            placeholder="Search groups, aliases, attribution..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="h-8 text-sm bg-zinc-950 border-zinc-700 pl-8"
+          />
+        </div>
+        <select
+          value={countryFilter}
+          onChange={(e) => setCountryFilter(e.target.value)}
+          className="h-8 text-sm bg-zinc-950 border border-zinc-700 rounded-md px-2 text-zinc-300"
+        >
+          <option value="all">All nations</option>
+          {countries.map((c) => (
+            <option key={c} value={c}>{c}</option>
+          ))}
+        </select>
+      </div>
+
+      {/* Stats row */}
+      <div className="flex gap-4 text-xs text-zinc-500">
+        <span className="text-zinc-300 font-medium">{filtered.length}</span> groups
+        {activeCnt > 0 && (
+          <><span className="text-emerald-400 font-medium">{activeCnt}</span> active</>
+        )}
+      </div>
+
+      {/* Group list */}
+      <div className="space-y-2 max-h-[600px] overflow-y-auto pr-1">
+        {filtered.map((g) => (
+          <AptGroupCard key={g.name} group={g} />
+        ))}
+        {filtered.length === 0 && (
+          <div className="text-center py-8 text-zinc-500 text-sm">No groups match your filter.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 
 export default function AttackMapperPage() {
   const [infraType, setInfraType] = useState("ad");
@@ -1190,7 +1395,7 @@ export default function AttackMapperPage() {
   const [isRunning, setIsRunning] = useState(false);
   const [progressLog, setProgressLog] = useState<string[]>([]);
   const [result, setResult] = useState<ScanResult | null>(null);
-  const [activeTab, setActiveTab] = useState<"techniques" | "chain" | "intel" | "correlate">("techniques");
+  const [activeTab, setActiveTab] = useState<"techniques" | "chain" | "intel" | "correlate" | "apt">("techniques");
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [techniqueSearch, setTechniqueSearch] = useState("");
@@ -1759,6 +1964,7 @@ export default function AttackMapperPage() {
                     { key: "chain", label: "Attack Chain", icon: Link2, count: result.chain_steps },
                     { key: "intel", label: "Threat Intel", icon: AlertTriangle, count: intelStats?.cached_cves ?? result.critical_cves },
                     { key: "correlate", label: "CVE Correlation", icon: Bug, count: null },
+                    { key: "apt", label: "APT Groups", icon: Users, count: intelStats?.cached_threat_actors ?? null },
                   ] as const
                 ).map(({ key, label, icon: Icon, count }) => (
                   <button
@@ -1847,6 +2053,11 @@ export default function AttackMapperPage() {
                 {/* ── CVE Correlation tab ── */}
                 {activeTab === "correlate" && (
                   <CVECorrelationTab infraType={result.infrastructure_type} />
+                )}
+
+                {/* ── APT Groups tab ── */}
+                {activeTab === "apt" && (
+                  <AptGroupsTab />
                 )}
               </CardContent>
             </Card>
