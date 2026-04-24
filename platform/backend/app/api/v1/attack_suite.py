@@ -3032,8 +3032,8 @@ async def analyze_burp_file(
     from app.api.v1.burp_analyzer import run_burp_analysis  # local import avoids circular deps
 
     content = await file.read()
-    if len(content) > 50 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="File too large — maximum 50 MB")
+    if len(content) > 500 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large — maximum 500 MB")
 
     api_key = settings.ANTHROPIC_API_KEY or ""
 

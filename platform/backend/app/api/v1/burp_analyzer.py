@@ -27,8 +27,8 @@ from urllib.parse import parse_qs, urlparse
 
 # ─── Limits ───────────────────────────────────────────────────────────────────
 
-MAX_FILE_BYTES = 50 * 1024 * 1024   # 50 MB
-MAX_ITEMS      = 5_000              # max requests to parse
+MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB
+MAX_ITEMS      = 20_000             # max requests to parse
 RESP_SCAN_LIMIT = 500               # max response bodies to scan (performance)
 RESP_BODY_LIMIT = 64_000            # chars to scan per response body
 

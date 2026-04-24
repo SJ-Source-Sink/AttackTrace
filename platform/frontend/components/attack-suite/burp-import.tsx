@@ -612,7 +612,7 @@ export function BurpImport() {
         {/* Hint when no file */}
         {!file && (
           <p className="text-center text-xs text-zinc-600">
-            Supports Burp Suite HTTP history exports up to 50 MB · up to 5,000 requests
+            Supports Burp Suite HTTP history exports up to 500 MB · up to 20,000 requests
           </p>
         )}
       </div>
