@@ -22,6 +22,8 @@ from app.api.v1.suppression_rules import router as suppression_rules_router
 from app.api.v1.attackmapper import router as attackmapper_router
 from app.api.v1.testgen import router as testgen_router
 from app.api.v1.mobile import router as mobile_router
+from app.api.v1.firewall import router as firewall_router
+from app.api.v1.network_graph import router as network_graph_router
 
 api_router = APIRouter()
 
@@ -44,3 +46,5 @@ api_router.include_router(suppression_rules_router)
 api_router.include_router(attackmapper_router)
 api_router.include_router(testgen_router)
 api_router.include_router(mobile_router)
+api_router.include_router(firewall_router)
+api_router.include_router(network_graph_router)

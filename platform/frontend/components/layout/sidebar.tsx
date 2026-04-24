@@ -26,6 +26,8 @@ import {
   FlaskConical,
   Smartphone,
   BookOpen,
+  Shield,
+  Share2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -60,6 +62,11 @@ const navItems: NavItem[] = [
     icon: ShieldAlert,
   },
   {
+    label: "Network Map",
+    href: "/network",
+    icon: Share2,
+  },
+  {
     label: "Reports",
     href: "/reports",
     icon: FileText,
@@ -81,6 +88,11 @@ const toolItems: NavItem[] = [
     label: "ffuf Fuzzer",
     href: "/ffuf",
     icon: Wind,
+  },
+  {
+    label: "Firewall Scanner",
+    href: "/firewall",
+    icon: Shield,
   },
   {
     label: "Test Case Generator",
