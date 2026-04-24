@@ -126,7 +126,7 @@ services:
     command: >
       celery -A app.workers.celery_app worker
       --loglevel=info
-      --queues=default,scans
+      --queues=default,scans,ai
       --concurrency=2
       --hostname=worker@%h
     env_file: .env

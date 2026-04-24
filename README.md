@@ -53,10 +53,10 @@
 
 | Category | Capabilities |
 |---|---|
-| **Dashboard** | Live log-scaled risk score, asset/finding counts, risk trend chart, recent scans |
+| **Dashboard** | Findings Dashboard with 7d/14d/30d/90d presets + custom date range, stacked severity bar chart, asset/finding counts, recent scans |
 | **Scans** | Full scan lifecycle management, real-time SSE progress streaming, cancel/delete |
 | **Assets** | Filterable asset inventory (domain, subdomain, IP, webapp, cloud), screenshot thumbnails |
-| **Findings** | Unified view: recon + mobile findings, expandable rows with evidence/PoC/remediation, severity triage, status workflow, CVE linking, suppression rules |
+| **Findings** | Unified view: recon + mobile + manual findings; inline severity editing; Create Finding form; expandable rows with evidence/PoC/remediation; status workflow; CVE linking; suppression rules |
 | **Reports** | Auto-generated HTML reports per scan with full asset and finding detail |
 | **Audit Log** | Immutable record of all platform actions by user, type-filtered, CSV export |
 
@@ -76,15 +76,17 @@
 
 | Tool | Description |
 |---|---|
-| **Nmap Scanner** | 7 scan types, custom port ranges, parsed results with service/version |
-| **Nuclei Scanner** | Template-based scanning, severity filter, live stderr progress, CVE enrichment |
-| **ffuf Fuzzer** | Directory/param/subdomain fuzzing, 13 bundled wordlists, custom wordlists |
+| **Nmap Scanner** | 7 scan types, custom port ranges, timing T0-T5, parsed results with service/version, scan history |
+| **Nuclei Scanner** | Template-based scanning, severity filter, live streaming, CVE enrichment, scan history |
+| **ffuf Fuzzer** | Directory/param/subdomain fuzzing, bundled + SecLists + custom wordlists, scan history |
+| **Firewall & WAF Scanner** | WAF detection (10 vendors), WAF bypass probe (13 techniques), Port Firewall Mapper (5 modes), Rule Analyzer (iptables/Cisco/pfSense); scan history persisted per tab |
 | **Attack Suite** | 24-module adaptive web scanner — crawler + pattern library from 5700+ bug bounty reports |
 | **AI Attack Suite** | Shannon autonomous AI pentester — real exploit execution with CVSS reports |
 | **Takeover Checker** | CNAME chain analysis, 42+ service fingerprints, NS/MX takeover detection |
-| **Attack Path Mapper** | MITRE ATT&CK-mapped paths for AD, AWS, Azure, GCP, and network infrastructure |
+| **Attack Path Mapper** | MITRE ATT&CK paths for AD/AWS/Azure/GCP; APT Groups browser (187 threat actors, country attribution, MITRE descriptions); CVE correlation; intel sync |
 | **Mobile Scanner (MSRA)** | APK/IPA static analysis, dynamic analysis, AI PoC generation, findings federation into central dashboard |
-| **Test Case Generator** | OWASP WSTG-based test cases (Standard) or Claude-powered custom cases (AI-Assisted) |
+| **Test Case Generator** | 169 test cases across 18 categories sourced from HackerOne/Bugcrowd reports, PortSwigger research, OWASP WSTG — Standard or AI-Assisted mode |
+| **Network Map** | Interactive WebGL graph of assets/findings per scan; severity-colored nodes; attack path highlighting |
 
 ### Mobile Security (MSRA)
 
