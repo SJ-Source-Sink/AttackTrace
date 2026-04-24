@@ -179,8 +179,8 @@ services:
     restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
-      # Internal URL used by Next.js server-side for API rewrites
-      INTERNAL_API_URL: http://backend:8000/api/v1
+      # Internal URL used by Next.js server-side rewrites (next.config.ts reads BACKEND_URL)
+      BACKEND_URL: http://backend:8000
       NODE_ENV: production
     ports:
       - "3000:3000"

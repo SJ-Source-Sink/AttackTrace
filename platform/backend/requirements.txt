@@ -22,3 +22,4 @@ structlog>=24.0.0
 networkx>=3.0
 wafw00f>=2.2.0
 dnspython>=2.6.0
+playwright>=1.40.0

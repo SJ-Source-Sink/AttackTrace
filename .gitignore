@@ -72,6 +72,8 @@ build/
 out/
 *.pack
 *.node
+tsconfig.tsbuildinfo
+*.tsbuildinfo
 
 # BFG reports
 ..bfg-report/

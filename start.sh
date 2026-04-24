@@ -295,8 +295,20 @@ echo $! > "$PIDS_DIR/frontend.pid"
 ok "Frontend started (pid $(cat "$PIDS_DIR/frontend.pid")) → logs/frontend.log"
 
 # MSRA (Mobile Security Review Assistant) — optional sidecar on port 5001
-MSRA_DIR="/Users/sai/Desktop/Coding/MSRA"
-if [ -f "$MSRA_DIR/server.py" ]; then
+# Looks for MSRA in common locations; set MSRA_DIR env var to override.
+if [ -z "${MSRA_DIR:-}" ]; then
+  for candidate in \
+    "$REPO_ROOT/../MSRA" \
+    "$HOME/MSRA" \
+    "/opt/msra" \
+    "/opt/MSRA"; do
+    if [ -f "$candidate/server.py" ]; then
+      MSRA_DIR="$candidate"
+      break
+    fi
+  done
+fi
+if [ -n "${MSRA_DIR:-}" ] && [ -f "$MSRA_DIR/server.py" ]; then
   info "Starting MSRA mobile scanner sidecar..."
   cd "$MSRA_DIR"
   python3 server.py > "$LOGS_DIR/msra.log" 2>&1 &
