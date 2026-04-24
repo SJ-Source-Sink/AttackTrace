@@ -272,7 +272,7 @@ ok "Backend started (pid $(cat "$PIDS_DIR/backend.pid")) → logs/backend.log"
 # Celery worker
 info "Starting Celery worker..."
 "$CELERY" -A app.workers.celery_app worker \
-  --loglevel=warning --concurrency=4 -Q scans,default \
+  --loglevel=warning --concurrency=4 -Q scans,default,ai \
   > "$LOGS_DIR/worker.log" 2>&1 &
 echo $! > "$PIDS_DIR/worker.pid"
 ok "Worker started (pid $(cat "$PIDS_DIR/worker.pid")) → logs/worker.log"
