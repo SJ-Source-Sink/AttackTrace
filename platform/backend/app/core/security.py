@@ -13,7 +13,8 @@ from uuid import UUID
 
 import redis.asyncio as aioredis
 from cryptography.fernet import Fernet
-from jose import JWTError, jwt
+import jwt
+from jwt.exceptions import InvalidTokenError
 from passlib.context import CryptContext
 
 from app.core.config import get_settings

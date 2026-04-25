@@ -3,6 +3,7 @@
 import React, { useCallback } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useAuth } from "@/lib/auth";
 import {
   LayoutDashboard,
   Radar,
@@ -37,6 +38,7 @@ interface NavItem {
   href: string;
   icon: React.ElementType;
   badge?: string;
+  toolKey?: string;
   children?: NavItem[];
 }
 
@@ -50,26 +52,31 @@ const navItems: NavItem[] = [
     label: "Scans",
     href: "/scans",
     icon: Radar,
+    toolKey: "scans",
   },
   {
     label: "Assets",
     href: "/assets",
     icon: Globe,
+    toolKey: "assets",
   },
   {
     label: "Findings",
     href: "/findings",
     icon: ShieldAlert,
+    toolKey: "findings",
   },
   {
     label: "Network Map",
     href: "/network",
     icon: Share2,
+    toolKey: "network_graph",
   },
   {
     label: "Reports",
     href: "/reports",
     icon: FileText,
+    toolKey: "reports",
   },
 ];
 
@@ -78,26 +85,31 @@ const toolItems: NavItem[] = [
     label: "Nmap Scanner",
     href: "/nmap",
     icon: Network,
+    toolKey: "nmap",
   },
   {
     label: "Nuclei Scanner",
     href: "/nuclei",
     icon: Crosshair,
+    toolKey: "nuclei",
   },
   {
     label: "ffuf Fuzzer",
     href: "/ffuf",
     icon: Wind,
+    toolKey: "ffuf",
   },
   {
     label: "Firewall Scanner",
     href: "/firewall",
     icon: Shield,
+    toolKey: "firewall",
   },
   {
     label: "Test Case Generator",
     href: "/test-generator",
     icon: FlaskConical,
+    toolKey: "test_generator",
   },
 ];
 
@@ -106,11 +118,13 @@ const mobileItems: NavItem[] = [
     label: "Mobile Scanner",
     href: "/mobile",
     icon: Smartphone,
+    toolKey: "mobile",
   },
   {
     label: "Pattern Library",
     href: "/mobile/patterns",
     icon: BookOpen,
+    toolKey: "mobile",
   },
 ];
 
@@ -119,22 +133,26 @@ const attackSuiteItems: NavItem[] = [
     label: "Attack Suite",
     href: "/attack-suite",
     icon: Swords,
+    toolKey: "attack_suite",
   },
   {
     label: "AI Attack Suite",
     href: "/ai-attack-suite",
     icon: BrainCircuit,
     badge: "AI",
+    toolKey: "attack_suite",
   },
   {
     label: "Takeover Checker",
     href: "/takeover",
     icon: GitFork,
+    toolKey: "takeover",
   },
   {
     label: "Attack Path Mapper",
     href: "/attackmapper",
     icon: Map,
+    toolKey: "attackmapper",
   },
 ];
 
@@ -202,6 +220,7 @@ const NavLink = React.memo(function NavLink({ item, isActive }: { item: NavItem;
 
 export function Sidebar({ className }: SidebarProps) {
   const pathname = usePathname();
+  const { hasToolAccess } = useAuth();
 
   const isActive = useCallback(
     (href: string) => {
@@ -210,6 +229,16 @@ export function Sidebar({ className }: SidebarProps) {
     },
     [pathname],
   );
+
+  const filterItems = useCallback(
+    (items: NavItem[]) => items.filter((item) => item.toolKey ? hasToolAccess(item.toolKey) : true),
+    [hasToolAccess],
+  );
+
+  const visibleNavItems = filterItems(navItems);
+  const visibleToolItems = filterItems(toolItems);
+  const visibleMobileItems = filterItems(mobileItems);
+  const visibleAttackSuiteItems = filterItems(attackSuiteItems);
 
   return (
     <aside
@@ -231,57 +260,65 @@ export function Sidebar({ className }: SidebarProps) {
 
       {/* Navigation */}
       <nav className="flex-1 overflow-y-auto p-3 space-y-0.5">
-        <div className="mb-4">
-          <div className="px-3 pb-2">
-            <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-              Platform
-            </p>
+        {visibleNavItems.length > 0 && (
+          <div className="mb-4">
+            <div className="px-3 pb-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                Platform
+              </p>
+            </div>
+            <div className="space-y-0.5">
+              {visibleNavItems.map((item) => (
+                <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
+              ))}
+            </div>
           </div>
-          <div className="space-y-0.5">
-            {navItems.map((item) => (
-              <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
-            ))}
-          </div>
-        </div>
+        )}
 
-        <div className="mb-4">
-          <div className="px-3 pb-2">
-            <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-              Tools
-            </p>
+        {visibleToolItems.length > 0 && (
+          <div className="mb-4">
+            <div className="px-3 pb-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                Tools
+              </p>
+            </div>
+            <div className="space-y-0.5">
+              {visibleToolItems.map((item) => (
+                <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
+              ))}
+            </div>
           </div>
-          <div className="space-y-0.5">
-            {toolItems.map((item) => (
-              <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
-            ))}
-          </div>
-        </div>
+        )}
 
-        <div className="mb-4">
-          <div className="px-3 pb-2">
-            <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-              Mobile Security
-            </p>
+        {visibleMobileItems.length > 0 && (
+          <div className="mb-4">
+            <div className="px-3 pb-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                Mobile Security
+              </p>
+            </div>
+            <div className="space-y-0.5">
+              {visibleMobileItems.map((item) => (
+                <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
+              ))}
+            </div>
           </div>
-          <div className="space-y-0.5">
-            {mobileItems.map((item) => (
-              <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
-            ))}
-          </div>
-        </div>
+        )}
 
-        <div className="mb-4">
-          <div className="px-3 pb-2">
-            <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-              Attack Suites
-            </p>
+        {visibleAttackSuiteItems.length > 0 && (
+          <div className="mb-4">
+            <div className="px-3 pb-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                Attack Suites
+              </p>
+            </div>
+            <div className="space-y-0.5">
+              {visibleAttackSuiteItems.map((item) => (
+                <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
+              ))}
+            </div>
           </div>
-          <div className="space-y-0.5">
-            {attackSuiteItems.map((item) => (
-              <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
-            ))}
-          </div>
-        </div>
+        )}
 
         <div className="mb-4">
           <div className="px-3 pb-2">

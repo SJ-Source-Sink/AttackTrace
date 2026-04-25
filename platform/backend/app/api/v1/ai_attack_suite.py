@@ -21,7 +21,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 
 from app.core.config import get_settings
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, require_tool
 from app.models.db.user import User
 
 router = APIRouter(prefix="/ai-attack-suite", tags=["AIAttackSuite"])
@@ -324,7 +324,7 @@ async def _stream_shannon(scan_id: str, req: ShannonScanRequest) -> AsyncGenerat
 @router.post("/scan", summary="Run a Shannon AI security scan and stream results")
 async def run_shannon_scan(
     payload: ShannonScanRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("attack_suite"))],
 ) -> StreamingResponse:
     if not shutil.which("shannon") and not shutil.which("npx"):
         raise HTTPException(

@@ -63,9 +63,12 @@ class UserResponse(BaseModel):
     is_superuser: bool
     avatar_url: Optional[str] = None
     created_at: str
+    role: Optional[str] = None
+    org_id: Optional[str] = None
+    tool_permissions: Optional[list[str]] = None
 
     @classmethod
-    def from_orm_user(cls, user) -> "UserResponse":
+    def from_orm_user(cls, user, member=None) -> "UserResponse":
         return cls(
             id=str(user.id),
             email=user.email,
@@ -74,4 +77,7 @@ class UserResponse(BaseModel):
             is_superuser=user.is_superuser,
             avatar_url=user.avatar_url,
             created_at=user.created_at.isoformat(),
+            role=member.role.value if member else None,
+            org_id=str(member.org_id) if member else None,
+            tool_permissions=member.tool_permissions if member else None,
         )

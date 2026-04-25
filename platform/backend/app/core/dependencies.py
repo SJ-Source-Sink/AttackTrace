@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError
+from jwt.exceptions import InvalidTokenError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,7 +53,7 @@ async def get_current_user(
         user_id: str = payload.get("sub")
         if user_id is None:
             raise credentials_exception
-    except JWTError:
+    except (InvalidTokenError, ValueError):
         # Fall back to API key auth
         return await _authenticate_api_key(token, db, credentials_exception)
 
@@ -177,6 +177,112 @@ class RoleChecker:
 def require_role(*roles: str):
     """Convenience function that returns a RoleChecker dependency."""
     return RoleChecker(list(roles))
+
+
+TOOL_KEYS = frozenset({
+    "nmap", "nuclei", "ffuf", "attack_suite", "burp_analyzer",
+    "test_generator", "ai_triage", "takeover", "attackmapper",
+    "mobile", "firewall", "network_graph", "scans", "findings",
+    "assets", "reports",
+})
+
+TOOL_LABELS = {
+    "nmap": "Nmap Scanner",
+    "nuclei": "Nuclei Scanner",
+    "ffuf": "Web Fuzzer (ffuf)",
+    "attack_suite": "Attack Suite",
+    "burp_analyzer": "Burp Analyzer",
+    "test_generator": "Test Case Generator",
+    "ai_triage": "AI Triage",
+    "takeover": "Subdomain Takeover",
+    "attackmapper": "Attack Mapper",
+    "mobile": "Mobile Security",
+    "firewall": "Firewall Config",
+    "network_graph": "Network Graph",
+    "scans": "Scan Jobs",
+    "findings": "Findings",
+    "assets": "Assets",
+    "reports": "Reports",
+}
+
+
+class ToolChecker:
+    """
+    Dependency that enforces per-tool access control.
+    - OWNER / ADMIN: always allowed
+    - VIEWER: always blocked from tool execution
+    - ANALYST with tool_permissions=None: allowed (unrestricted, backward compat)
+    - ANALYST with tool_permissions=[]: blocked from all tools
+    - ANALYST with tool_permissions=['nmap',...]: allowed only those tools
+    """
+
+    def __init__(self, tool_key: str) -> None:
+        self.tool_key = tool_key
+
+    async def __call__(
+        self,
+        current_user: Annotated[User, Depends(get_current_user)],
+        db: AsyncSession = Depends(get_db),
+    ) -> User:
+        from app.models.db.user import OrgMember, MemberRole
+        from sqlalchemy import select
+
+        org_id_str = getattr(current_user, "_jwt_org_id", None)
+        if not org_id_str:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"error": {"code": "NO_ORG_CONTEXT", "message": "No organization context"}},
+            )
+
+        try:
+            org_uuid = UUID(org_id_str)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"error": {"code": "INVALID_ORG", "message": "Invalid org ID"}},
+            )
+
+        result = await db.execute(
+            select(OrgMember).where(
+                OrgMember.user_id == current_user.id,
+                OrgMember.org_id == org_uuid,
+            )
+        )
+        member = result.scalar_one_or_none()
+        if not member:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"error": {"code": "NOT_MEMBER", "message": "Not a member of this organization"}},
+            )
+
+        if member.role in (MemberRole.OWNER, MemberRole.ADMIN):
+            return current_user
+
+        if member.role == MemberRole.VIEWER:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"error": {"code": "VIEWER_CANNOT_RUN_TOOLS",
+                                  "message": "Viewers cannot execute tools"}},
+            )
+
+        # ANALYST: check tool_permissions
+        if member.tool_permissions is None:
+            return current_user  # unrestricted
+
+        if self.tool_key not in member.tool_permissions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"error": {
+                    "code": "TOOL_ACCESS_DENIED",
+                    "message": f"You don't have access to the '{self.tool_key}' tool",
+                }},
+            )
+        return current_user
+
+
+def require_tool(tool_key: str) -> ToolChecker:
+    """Convenience wrapper — use as a FastAPI dependency."""
+    return ToolChecker(tool_key)
 
 
 async def get_current_org_id(

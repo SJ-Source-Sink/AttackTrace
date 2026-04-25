@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.core.dependencies import get_current_org_id, get_current_user
+from app.core.dependencies import get_current_org_id, get_current_user, require_tool
 from app.models.db.asset import Asset
 from app.models.db.finding import Finding, FindingSeverity
 from app.models.db.org import Organization
@@ -94,7 +94,7 @@ def _check_ai_configured() -> None:
 )
 async def triage_finding_endpoint(
     payload: TriageRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("ai_triage"))],
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -169,7 +169,7 @@ async def triage_finding_endpoint(
 )
 async def bulk_triage_endpoint(
     payload: BulkTriageRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("ai_triage"))],
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -215,7 +215,7 @@ async def bulk_triage_endpoint(
 )
 async def nl_search_endpoint(
     payload: NLSearchRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("ai_triage"))],
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -254,7 +254,7 @@ async def nl_search_endpoint(
 )
 async def summarize_scan_endpoint(
     payload: ExecSummaryRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("ai_triage"))],
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -322,7 +322,7 @@ async def summarize_scan_endpoint(
 )
 async def generate_ticket_endpoint(
     payload: TicketRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("ai_triage"))],
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:

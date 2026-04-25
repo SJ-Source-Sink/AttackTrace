@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, require_tool
 from app.models.db.user import User
 
 router = APIRouter(prefix="/attackmapper", tags=["AttackMapper"])
@@ -209,7 +209,7 @@ async def _stream_attackmapper(scan_id: str, req: AttackMapperRequest) -> AsyncG
 @router.post("/scan", summary="Run an AttackMapper analysis and stream results")
 async def run_attackmapper_scan(
     payload: AttackMapperRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("attackmapper"))],
 ) -> StreamingResponse:
     if not shutil.which("attackmapper"):
         raise HTTPException(
@@ -360,7 +360,7 @@ async def _stream_update_intel() -> AsyncGenerator[str, None]:
 
 @router.post("/update-intel", summary="Update threat intelligence from internet sources (streaming)")
 async def update_intel(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("attackmapper"))],
 ) -> StreamingResponse:
     if not shutil.which("attackmapper"):
         raise HTTPException(
@@ -644,7 +644,7 @@ def _tokenize(text: str) -> set[str]:
 @router.post("/correlate", summary="Correlate CVE IDs to attack techniques via keyword scoring")
 async def correlate_cves(
     payload: CorrelateRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("attackmapper"))],
 ) -> dict:
     """
     Match CVE IDs to relevant attack techniques using keyword overlap scoring.

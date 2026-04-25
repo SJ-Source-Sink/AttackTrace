@@ -20,7 +20,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_org_id, get_current_user
+from app.core.dependencies import get_current_org_id, get_current_user, require_tool
 from app.models.db.audit import AuditLog
 from app.models.db.user import User
 
@@ -466,7 +466,7 @@ async def list_wordlists(
 async def run_ffuf_scan(
     payload: FfufScanRequest,
     request: Request,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("ffuf"))],
     org_id: uuid.UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:

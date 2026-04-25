@@ -4,11 +4,12 @@ import React, { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   UserPlus, Trash2, MoreVertical, Loader2, Shield, Eye, Edit, Crown,
-  Copy, Check, Link2, RefreshCw, ChevronDown,
+  Copy, Check, Link2, RefreshCw, Settings2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
@@ -20,9 +21,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/shared/loading-skeleton";
 import { orgApi } from "@/lib/api";
-import { formatDate } from "@/lib/utils";
+import { useAuth } from "@/lib/auth";
+import { formatDate, cn } from "@/lib/utils";
 import { toast } from "sonner";
 import type { OrgMember, UserRole } from "@/types";
+import { ALL_TOOL_KEYS, TOOL_LABELS } from "@/types";
 
 const ROLE_CONFIG: Record<UserRole, { label: string; icon: React.ElementType; color: string; desc: string }> = {
   owner:   { label: "Owner",   icon: Crown,  color: "text-yellow-400", desc: "Full access" },
@@ -35,6 +38,87 @@ function getInitials(name: string) {
   return name.split(" ").map((n) => n[0]).join("").toUpperCase().slice(0, 2);
 }
 
+function PermissionsDialog({ member, onClose, onSave }: {
+  member: OrgMember;
+  onClose: () => void;
+  onSave: (permissions: string[] | null) => Promise<void>;
+}) {
+  const [selected, setSelected] = useState<Set<string>>(
+    member.tool_permissions === null || member.tool_permissions === undefined
+      ? new Set(ALL_TOOL_KEYS)
+      : new Set(member.tool_permissions)
+  );
+  const [isUnrestricted, setIsUnrestricted] = useState(
+    member.tool_permissions === null || member.tool_permissions === undefined
+  );
+  const [saving, setSaving] = useState(false);
+
+  const toggle = (key: string) => {
+    setIsUnrestricted(false);
+    const next = new Set(selected);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    setSelected(next);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const perms = isUnrestricted ? null : Array.from(selected);
+      await onSave(perms);
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent className="max-w-xl bg-zinc-900 border-zinc-700">
+        <DialogHeader>
+          <DialogTitle>Tool Permissions — {member.full_name}</DialogTitle>
+          <DialogDescription>
+            Control which tools this member can execute. Owners and Admins always have full access.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 pb-2 border-b border-zinc-700">
+            <Checkbox
+              checked={isUnrestricted}
+              onCheckedChange={(v) => {
+                setIsUnrestricted(!!v);
+                if (v) setSelected(new Set(ALL_TOOL_KEYS));
+              }}
+            />
+            <label className="text-sm font-medium text-zinc-200 cursor-pointer">Unrestricted (all tools)</label>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {ALL_TOOL_KEYS.map(key => (
+              <div key={key} className="flex items-center gap-2">
+                <Checkbox
+                  checked={selected.has(key)}
+                  onCheckedChange={() => toggle(key)}
+                  disabled={isUnrestricted}
+                />
+                <label className={cn("text-sm cursor-pointer", isUnrestricted ? "text-zinc-500" : "text-zinc-300")}>
+                  {TOOL_LABELS[key]}
+                </label>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={handleSave} disabled={saving}>
+            {saving ? "Saving..." : "Save Permissions"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function getInviteUrl(code: string) {
   const base = typeof window !== "undefined" ? window.location.origin : "";
   return `${base}/register?code=${code}`;
@@ -42,6 +126,7 @@ function getInviteUrl(code: string) {
 
 export default function MembersPage() {
   const queryClient = useQueryClient();
+  const { user: currentUser } = useAuth();
 
   // Add member dialog state
   const [showAdd, setShowAdd] = useState(false);
@@ -49,6 +134,9 @@ export default function MembersPage() {
   const [newEmail, setNewEmail]     = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [newRole, setNewRole]       = useState<UserRole>("analyst");
+
+  // Permissions dialog state
+  const [permTarget, setPermTarget] = useState<OrgMember | null>(null);
 
   // Invite link copy state
   const [linkCopied, setLinkCopied] = useState(false);
@@ -109,6 +197,17 @@ export default function MembersPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["org", "members"] });
       toast.success("Role updated");
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  // Update permissions
+  const permMutation = useMutation({
+    mutationFn: ({ userId, perms }: { userId: string; perms: string[] | null }) =>
+      orgApi.updateMemberPermissions(userId, perms),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["org", "members"] });
+      toast.success("Permissions updated");
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -228,7 +327,7 @@ export default function MembersPage() {
                           <MoreVertical className="h-4 w-4" />
                         </Button>
                       </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="w-44">
+                      <DropdownMenuContent align="end" className="w-52">
                         <DropdownMenuItem onClick={() => updateRoleMutation.mutate({ userId: member.user_id, role: "admin" })}>
                           Make Admin
                         </DropdownMenuItem>
@@ -238,6 +337,16 @@ export default function MembersPage() {
                         <DropdownMenuItem onClick={() => updateRoleMutation.mutate({ userId: member.user_id, role: "viewer" })}>
                           Make Viewer
                         </DropdownMenuItem>
+                        {(currentUser?.role === "owner" || currentUser?.role === "admin") &&
+                          (member.role === "analyst" || member.role === "viewer") && (
+                          <>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem onClick={() => setPermTarget(member)}>
+                              <Settings2 className="h-3.5 w-3.5 mr-2" />
+                              Manage Permissions
+                            </DropdownMenuItem>
+                          </>
+                        )}
                         <DropdownMenuSeparator />
                         <DropdownMenuItem
                           className="text-red-400 focus:text-red-400 focus:bg-red-400/10"
@@ -253,6 +362,17 @@ export default function MembersPage() {
               );
             })}
       </div>
+
+      {/* Permissions Dialog */}
+      {permTarget && (
+        <PermissionsDialog
+          member={permTarget}
+          onClose={() => setPermTarget(null)}
+          onSave={async (perms) => {
+            await permMutation.mutateAsync({ userId: permTarget.user_id, perms });
+          }}
+        />
+      )}
 
       {/* Add Member Dialog */}
       <Dialog open={showAdd} onOpenChange={setShowAdd}>

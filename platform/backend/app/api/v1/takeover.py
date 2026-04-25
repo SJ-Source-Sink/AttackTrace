@@ -26,7 +26,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, require_tool
 from app.models.db.user import User
 
 router = APIRouter(prefix="/takeover", tags=["Takeover"])
@@ -1031,7 +1031,7 @@ async def _stream_takeover_scan(
 @router.post("/scan")
 async def scan_takeover(
     req: TakeoverRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_tool("takeover")),
 ) -> StreamingResponse:
     """
     Stream subdomain/domain takeover analysis via SSE.

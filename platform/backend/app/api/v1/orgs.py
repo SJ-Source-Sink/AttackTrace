@@ -28,6 +28,7 @@ from app.models.schemas.org import (
     ApiKeyResponse,
     CredentialsUpdate,
     MemberInvite,
+    MemberPermissionsUpdate,
     MemberResponse,
     MemberUpdate,
     OrgCreate,
@@ -313,6 +314,47 @@ async def update_member_role(
     user_result = await db.execute(select(User).where(User.id == user_id))
     user = user_result.scalar_one()
     return MemberResponse.from_orm(member, user).model_dump()
+
+
+@router.patch(
+    "/{org_id}/members/{user_id}/permissions",
+    summary="Update a member's tool permissions",
+)
+async def update_member_permissions(
+    org_id: UUID,
+    user_id: UUID,
+    payload: MemberPermissionsUpdate,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    await _get_org_or_404(db, org_id, current_user.id)
+    await _require_org_role(db, current_user.id, org_id, [MemberRole.OWNER, MemberRole.ADMIN])
+
+    result = await db.execute(
+        select(OrgMember).where(OrgMember.user_id == user_id, OrgMember.org_id == org_id)
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"code": "MEMBER_NOT_FOUND", "message": "Member not found"}},
+        )
+
+    if member.role in (MemberRole.OWNER, MemberRole.ADMIN):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"code": "CANNOT_RESTRICT_ADMIN",
+                              "message": "Owners and Admins always have full access"}},
+        )
+
+    member.tool_permissions = payload.tool_permissions
+    db.add(member)
+    await db.flush()
+
+    user_result = await db.execute(select(User).where(User.id == user_id))
+    target_user = user_result.scalar_one()
+    return MemberResponse.from_orm(member, target_user).model_dump()
 
 
 @router.delete(
@@ -705,6 +747,7 @@ async def list_current_org_members(
             "full_name": user.full_name,
             "role": member.role.value,
             "joined_at": member.joined_at.isoformat(),
+            "tool_permissions": member.tool_permissions,
         }
         for member, user in rows
     ]
@@ -732,6 +775,18 @@ async def update_current_org_member_role(
     user = user_result.scalar_one()
     await db.flush()
     return {"user_id": str(user_id), "email": user.email, "full_name": user.full_name, "role": member.role.value, "joined_at": member.joined_at.isoformat()}
+
+
+@org_router.patch("/members/{user_id}/permissions", summary="Update member tool permissions in current org")
+async def update_current_org_member_permissions(
+    user_id: UUID,
+    payload: MemberPermissionsUpdate,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    return await update_member_permissions(org_id, user_id, payload, request, current_user, db)
 
 
 @org_router.delete("/members/{user_id}", summary="Remove member from current org", status_code=204)

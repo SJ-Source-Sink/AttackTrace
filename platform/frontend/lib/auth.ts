@@ -19,7 +19,9 @@ export function setAccessToken(token: string | null): void {
   if (typeof window === "undefined") return;
   if (token) {
     sessionStorage.setItem(ACCESS_TOKEN_KEY, token);
-    localStorage.setItem(ACCESS_TOKEN_KEY, token);
+    // Access token stored only in sessionStorage (cleared on tab close).
+    // Remove any stale copy from localStorage.
+    localStorage.removeItem(ACCESS_TOKEN_KEY);
   } else {
     sessionStorage.removeItem(ACCESS_TOKEN_KEY);
     localStorage.removeItem(ACCESS_TOKEN_KEY);
@@ -116,6 +118,7 @@ interface AuthContextValue {
   login: (credentials: LoginRequest) => Promise<void>;
   register: (data: RegisterRequest) => Promise<void>;
   logout: () => void;
+  hasToolAccess: (toolKey: string) => boolean;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -213,6 +216,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null);
   }, []);
 
+  const hasToolAccess = useCallback((toolKey: string): boolean => {
+    if (!user) return false;
+    if (user.role === "owner" || user.role === "admin") return true;
+    if (user.role === "viewer") return false;
+    // analyst: null means unrestricted
+    if (user.tool_permissions === null || user.tool_permissions === undefined) return true;
+    return user.tool_permissions.includes(toolKey);
+  }, [user]);
+
   const value: AuthContextValue = {
     user,
     isLoading,
@@ -220,6 +232,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     login,
     register,
     logout,
+    hasToolAccess,
   };
 
   return React.createElement(AuthContext.Provider, { value }, children);

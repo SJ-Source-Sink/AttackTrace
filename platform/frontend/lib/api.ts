@@ -1,4 +1,5 @@
 import { getAccessToken, refreshAccessToken } from "@/lib/auth";
+import type { OrgMember } from "@/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
 
@@ -240,6 +241,8 @@ export const orgApi = {
   regenerateInviteLink: () => api.post<{ code: string; id: string }>("/org/invite-link/regenerate"),
   createMember: (data: { full_name: string; email: string; password: string; role: string }) =>
     api.post<{ user_id: string; full_name: string; email: string; role: string; joined_at: string }>("/org/members/create", data),
+  updateMemberPermissions: (userId: string, toolPermissions: string[] | null) =>
+    api.patch<OrgMember>(`/org/members/${userId}/permissions`, { tool_permissions: toolPermissions }),
 };
 
 export interface InviteCodeItem {

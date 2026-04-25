@@ -20,7 +20,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_org_id, get_current_user
+from app.core.dependencies import get_current_org_id, get_current_user, require_tool
 from app.models.db.audit import AuditLog
 from app.models.db.user import User
 
@@ -372,7 +372,7 @@ class PortFirewallRequest(BaseModel):
 async def detect_waf(
     payload: WafDetectRequest,
     request: Request,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("firewall"))],
     org_id: uuid.UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> JSONResponse:
@@ -551,7 +551,7 @@ async def _stream_bypass(
 async def probe_waf_bypass(
     payload: WafBypassRequest,
     request: Request,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("firewall"))],
     org_id: uuid.UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
@@ -887,7 +887,7 @@ async def _stream_port_map(
 async def port_firewall_map(
     payload: PortFirewallRequest,
     request: Request,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("firewall"))],
     org_id: uuid.UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
@@ -1229,7 +1229,7 @@ def _analyze_anomalies(rules: list[dict]) -> list[dict]:
 @router.post("/rules/analyze", summary="Analyze firewall rule file for anomalies")
 async def analyze_firewall_rules(
     request: Request,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("firewall"))],
     org_id: uuid.UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
     file: UploadFile = File(...),

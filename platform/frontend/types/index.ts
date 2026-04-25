@@ -7,10 +7,12 @@ export interface User {
   email: string;
   full_name: string;
   role: UserRole;
+  org_id?: string;
   organization_id: string;
   created_at: string;
   last_login?: string;
   avatar_url?: string;
+  tool_permissions: string[] | null;
 }
 
 export type UserRole = "owner" | "admin" | "analyst" | "viewer";
@@ -54,7 +56,36 @@ export interface OrgMember {
   full_name: string;
   role: UserRole;
   joined_at: string;
+  tool_permissions: string[] | null;
 }
+
+export const ALL_TOOL_KEYS = [
+  "nmap", "nuclei", "ffuf", "attack_suite", "burp_analyzer",
+  "test_generator", "ai_triage", "takeover", "attackmapper",
+  "mobile", "firewall", "network_graph", "scans", "findings",
+  "assets", "reports",
+] as const;
+
+export type ToolKey = typeof ALL_TOOL_KEYS[number];
+
+export const TOOL_LABELS: Record<string, string> = {
+  nmap: "Nmap Scanner",
+  nuclei: "Nuclei Scanner",
+  ffuf: "Web Fuzzer (ffuf)",
+  attack_suite: "Attack Suite",
+  burp_analyzer: "Burp Analyzer",
+  test_generator: "Test Case Generator",
+  ai_triage: "AI Triage",
+  takeover: "Subdomain Takeover",
+  attackmapper: "Attack Mapper",
+  mobile: "Mobile Security",
+  firewall: "Firewall Config",
+  network_graph: "Network Graph",
+  scans: "Scan Jobs",
+  findings: "Findings",
+  assets: "Assets",
+  reports: "Reports",
+};
 
 export interface ApiKey {
   id: string;

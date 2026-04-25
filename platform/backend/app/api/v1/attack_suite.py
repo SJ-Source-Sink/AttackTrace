@@ -32,7 +32,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, require_tool
 from app.core.config import get_settings
 from app.models.db.user import User
 from app.api.v1.attack_patterns import (
@@ -2977,7 +2977,7 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGe
 @router.post("/scan")
 async def run_attack_suite(
     payload: AttackSuiteRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("attack_suite"))],
 ) -> StreamingResponse:
     scan_id = str(uuid.uuid4())
     return StreamingResponse(
@@ -3020,7 +3020,7 @@ async def list_modules(
 async def analyze_burp_file(
     file: UploadFile = File(...),
     ai_analysis: bool = Form(default=True),
-    current_user: Annotated[User, Depends(get_current_user)] = None,
+    current_user: Annotated[User, Depends(require_tool("burp_analyzer"))] = None,
 ) -> StreamingResponse:
     """
     Upload a Burp Suite HTTP History XML export and receive a streaming SSE

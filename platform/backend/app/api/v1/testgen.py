@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.core.config import get_settings
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, require_tool
 from app.models.db.user import User
 from app.api.v1.attack_patterns import (
     XSS_PAYLOADS, XSS_TEST_PARAMS, DOM_XSS_PAYLOADS, DOM_XSS_SINK_PARAMS,
@@ -3981,7 +3981,7 @@ Return ONLY the JSON array."""
 @router.post("/standard", summary="Generate test cases (rule-based library)")
 async def generate_standard(
     payload: StandardRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("test_generator"))],
 ) -> dict:
     cases = _filter_test_cases(payload.target_types, payload.tech_stack, payload.scope)
     sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -3992,7 +3992,7 @@ async def generate_standard(
 @router.post("/ai", summary="Generate test cases with AI (SSE stream)")
 async def generate_ai(
     payload: AIRequest,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("test_generator"))],
 ) -> StreamingResponse:
     if not settings.ANTHROPIC_API_KEY:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

@@ -38,7 +38,7 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, get_current_org_id
+from app.core.dependencies import get_current_user, get_current_org_id, require_tool
 from app.models.db.user import User
 from app.models.db.finding import Finding, FindingSeverity, FindingStatus
 
@@ -161,7 +161,7 @@ async def get_scan_status(
 @router.delete("/scans/{scan_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a scan")
 async def delete_scan(
     scan_id: str,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("mobile"))],
 ) -> None:
     resp = await _msra_request("DELETE", f"/api/scans/{scan_id}")
     if resp.status_code not in (200, 204):
@@ -172,7 +172,7 @@ async def delete_scan(
 
 @router.post("/upload", summary="Upload a mobile app file for scanning")
 async def upload_file(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("mobile"))],
     file: UploadFile = File(...),
 ) -> Response:
     allowed_suffixes = {".apk", ".apkm", ".xapk", ".ipa", ".jar", ".exe", ".dll"}
@@ -299,7 +299,7 @@ async def adb_devices(
 async def start_dynamic(
     scan_id: str,
     request: Request,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("mobile"))],
 ) -> Response:
     body = await request.json()
     resp = await _msra_request("POST", "/api/dynamic/verify", json=body)
@@ -328,7 +328,7 @@ async def dynamic_job_status(
 @router.post("/ai/poc", summary="Generate PoC code for a finding")
 async def generate_poc(
     request: Request,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("mobile"))],
 ) -> Response:
     body = await request.json()
     resp = await _msra_request("POST", "/api/generate-poc", json=body)
@@ -356,7 +356,7 @@ async def list_rules(
 @router.post("/rules", summary="Create a custom detection rule", status_code=status.HTTP_201_CREATED)
 async def create_rule(
     request: Request,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("mobile"))],
 ) -> Response:
     body = await request.json()
     resp = await _msra_request("POST", "/api/rules", json=body)
@@ -367,7 +367,7 @@ async def create_rule(
 async def update_rule(
     rule_id: str,
     request: Request,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("mobile"))],
 ) -> Response:
     body = await request.json()
     resp = await _msra_request("PUT", f"/api/rules/{rule_id}", json=body)
@@ -377,7 +377,7 @@ async def update_rule(
 @router.delete("/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a custom rule")
 async def delete_rule(
     rule_id: str,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("mobile"))],
 ) -> None:
     await _msra_request("DELETE", f"/api/rules/{rule_id}")
 
@@ -528,7 +528,7 @@ async def _sync_msra_to_db(org_id: str, db: AsyncSession) -> dict:
 
 @router.post("/sync", summary="Sync MSRA findings into central findings DB")
 async def sync_msra_findings(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("mobile"))],
     org_id: Annotated[str, Depends(get_current_org_id)],
     db: AsyncSession = Depends(get_db),
 ) -> dict:

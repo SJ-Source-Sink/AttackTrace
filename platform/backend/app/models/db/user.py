@@ -4,7 +4,7 @@ User and OrgMember database models.
 
 import enum
 from datetime import datetime
-from typing import ClassVar, Optional
+from typing import Optional
 from uuid import UUID
 
 from sqlalchemy import (
@@ -15,7 +15,7 @@ from sqlalchemy import (
     String,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.dialects.postgresql import ARRAY, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -40,10 +40,6 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     is_superuser: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_login: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     avatar_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
-
-    # Transient JWT claim attributes (not persisted)
-    _jwt_org_id: ClassVar[Optional[str]] = None
-    _jwt_role: ClassVar[Optional[str]] = None
 
     # Relationships
     org_memberships: Mapped[list["OrgMember"]] = relationship(
@@ -80,6 +76,9 @@ class OrgMember(Base, TimestampMixin):
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
+    )
+    tool_permissions: Mapped[Optional[list[str]]] = mapped_column(
+        ARRAY(String(50)), nullable=True, default=None
     )
 
     # Relationships

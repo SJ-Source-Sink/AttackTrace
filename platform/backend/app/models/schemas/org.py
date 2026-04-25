@@ -116,6 +116,7 @@ class MemberResponse(BaseModel):
     joined_at: str
     email: str
     full_name: str
+    tool_permissions: Optional[list[str]] = None
 
     @classmethod
     def from_orm(cls, member, user) -> "MemberResponse":
@@ -126,7 +127,28 @@ class MemberResponse(BaseModel):
             joined_at=member.joined_at.isoformat(),
             email=user.email,
             full_name=user.full_name,
+            tool_permissions=member.tool_permissions,
         )
+
+
+class MemberPermissionsUpdate(BaseModel):
+    tool_permissions: Optional[list[str]] = None
+
+    @field_validator("tool_permissions")
+    @classmethod
+    def validate_tools(cls, v):
+        if v is None:
+            return v
+        valid = {
+            "nmap", "nuclei", "ffuf", "attack_suite", "burp_analyzer",
+            "test_generator", "ai_triage", "takeover", "attackmapper",
+            "mobile", "firewall", "network_graph", "scans", "findings",
+            "assets", "reports",
+        }
+        bad = set(v) - valid
+        if bad:
+            raise ValueError(f"Unknown tool keys: {bad}")
+        return list(set(v))
 
 
 class ApiKeyCreate(BaseModel):

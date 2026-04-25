@@ -195,7 +195,7 @@ async def scan_stream(
     # Authenticate: accept token from ?token= query param (EventSource can't set headers)
     # or fall back to Authorization header for non-browser clients.
     from uuid import UUID as _UUID
-    from jose import JWTError
+    from jwt.exceptions import InvalidTokenError
     from app.core.security import decode_token
 
     credentials_exception = HTTPException(
@@ -221,7 +221,7 @@ async def scan_stream(
         org_id_str = payload.get("org_id")
         if not user_id or not org_id_str:
             raise credentials_exception
-    except JWTError:
+    except (InvalidTokenError, ValueError):
         raise credentials_exception
 
     from sqlalchemy import select as _select

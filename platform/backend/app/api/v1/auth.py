@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
+from uuid import UUID
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -266,5 +267,19 @@ async def logout(
 )
 async def get_me(
     current_user: Annotated[User, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db),
 ) -> UserResponse:
-    return UserResponse.from_orm_user(current_user)
+    member = None
+    org_id_str = getattr(current_user, "_jwt_org_id", None)
+    if org_id_str:
+        try:
+            result = await db.execute(
+                select(OrgMember).where(
+                    OrgMember.user_id == current_user.id,
+                    OrgMember.org_id == UUID(org_id_str),
+                )
+            )
+            member = result.scalar_one_or_none()
+        except Exception:
+            pass
+    return UserResponse.from_orm_user(current_user, member=member)
