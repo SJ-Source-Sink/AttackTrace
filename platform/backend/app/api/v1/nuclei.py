@@ -11,17 +11,22 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, AsyncGenerator
+from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+import yaml  # type: ignore[import]
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user, require_tool
 from app.models.db.audit import AuditLog
 from app.models.db.user import User
+
+_settings = get_settings()
 
 # Cache CVSS scores to avoid hammering NVD for duplicate CVEs across scans
 _cvss_cache: dict[str, float | None] = {}
@@ -520,6 +525,134 @@ async def _get_templates() -> list[dict]:
     if _templates_cache is not None:
         return _templates_cache
     return await asyncio.to_thread(_load_templates_sync)
+
+
+def _extract_yaml_field(content: str, field: str) -> str | None:
+    """Extract a top-level YAML field value via regex (avoids full parse for speed)."""
+    pattern = rf"^{re.escape(field)}:\s*(.+)$"
+    match = re.search(pattern, content, re.MULTILINE)
+    return match.group(1).strip().strip("\"'") if match else None
+
+
+@router.get("/templates/browse", summary="Browse nuclei templates with enable/disable state")
+async def browse_templates(
+    search: str = "",
+    category: str = "",
+    page: int = 1,
+    per_page: int = 50,
+    current_user: Annotated[User, Depends(get_current_user)] = ...,  # type: ignore[assignment]
+    org_id: UUID = Depends(get_current_org_id),
+) -> dict:
+    """Browse nuclei templates from the templates directory with per-org enable/disable config."""
+    templates_dir = _find_templates_dir()
+    if not templates_dir:
+        return {"items": [], "total": 0, "page": page, "per_page": per_page}
+
+    # Read per-org template enable/disable config
+    config_path = (
+        Path(_settings.ATTACKTRACE_WORKSPACE_DIR) / str(org_id) / "nuclei_template_config.json"
+    )
+    config: dict = {}
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text())
+        except Exception:
+            config = {}
+
+    templates = []
+    for yaml_file in Path(templates_dir).rglob("*.yaml"):
+        # Skip helpers/profiles
+        if any(p in {"helpers", "profiles"} for p in yaml_file.parts):
+            continue
+        try:
+            content = yaml_file.read_text(errors="replace")[:2000]
+            template_id = _extract_yaml_field(content, "id")
+            if not template_id:
+                continue
+
+            name = _extract_yaml_field(content, "name") or template_id
+            severity = _extract_yaml_field(content, "severity")
+            tags_raw = _extract_yaml_field(content, "tags")
+            category_val = str(yaml_file.parent.name)
+
+            # Apply search filter
+            if search:
+                q = search.lower()
+                if q not in name.lower() and q not in template_id.lower():
+                    continue
+            if category and category.lower() not in category_val.lower():
+                continue
+
+            templates.append({
+                "id": template_id,
+                "name": name,
+                "severity": severity.lower() if severity else "unknown",
+                "category": category_val,
+                "tags": [t.strip() for t in (tags_raw or "").split(",") if t.strip()][:5],
+                "enabled": config.get(template_id, True),
+                "path": str(yaml_file.relative_to(templates_dir)),
+            })
+        except Exception:
+            continue
+
+    total = len(templates)
+    offset = (page - 1) * per_page
+    return {
+        "items": templates[offset : offset + per_page],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+    }
+
+
+@router.post("/templates/{template_id}/toggle", summary="Enable or disable a nuclei template for this org")
+async def toggle_template(
+    template_id: str,
+    body: dict,
+    current_user: Annotated[User, Depends(get_current_user)] = ...,  # type: ignore[assignment]
+    org_id: UUID = Depends(get_current_org_id),
+) -> dict:
+    """Toggle a nuclei template on or off for the current org. Body: {"enabled": bool}"""
+    config_path = (
+        Path(_settings.ATTACKTRACE_WORKSPACE_DIR) / str(org_id) / "nuclei_template_config.json"
+    )
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config: dict = {}
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text())
+        except Exception:
+            config = {}
+    config[template_id] = bool(body.get("enabled", True))
+    config_path.write_text(json.dumps(config, indent=2))
+    return {"template_id": template_id, "enabled": config[template_id]}
+
+
+@router.post("/templates/upload", summary="Upload a custom nuclei template")
+async def upload_template(
+    file: UploadFile,
+    current_user: Annotated[User, Depends(get_current_user)] = ...,  # type: ignore[assignment]
+    org_id: UUID = Depends(get_current_org_id),
+) -> dict:
+    """Upload a custom YAML nuclei template for the org. Must have a valid 'id' field."""
+    if not (file.filename or "").endswith(".yaml"):
+        raise HTTPException(status_code=400, detail="Only .yaml files accepted")
+
+    content = await file.read()
+    try:
+        parsed = yaml.safe_load(content)
+        if not isinstance(parsed, dict) or not parsed.get("id"):
+            raise HTTPException(status_code=400, detail="Template must have a top-level 'id' field")
+    except yaml.YAMLError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
+
+    custom_dir = (
+        Path(_settings.ATTACKTRACE_WORKSPACE_DIR) / str(org_id) / "custom-templates"
+    )
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    dest = custom_dir / (file.filename or "custom.yaml")
+    dest.write_bytes(content)
+    return {"filename": file.filename, "status": "uploaded", "path": str(dest)}
 
 
 @router.get("/templates", summary="List and search nuclei templates")

@@ -23,3 +23,5 @@ networkx>=3.0
 wafw00f>=2.2.0
 dnspython>=2.6.0
 playwright>=1.40.0
+croniter>=2.0.0
+weasyprint>=62.0

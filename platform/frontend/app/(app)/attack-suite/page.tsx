@@ -96,6 +96,12 @@ interface CrawlStats {
   tech_stack: string[];
 }
 
+interface WafInfo {
+  detected: boolean;
+  vendor: string | null;
+  confidence: string;
+}
+
 interface HistoryEntry {
   id: string;
   target: string;
@@ -293,6 +299,7 @@ export default function AttackSuitePage() {
   const [crawlStats, setCrawlStats] = useState<CrawlStats | null>(null);
   const [aiPlan, setAiPlan] = useState<string | null>(null);
   const [scanId, setScanId] = useState<string | null>(null);
+  const [wafInfo, setWafInfo] = useState<WafInfo | null>(null);
 
   // History
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -333,6 +340,7 @@ export default function AttackSuitePage() {
     setCrawlStats(null);
     setAiPlan(null);
     setScanId(null);
+    setWafInfo(null);
 
     abortRef.current = new AbortController();
 
@@ -430,6 +438,8 @@ export default function AttackSuitePage() {
               module: "crawl",
               message: `Crawl complete — ${data.pages} pages, ${data.forms} forms, ${data.endpoints} endpoints`,
             }]);
+          } else if (event === "waf_detected") {
+            setWafInfo(data as unknown as WafInfo);
           } else if (event === "ai_plan") {
             setAiPlan(data.plan as string);
             setProgressMessages((p) => [...p, { module: "ai", message: "AI strategy plan generated" }]);
@@ -448,6 +458,7 @@ export default function AttackSuitePage() {
           } else if (event === "complete") {
             const completeCounts = data.counts as ScanCounts;
             if (completeCounts) setCounts(completeCounts);
+            if (data.waf_info) setWafInfo(data.waf_info as unknown as WafInfo);
             setScanStatus("completed");
             setIsScanning(false);
             toast.success(`Scan complete — ${data.total_findings ?? 0} finding(s)`);
@@ -1137,6 +1148,18 @@ export default function AttackSuitePage() {
                   <span className={cn("text-[11px] font-bold", SEV_BADGE_TEXT[sev])}>{counts[sev]}</span>
                 </div>
               ))}
+              {/* WAF detection badge */}
+              {wafInfo?.detected && (
+                <Badge variant="outline" className="border-amber-500 text-amber-400 ml-2">
+                  <Shield className="h-3 w-3 mr-1" />
+                  WAF: {wafInfo.vendor || "Unknown"}
+                </Badge>
+              )}
+              {wafInfo && !wafInfo.detected && (
+                <Badge variant="outline" className="border-zinc-600 text-zinc-400 ml-2">
+                  No WAF
+                </Badge>
+              )}
             </div>
           )}
 

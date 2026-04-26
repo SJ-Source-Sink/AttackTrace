@@ -294,3 +294,45 @@ async def compare_scans(
     from app.services.change_detection import compare_scan_jobs
     diff = compare_scan_jobs(job_before, job_after)
     return diff.to_dict()
+
+
+@router.get(
+    "/{scan_id}/diff",
+    summary="Get asset and finding change diff for this scan vs. its prior scan",
+)
+async def get_scan_diff(
+    scan_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from app.models.db.scan import ScanDiff
+    from sqlalchemy import select as _select
+
+    job = await get_scan_by_id(db, scan_id, org_id)
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"code": "SCAN_NOT_FOUND", "message": "Scan not found"}},
+        )
+
+    result = await db.execute(
+        _select(ScanDiff).where(ScanDiff.scan_id == scan_id, ScanDiff.org_id == org_id)
+    )
+    scan_diff = result.scalar_one_or_none()
+    if not scan_diff:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"code": "DIFF_NOT_FOUND", "message": "No diff computed for this scan yet"}},
+        )
+
+    return {
+        "scan_id": str(scan_diff.scan_id),
+        "previous_scan_id": str(scan_diff.previous_scan_id) if scan_diff.previous_scan_id else None,
+        "new_assets": scan_diff.new_assets or [],
+        "removed_assets": scan_diff.removed_assets or [],
+        "new_findings": scan_diff.new_findings or [],
+        "resolved_findings": scan_diff.resolved_findings or [],
+        "diff_summary": scan_diff.diff_summary or {},
+        "created_at": scan_diff.created_at.isoformat(),
+    }

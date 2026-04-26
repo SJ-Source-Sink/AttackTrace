@@ -116,6 +116,12 @@ class Finding(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     epss_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     priority_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
+    # SLA / compliance / risk
+    sla_deadline: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    compliance_tags: Mapped[Optional[list[str]]] = mapped_column(ARRAY(String(50)), nullable=True)
+    risk_score: Mapped[Optional[float]] = mapped_column(Float(), nullable=True)
+    risk_explanation: Mapped[Optional[str]] = mapped_column(Text(), nullable=True)
+
     # Cross-scan deduplication
     dedup_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
 

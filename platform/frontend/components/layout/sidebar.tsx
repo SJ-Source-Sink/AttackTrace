@@ -29,6 +29,11 @@ import {
   BookOpen,
   Shield,
   Share2,
+  Clock,
+  Bell,
+  BarChart3,
+  FileCode2,
+  Cloud,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -47,6 +52,11 @@ const navItems: NavItem[] = [
     label: "Dashboard",
     href: "/dashboard",
     icon: LayoutDashboard,
+  },
+  {
+    label: "Executive Dashboard",
+    href: "/dashboard/executive",
+    icon: BarChart3,
   },
   {
     label: "Scans",
@@ -156,6 +166,14 @@ const attackSuiteItems: NavItem[] = [
   },
 ];
 
+const cloudItems: NavItem[] = [
+  {
+    label: "Cloud Discovery",
+    href: "/cloud",
+    icon: Cloud,
+  },
+];
+
 const settingsItems: NavItem[] = [
   {
     label: "Settings",
@@ -181,6 +199,21 @@ const settingsItems: NavItem[] = [
     label: "Audit Log",
     href: "/settings/audit-log",
     icon: ScrollText,
+  },
+  {
+    label: "Schedules",
+    href: "/settings/schedules",
+    icon: Clock,
+  },
+  {
+    label: "Notifications",
+    href: "/settings/notifications",
+    icon: Bell,
+  },
+  {
+    label: "Templates",
+    href: "/settings/templates",
+    icon: FileCode2,
   },
 ];
 
@@ -225,6 +258,7 @@ export function Sidebar({ className }: SidebarProps) {
   const isActive = useCallback(
     (href: string) => {
       if (href === "/dashboard") return pathname === "/dashboard";
+      if (href === "/dashboard/executive") return pathname === "/dashboard/executive";
       return pathname.startsWith(href);
     },
     [pathname],
@@ -239,6 +273,7 @@ export function Sidebar({ className }: SidebarProps) {
   const visibleToolItems = filterItems(toolItems);
   const visibleMobileItems = filterItems(mobileItems);
   const visibleAttackSuiteItems = filterItems(attackSuiteItems);
+  const visibleCloudItems = filterItems(cloudItems);
 
   return (
     <aside
@@ -314,6 +349,21 @@ export function Sidebar({ className }: SidebarProps) {
             </div>
             <div className="space-y-0.5">
               {visibleAttackSuiteItems.map((item) => (
+                <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {visibleCloudItems.length > 0 && (
+          <div className="mb-4">
+            <div className="px-3 pb-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                Cloud
+              </p>
+            </div>
+            <div className="space-y-0.5">
+              {visibleCloudItems.map((item) => (
                 <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
               ))}
             </div>

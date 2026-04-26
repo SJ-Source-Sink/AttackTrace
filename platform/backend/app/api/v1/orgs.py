@@ -1343,6 +1343,58 @@ async def reset_ai_circuit_breaker(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.patch(
+    "/{org_id}/sla-config",
+    summary="Update organization SLA configuration (days to resolve per severity)",
+)
+async def update_sla_config(
+    org_id: UUID,
+    payload: dict,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Update per-severity SLA deadlines (days).  Keys: critical, high, medium, low, info."""
+    org = await _get_org_or_404(db, org_id, current_user.id)
+    await _require_org_role(db, current_user.id, org_id, [MemberRole.OWNER, MemberRole.ADMIN])
+
+    valid_keys = {"critical", "high", "medium", "low", "info"}
+    sanitized: dict = {}
+    for key, val in payload.items():
+        if key not in valid_keys:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": {"code": "INVALID_KEY", "message": f"Invalid severity key: {key}"}},
+            )
+        try:
+            sanitized[key] = int(val)
+            if sanitized[key] < 1:
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": {"code": "INVALID_VALUE", "message": f"Value for {key} must be a positive integer (days)"}},
+            )
+
+    org.sla_config = sanitized
+    db.add(org)
+
+    log = AuditLog(
+        org_id=org_id,
+        user_id=current_user.id,
+        action="org.sla_config_updated",
+        resource_type="organization",
+        resource_id=str(org_id),
+        after_state={"sla_config": sanitized},
+        ip_address=_get_client_ip(request),
+    )
+    db.add(log)
+    await db.flush()
+    await db.refresh(org)
+
+    return {"sla_config": org.sla_config}
+
+
 # --- Helpers ---
 
 async def _get_org_or_404(db: AsyncSession, org_id: UUID, user_id: UUID) -> Organization:

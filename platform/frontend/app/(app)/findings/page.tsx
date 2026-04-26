@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useState } from "react";
-import { ShieldAlert, ChevronLeft, ChevronRight, X, Plus, AlertTriangle } from "lucide-react";
+import React, { useState, useEffect } from "react";
+import { ShieldAlert, ChevronLeft, ChevronRight, X, Plus, AlertTriangle, Lock, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/shared/empty-state";
 import { FindingRow } from "@/components/findings/finding-row";
@@ -323,16 +323,20 @@ export default function FindingsPage() {
   const [filters, setFilters] = useState<FindingFilters>({ statuses: ["open", "in_progress"] });
   const [kevOnly, setKevOnly] = useState(false);
   const [confidenceFilter, setConfidenceFilter] = useState("");
+  const [secretsOnly, setSecretsOnly] = useState(false);
+  const [overdueOnly, setOverdueOnly] = useState(false);
   const [page, setPage] = useState(1);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   // Build query params based on view mode + filters
-  const activeQueryFilters: FindingFilters & { page?: number; per_page?: number } = viewMode === 'active'
+  const activeQueryFilters: FindingFilters & { page?: number; per_page?: number; category?: string; overdue?: boolean } = viewMode === 'active'
     ? {
         ...filters,
         suppressed: false,
         kev_only: kevOnly || undefined,
         confidence: confidenceFilter || undefined,
+        category: secretsOnly ? "exposed_secret" : undefined,
+        overdue: overdueOnly || undefined,
         page,
         per_page: PER_PAGE,
       }
@@ -373,6 +377,8 @@ export default function FindingsPage() {
     setFilters({});
     setKevOnly(false);
     setConfidenceFilter("");
+    setSecretsOnly(false);
+    setOverdueOnly(false);
     setPage(1);
   };
 
@@ -381,7 +387,9 @@ export default function FindingsPage() {
     (filters.statuses?.length ?? 0) > 0 ||
     !!filters.has_cve ||
     kevOnly ||
-    !!confidenceFilter;
+    !!confidenceFilter ||
+    secretsOnly ||
+    overdueOnly;
 
   const SEVERITY_COLORS: Record<FindingSeverity, string> = {
     critical: "text-red-500",
@@ -429,6 +437,32 @@ export default function FindingsPage() {
             >
               <span className={`h-2 w-2 rounded-full ${kevOnly ? 'bg-red-400 animate-pulse' : 'bg-zinc-600'}`} />
               KEV Only
+            </button>
+
+            {/* Secrets quick-filter */}
+            <button
+              onClick={() => { setSecretsOnly(!secretsOnly); setPage(1); }}
+              className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors w-full justify-start ${
+                secretsOnly
+                  ? 'bg-amber-900/50 border-amber-500/50 text-amber-300'
+                  : 'border-zinc-600 text-zinc-400 hover:border-amber-500/50 hover:text-amber-300'
+              }`}
+            >
+              <Lock className="h-3 w-3" />
+              Secrets Only
+            </button>
+
+            {/* Overdue quick-filter */}
+            <button
+              onClick={() => { setOverdueOnly(!overdueOnly); setPage(1); }}
+              className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors w-full justify-start ${
+                overdueOnly
+                  ? 'bg-orange-900/50 border-orange-500/50 text-orange-300'
+                  : 'border-zinc-600 text-zinc-400 hover:border-orange-500/50 hover:text-orange-300'
+              }`}
+            >
+              <Clock className="h-3 w-3" />
+              Overdue
             </button>
           </div>
 

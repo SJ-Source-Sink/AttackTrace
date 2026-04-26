@@ -68,6 +68,12 @@ class FindingResponse(BaseModel):
     epss_score: Optional[float] = None
     priority_score: Optional[float] = None
 
+    # SLA / compliance / risk
+    sla_deadline: Optional[datetime] = None
+    compliance_tags: Optional[list[str]] = None
+    risk_score: Optional[float] = None
+    risk_explanation: Optional[str] = None
+
     # Frontend-compatible aliases
     scan_id: str = ""
     organization_id: str = ""
@@ -142,6 +148,11 @@ class FindingResponse(BaseModel):
             kev_status=getattr(finding, "kev_status", False) or False,
             epss_score=getattr(finding, "epss_score", None),
             priority_score=getattr(finding, "priority_score", None),
+            # SLA / compliance / risk
+            sla_deadline=getattr(finding, "sla_deadline", None),
+            compliance_tags=getattr(finding, "compliance_tags", None),
+            risk_score=getattr(finding, "risk_score", None),
+            risk_explanation=getattr(finding, "risk_explanation", None),
             # Frontend-compatible aliases
             scan_id=str(finding.scan_job_id) if finding.scan_job_id else "",
             organization_id=str(finding.org_id),

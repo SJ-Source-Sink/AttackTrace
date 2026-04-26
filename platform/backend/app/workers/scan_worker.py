@@ -363,6 +363,69 @@ async def _combined_web_module(session, config, orchestrator):
     return result
 
 
+async def _scan_web_assets_for_secrets(session, r, scan_job_id: str) -> None:
+    """Scan live web assets for exposed secrets/config files.
+    Best-effort — publishes secret_found events via Redis pub/sub.
+    """
+    from app.services.secret_scanner_service import scan_url_for_secrets
+
+    web_applications = getattr(session, "web_applications", [])
+    scanned = 0
+    for webapp in web_applications:
+        url = getattr(webapp, "url", None)
+        status = getattr(webapp, "status_code", None)
+        is_alive = getattr(webapp, "is_alive", False)
+        if not url or not is_alive or status not in (200, 301, 302):
+            continue
+        try:
+            secret_findings = await scan_url_for_secrets(url)
+            for sf in secret_findings:
+                _publish_event(r, scan_job_id, "secret_found", {
+                    "title": sf["title"],
+                    "severity": sf["severity"],
+                    "affected_asset": sf["affected_asset"],
+                    "description": sf["description"],
+                })
+                logger.info(f"Secret scanner: {sf['title']} at {sf['affected_asset']}")
+            scanned += 1
+            if scanned >= 20:  # Limit total web assets scanned
+                break
+        except Exception as e:
+            logger.debug(f"Secret scan failed for {url}: {e}")
+
+
+async def _run_url_discovery_for_session(session, r, scan_job_id: str) -> None:
+    """Run historical URL discovery for domains in the session.
+    Best-effort — publishes url_discovery events via Redis pub/sub.
+    """
+    from app.services.url_discovery_service import run_url_discovery
+
+    target_domains = getattr(session, "domains", [])
+    domain_values = []
+    for d in target_domains:
+        fqdn = getattr(d, "fqdn", None) or (d if isinstance(d, str) else None)
+        if fqdn:
+            domain_values.append(fqdn)
+
+    for domain in domain_values[:3]:  # Limit to first 3 domains
+        try:
+            discovered_urls = await run_url_discovery(domain)
+            if discovered_urls:
+                param_urls = [u for u in discovered_urls if u["params"]]
+                _publish_event(r, scan_job_id, "url_discovery", {
+                    "domain": domain,
+                    "count": len(discovered_urls),
+                    "urls": [u["url"] for u in discovered_urls[:10]],  # Preview
+                    "param_url_count": len(param_urls),
+                })
+                logger.info(
+                    f"URL discovery: {len(discovered_urls)} historical URLs, "
+                    f"{len(param_urls)} with params for {domain}"
+                )
+        except Exception as e:
+            logger.debug(f"URL discovery skipped for {domain}: {e}")
+
+
 # --- Asset/Finding persistence ---
 
 def _compute_dedup_hash(org_id: UUID, title: str, affected_asset: str, cve_list: list[str] | None = None) -> str:
@@ -447,6 +510,8 @@ def _enrich_kev_epss(db_session, scan_job_id_str: str) -> None:
             except Exception as _epss_err:
                 logger.warning(f"Batch EPSS fetch failed: {_epss_err}")
 
+        from app.services.risk_scoring_service import compute_risk_score
+
         enriched = 0
         for finding in findings_with_cves:
             cve_list = finding.cve or []
@@ -459,6 +524,15 @@ def _enrich_kev_epss(db_session, scan_job_id_str: str) -> None:
             finding.kev_status = kev_status
             finding.epss_score = epss_score
             finding.priority_score = priority
+
+            # Compute AI risk score
+            sev_val = finding.severity.value if hasattr(finding.severity, "value") else finding.severity
+            risk_score, risk_explanation = compute_risk_score(
+                sev_val, finding.cvss_score, epss_score, kev_status, priority
+            )
+            finding.risk_score = risk_score
+            finding.risk_explanation = risk_explanation
+
             db_session.add(finding)
             enriched += 1
 
@@ -470,7 +544,8 @@ def _enrich_kev_epss(db_session, scan_job_id_str: str) -> None:
 
 
 def _persist_module_results_partial(
-    db_session, scan_job_id_str: str, org_id: UUID, module_name: str, module_result
+    db_session, scan_job_id_str: str, org_id: UUID, module_name: str, module_result,
+    org_sla_config: Optional[dict] = None,
 ) -> None:
     """
     Persist results from a single module immediately after it completes.
@@ -479,6 +554,7 @@ def _persist_module_results_partial(
     from app.models.db.asset import Asset, AssetType
     from app.models.db.finding import Finding as DBFinding, FindingSeverity, FindingStatus
     from app.models.db.suppression_rule import ScanSuppressionRule
+    from app.services.sla_service import compute_sla_deadline, apply_compliance_tags
     from sqlalchemy import select as sync_select
 
     try:
@@ -545,6 +621,11 @@ def _persist_module_results_partial(
                     confidence=getattr(f, "confidence", "firm"),
                     dedup_hash=dedup_hash,
                 )
+                # SLA deadline and compliance tags
+                new_finding.sla_deadline = compute_sla_deadline(sev_value, org_sla_config)
+                new_finding.compliance_tags = apply_compliance_tags(
+                    f.title or "", f.category or "", getattr(f, "description", "") or ""
+                )
                 if matched_rule:
                     new_finding.suppressed = True
                     new_finding.suppressed_reason = f"Auto-suppressed by rule: {matched_rule.action}"
@@ -566,9 +647,10 @@ def _persist_module_results_partial(
         logger.warning(f"Partial persist failed for module {module_name}: {e}")
 
 
-def _persist_session_results(db_session, scan_job, attacktrace_session, org_id: UUID) -> tuple:
+def _persist_session_results(db_session, scan_job, attacktrace_session, org_id: UUID, org_sla_config: Optional[dict] = None) -> tuple:
     from app.models.db.asset import Asset, AssetType
     from app.models.db.finding import Finding as DBFinding, FindingSeverity, FindingStatus
+    from app.services.sla_service import compute_sla_deadline, apply_compliance_tags
     from sqlalchemy import select as sync_select
 
     assets_created = 0
@@ -708,6 +790,11 @@ def _persist_session_results(db_session, scan_job, attacktrace_session, org_id: 
                 confidence=getattr(f, "confidence", "firm"),
                 dedup_hash=dedup_hash,
             )
+            # SLA deadline and compliance tags
+            new_finding.sla_deadline = compute_sla_deadline(sev_value, org_sla_config)
+            new_finding.compliance_tags = apply_compliance_tags(
+                f.title or "", f.category or "", getattr(f, "description", "") or ""
+            )
             if matched_rule:
                 new_finding.suppressed = True
                 new_finding.suppressed_reason = f"Auto-suppressed by rule: {matched_rule.action}"
@@ -772,6 +859,121 @@ def _build_attacktrace_config(job, creds=None):
     return config
 
 
+# --- Asset change detection diff ---
+
+def _compute_and_store_diff(db_session, scan_job_id_str: str, org_id: UUID, target_domains: list) -> None:
+    """
+    Compute asset and finding diffs between the current scan and the most recent
+    prior completed scan for the same org + overlapping targets.  Store a ScanDiff record.
+    """
+    from app.models.db.asset import Asset
+    from app.models.db.finding import Finding as DBFinding, FindingStatus
+    from app.models.db.scan import ScanJob, ScanStatus as DBScanStatus, ScanDiff
+    from sqlalchemy import select as sync_select
+
+    try:
+        scan_uuid = UUID(scan_job_id_str)
+    except ValueError:
+        return
+
+    # Find most recent prior completed scan for same org
+    prior_scan = db_session.execute(
+        sync_select(ScanJob)
+        .where(
+            ScanJob.org_id == org_id,
+            ScanJob.status == DBScanStatus.COMPLETED,
+            ScanJob.id != scan_uuid,
+        )
+        .order_by(ScanJob.completed_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+    # Fetch current scan assets and findings
+    current_assets = db_session.execute(
+        sync_select(Asset).where(Asset.scan_job_id == scan_uuid)
+    ).scalars().all()
+
+    current_findings = db_session.execute(
+        sync_select(DBFinding).where(DBFinding.scan_job_id == scan_uuid)
+    ).scalars().all()
+
+    current_asset_values = {a.value for a in current_assets}
+    current_finding_hashes = {f.dedup_hash for f in current_findings if f.dedup_hash}
+
+    new_assets_list = []
+    removed_assets_list = []
+    new_findings_list = []
+    resolved_findings_list = []
+
+    if prior_scan:
+        prior_assets = db_session.execute(
+            sync_select(Asset).where(Asset.scan_job_id == prior_scan.id)
+        ).scalars().all()
+
+        prior_findings = db_session.execute(
+            sync_select(DBFinding).where(DBFinding.scan_job_id == prior_scan.id)
+        ).scalars().all()
+
+        prior_asset_values = {a.value for a in prior_assets}
+        prior_finding_hashes = {f.dedup_hash for f in prior_findings if f.dedup_hash}
+
+        # New: in current but not in prior
+        new_asset_vals = current_asset_values - prior_asset_values
+        new_assets_list = [
+            {"type": a.asset_type.value, "value": a.value}
+            for a in current_assets if a.value in new_asset_vals
+        ]
+
+        # Removed: in prior but not in current
+        removed_asset_vals = prior_asset_values - current_asset_values
+        removed_assets_list = [
+            {"type": a.asset_type.value, "value": a.value}
+            for a in prior_assets if a.value in removed_asset_vals
+        ]
+
+        # New findings: in current hashes but not prior
+        new_hash_set = current_finding_hashes - prior_finding_hashes
+        new_findings_list = [
+            {"title": f.title, "severity": f.severity.value, "asset": f.affected_asset, "dedup_hash": f.dedup_hash}
+            for f in current_findings if f.dedup_hash in new_hash_set
+        ]
+
+        # Resolved: open findings in prior that are not in current
+        resolved_hash_set = prior_finding_hashes - current_finding_hashes
+        resolved_findings_list = [
+            {"title": f.title, "severity": f.severity.value, "asset": f.affected_asset, "dedup_hash": f.dedup_hash}
+            for f in prior_findings
+            if f.dedup_hash in resolved_hash_set and f.status == FindingStatus.OPEN
+        ]
+
+    diff_summary = {
+        "new_assets_count": len(new_assets_list),
+        "removed_assets_count": len(removed_assets_list),
+        "new_findings_count": len(new_findings_list),
+        "resolved_findings_count": len(resolved_findings_list),
+        "total_assets": len(current_assets),
+        "total_findings": len(current_findings),
+    }
+
+    scan_diff = ScanDiff(
+        org_id=org_id,
+        scan_id=scan_uuid,
+        previous_scan_id=prior_scan.id if prior_scan else None,
+        new_assets=new_assets_list,
+        removed_assets=removed_assets_list,
+        new_findings=new_findings_list,
+        resolved_findings=resolved_findings_list,
+        diff_summary=diff_summary,
+    )
+    db_session.add(scan_diff)
+    db_session.flush()
+    logger.info(
+        f"Scan diff stored for {scan_job_id_str}: "
+        f"+{len(new_assets_list)} assets, -{len(removed_assets_list)} assets, "
+        f"+{len(new_findings_list)} findings, {len(resolved_findings_list)} resolved"
+    )
+
+
 # --- Main Celery task ---
 
 @celery_app.task(bind=True, max_retries=3, name="app.workers.scan_worker.run_scan")
@@ -832,6 +1034,11 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
                 sync_select(OrgCredentials).where(OrgCredentials.org_id == job.org_id)
             ).scalar_one_or_none()
 
+            # Load org SLA config for deadline computation
+            from app.models.db.org import Organization as _Organization
+            _org = db.get(_Organization, job.org_id)
+            _org_sla_config = _org.sla_config if _org else None
+
             # Build AttackTrace config
             attacktrace_config = _build_attacktrace_config(job, creds)
 
@@ -850,9 +1057,14 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
 
             # Create session
             intensity = job.intensity.value
-            passive_only = intensity == "passive"
-            modules_to_skip = set(job.modules_to_skip or [])
-            modules_to_run = [m for m in orchestrator.MODULE_ORDER if m not in modules_to_skip]
+            passive_only = intensity in ("passive", "passive_due_diligence")
+
+            # Due diligence mode: only run passive OSINT modules
+            if intensity == "passive_due_diligence":
+                modules_to_run = [m for m in ["seed", "domain", "intel"] if m in orchestrator.MODULE_ORDER]
+            else:
+                modules_to_skip = set(job.modules_to_skip or [])
+                modules_to_run = [m for m in orchestrator.MODULE_ORDER if m not in modules_to_skip]
 
             attacktrace_session = orchestrator.create_session(
                 company=job.company_name or "",
@@ -873,7 +1085,8 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
                 # Partial persist: write this module's results immediately
                 try:
                     _persist_module_results_partial(
-                        db, scan_job_id, job.org_id, module_name, result
+                        db, scan_job_id, job.org_id, module_name, result,
+                        org_sla_config=_org_sla_config,
                     )
                     db.commit()
                 except Exception as _partial_err:
@@ -905,9 +1118,21 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
             # Run the pipeline
             completed_session = asyncio.run(orchestrator.run())
 
+            # Historical URL discovery (best-effort, non-blocking)
+            try:
+                asyncio.run(_run_url_discovery_for_session(completed_session, r, scan_job_id))
+            except Exception as _url_disc_err:
+                logger.debug(f"URL discovery post-run skipped: {_url_disc_err}")
+
+            # Secret scanning for live web assets (best-effort, non-blocking)
+            try:
+                asyncio.run(_scan_web_assets_for_secrets(completed_session, r, scan_job_id))
+            except Exception as _secret_err:
+                logger.debug(f"Secret scanning post-run skipped: {_secret_err}")
+
             # Persist results (final pass — idempotent, skips already-persisted)
             results_summary, findings_count = _persist_session_results(
-                db, job, completed_session, job.org_id
+                db, job, completed_session, job.org_id, org_sla_config=_org_sla_config
             )
 
             # KEV/EPSS enrichment for findings with CVEs
@@ -915,6 +1140,12 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
                 _enrich_kev_epss(db, scan_job_id)
             except Exception as _kev_err:
                 logger.warning(f"KEV/EPSS enrichment skipped: {_kev_err}")
+
+            # Asset change detection diff
+            try:
+                _compute_and_store_diff(db, scan_job_id, job.org_id, job.target_domains)
+            except Exception as _diff_err:
+                logger.warning(f"Scan diff computation skipped: {_diff_err}")
 
             job.status = DBScanStatus.COMPLETED
             job.completed_at = datetime.now(timezone.utc)
@@ -1113,6 +1344,42 @@ async def _async_notify_completion(org_id, scan_job_id, target_domains, findings
         )
     except Exception as e:
         logger.warning(f"notify_scan_completed failed: {e}")
+
+    # Dispatch to configured notification channels (Slack, Jira, Teams, webhooks)
+    try:
+        from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+        from sqlalchemy.orm import sessionmaker as _sessionmaker
+
+        async_db_url = settings.DATABASE_URL
+        if not async_db_url.startswith("postgresql+asyncpg"):
+            async_db_url = async_db_url.replace("postgresql://", "postgresql+asyncpg://").replace(
+                "postgresql+psycopg2://", "postgresql+asyncpg://"
+            )
+
+        _engine = create_async_engine(
+            async_db_url, pool_pre_ping=True, pool_size=1, max_overflow=0
+        )
+        _AsyncSessionFactory = _sessionmaker(
+            _engine, class_=AsyncSession, expire_on_commit=False
+        )
+
+        from app.services.notification_service import dispatch_notifications
+
+        async with _AsyncSessionFactory() as db:
+            await dispatch_notifications(
+                org_id=org_id,
+                event_type="scan.completed",
+                payload={
+                    "scan_id": scan_job_id,
+                    "org_id": org_id,
+                    "target_domains": target_domains,
+                    "findings_count": findings_count,
+                },
+                db_session=db,
+            )
+        await _engine.dispose()
+    except Exception as exc:
+        logger.warning(f"dispatch_notifications (scan.completed) failed: {exc}")
 
 
 # --- Stuck scan watchdog ---

@@ -4,7 +4,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
   ChevronRight, ChevronDown, Code2, Zap, Activity,
-  Shield, ExternalLink, Smartphone, Globe, Loader2,
+  Shield, ExternalLink, Smartphone, Globe, Loader2, Lock,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,9 @@ import { StatusWorkflow } from "@/components/findings/status-workflow";
 import { SeverityBadge } from "@/components/findings/severity-badge";
 import { ConfidenceBadge } from "@/components/findings/confidence-badge";
 import { KevBadge } from "@/components/findings/kev-badge";
+import { SlaBadge } from "@/components/findings/sla-badge";
+import { ComplianceTags } from "@/components/findings/compliance-tags";
+import { RiskScoreGauge } from "@/components/findings/risk-score-gauge";
 import { fetchWithAuth } from "@/lib/auth";
 import { cn, formatRelativeTime } from "@/lib/utils";
 import { toast } from "sonner";
@@ -233,11 +236,15 @@ export function FindingRow({ finding }: FindingRowProps) {
           <ConfidenceBadge confidence={finding.confidence ?? null} />
         </div>
 
+        {/* Risk score gauge */}
+        <RiskScoreGauge score={finding.risk_score} explanation={finding.risk_explanation} />
+
         {/* Title + meta */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-medium text-zinc-200 truncate max-w-md">{finding.title}</span>
             <KevBadge kev_status={finding.kev_status} epss_score={finding.epss_score} />
+            <SlaBadge sla_deadline={finding.sla_deadline} />
           </div>
           <div className="flex items-center gap-2 mt-0.5 flex-wrap">
             {/* Source badge */}
@@ -255,7 +262,12 @@ export function FindingRow({ finding }: FindingRowProps) {
               </span>
             )}
             <span className="text-xs text-zinc-500 truncate max-w-xs font-mono">{finding.asset_value}</span>
-            <span className="text-xs text-zinc-600">{finding.category}</span>
+            <span className="inline-flex items-center gap-1 text-xs text-zinc-600">
+              {finding.category === "exposed_secret" && (
+                <Lock className="h-3 w-3 text-amber-400" />
+              )}
+              {finding.category}
+            </span>
             {finding.cve_id && (
               <a href={`https://nvd.nist.gov/vuln/detail/${finding.cve_id}`}
                 target="_blank" rel="noopener noreferrer"
@@ -352,6 +364,22 @@ export function FindingRow({ finding }: FindingRowProps) {
                   {finding.ai_triage.false_positive_likelihood}% false positive likelihood
                 </p>
               )}
+            </div>
+          )}
+
+          {/* Risk explanation */}
+          {finding.risk_explanation && (
+            <div className="text-xs text-zinc-500 flex items-center gap-2">
+              <RiskScoreGauge score={finding.risk_score} size="md" />
+              <span>{finding.risk_explanation}</span>
+            </div>
+          )}
+
+          {/* Compliance tags */}
+          {finding.compliance_tags && finding.compliance_tags.length > 0 && (
+            <div>
+              <p className="text-xs font-medium text-zinc-500 mb-1.5">Compliance Frameworks</p>
+              <ComplianceTags tags={finding.compliance_tags} />
             </div>
           )}
 

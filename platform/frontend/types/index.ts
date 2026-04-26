@@ -102,7 +102,7 @@ export interface ApiKey {
 // ============================================================
 
 export type ScanStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
-export type ScanIntensity = "passive" | "normal" | "aggressive";
+export type ScanIntensity = "passive" | "normal" | "aggressive" | "passive_due_diligence";
 export type ScanModule = "infrastructure" | "cloud" | "osint" | "web" | "enrichment";
 
 export interface ScanTarget {
@@ -200,6 +200,36 @@ export interface ScanSSEEvent {
   timestamp: string;
 }
 
+export interface ScanDiffAsset {
+  type: string;
+  value: string;
+}
+
+export interface ScanDiffFinding {
+  title: string;
+  severity: string;
+  asset: string;
+  dedup_hash?: string;
+}
+
+export interface ScanDiff {
+  scan_id: string;
+  previous_scan_id: string | null;
+  new_assets: ScanDiffAsset[];
+  removed_assets: ScanDiffAsset[];
+  new_findings: ScanDiffFinding[];
+  resolved_findings: ScanDiffFinding[];
+  diff_summary: {
+    new_assets_count: number;
+    removed_assets_count: number;
+    new_findings_count: number;
+    resolved_findings_count: number;
+    total_assets: number;
+    total_findings: number;
+  };
+  created_at: string;
+}
+
 // ============================================================
 // Asset Types
 // ============================================================
@@ -209,7 +239,8 @@ export type AssetType =
   | "domain"
   | "ip"
   | "webapp"
-  | "cloud";
+  | "cloud"
+  | "endpoint";
 
 export interface AssetTag {
   key: string;
@@ -274,7 +305,8 @@ export type FindingCategory =
   | "weak_cipher"
   | "open_port"
   | "cloud_misconfiguration"
-  | "subdomain_takeover";
+  | "subdomain_takeover"
+  | "exposed_secret";
 
 export interface FindingEvidence {
   type: "screenshot" | "request_response" | "code_snippet" | "log" | "raw";
@@ -347,6 +379,11 @@ export interface Finding {
   // Source attribution
   source?: string;
   source_scan_id?: string | null;
+  // SLA / compliance / risk
+  sla_deadline?: string | null;
+  compliance_tags?: string[] | null;
+  risk_score?: number | null;
+  risk_explanation?: string | null;
 }
 
 export interface FindingListResponse {
@@ -371,6 +408,9 @@ export interface FindingFilters {
   kev_only?: boolean;
   confidence?: string;
   suppressed?: boolean;
+  // SLA filters
+  overdue?: boolean;
+  sort_by?: string;
 }
 
 export interface UpdateFindingRequest {
@@ -463,6 +503,86 @@ export interface DashboardStats {
 }
 
 // ============================================================
+// Executive Dashboard Types
+// ============================================================
+
+export interface ExecutiveDashboardData {
+  mttr_by_severity: {
+    critical: number | null;
+    high: number | null;
+    medium: number | null;
+    low: number | null;
+  };
+  risk_trend: {
+    "30d": number;
+    "60d": number;
+    "90d": number;
+  };
+  new_vs_recurring: {
+    new: number;
+    recurring: number;
+  };
+  coverage_percent: number;
+  open_critical: number;
+  sla_compliance_percent: number;
+  generated_at: string;
+}
+
+// ============================================================
+// Nuclei Template Types
+// ============================================================
+
+export interface NucleiTemplate {
+  id: string;
+  name: string;
+  severity: string;
+  category: string;
+  tags: string[];
+  enabled: boolean;
+  path: string;
+}
+
+export interface NucleiTemplateListResponse {
+  items: NucleiTemplate[];
+  total: number;
+  page: number;
+  per_page: number;
+}
+
+// ============================================================
+// Cloud Discovery Types
+// ============================================================
+
+export interface CloudAsset {
+  value: string;
+  asset_type: string;
+  provider: string;
+  resource_type: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface CloudDiscoverResult {
+  discovered: number;
+  assets: CloudAsset[];
+  provider: string;
+  message?: string;
+}
+
+export interface CloudAssetListResponse {
+  items: Array<{
+    id: string;
+    value: string;
+    tags: string[];
+    is_active: boolean;
+    risk_score: number | null;
+    first_seen: string | null;
+    last_seen: string | null;
+    metadata: Record<string, unknown> | null;
+  }>;
+  total: number;
+}
+
+// ============================================================
 // Pagination & Common
 // ============================================================
 
@@ -476,4 +596,75 @@ export interface PaginationParams {
 export interface ApiError {
   detail: string;
   status_code: number;
+}
+
+// ============================================================
+// Scheduled Scan Types
+// ============================================================
+
+export interface ScheduledScan {
+  id: string;
+  org_id: string;
+  workspace_id?: string | null;
+  created_by?: string | null;
+  name: string;
+  target_domains: string[];
+  company_name?: string | null;
+  scan_config: Record<string, unknown>;
+  cron_expression: string;
+  is_active: boolean;
+  last_run?: string | null;
+  next_run?: string | null;
+  last_scan_job_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateScheduleRequest {
+  name: string;
+  target_domains: string[];
+  company_name?: string;
+  cron_expression: string;
+  workspace_id?: string;
+  is_active?: boolean;
+  scan_config?: Record<string, unknown>;
+}
+
+export interface ScheduledScanListResponse {
+  items: ScheduledScan[];
+  total: number;
+  page: number;
+  per_page: number;
+  pages: number;
+}
+
+// ============================================================
+// Notification Channel Types
+// ============================================================
+
+export type NotificationChannelType = "slack" | "jira" | "webhook" | "teams";
+export type NotificationEvent = "scan.completed" | "finding.critical" | "sla.breached";
+
+export interface NotificationChannel {
+  id: string;
+  org_id: string;
+  name: string;
+  channel_type: NotificationChannelType;
+  config: Record<string, string>;  // masked — secrets replaced with "***"
+  is_active: boolean;
+  events: NotificationEvent[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateChannelRequest {
+  name: string;
+  channel_type: NotificationChannelType;
+  config: Record<string, string>;
+  is_active?: boolean;
+  events: NotificationEvent[];
+}
+
+export interface NotificationChannelListResponse {
+  items: NotificationChannel[];
 }

@@ -10,7 +10,9 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/shared/loading-skeleton";
 import { useAssets } from "@/hooks/use-assets";
 import { useFindings } from "@/hooks/use-findings";
-import { aiApi, reportsApi } from "@/lib/api";
+import { aiApi, reportsApi, scansApi } from "@/lib/api";
+import { ScanDiffTab } from "@/components/scans/scan-diff-tab";
+import type { ScanDiff } from "@/types";
 import { toast } from "sonner";
 
 import { severityBgColor, formatDate } from "@/lib/utils";
@@ -762,7 +764,51 @@ function ReportTab({ scanId }: { scanId: string }) {
   );
 }
 
+function ChangesTab({ scanId }: { scanId: string }) {
+  const { data: diff, isLoading, isError } = useQuery({
+    queryKey: ["scan", "diff", scanId],
+    queryFn: () => scansApi.getDiff(scanId) as Promise<ScanDiff>,
+    staleTime: 60_000,
+    retry: false,
+  });
+
+  if (isLoading) {
+    return (
+      <div className="space-y-3">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <Skeleton key={i} className="h-10 w-full" />
+        ))}
+      </div>
+    );
+  }
+
+  if (isError || !diff) {
+    return (
+      <div className="py-12 text-center text-sm text-zinc-500">
+        No change data available for this scan. Diffs are computed after scan completion.
+      </div>
+    );
+  }
+
+  return <ScanDiffTab diff={diff} />;
+}
+
 export function ScanResultsTabs({ scan }: ScanResultsTabsProps) {
+  const { data: diffData } = useQuery({
+    queryKey: ["scan", "diff", scan.id],
+    queryFn: () => scansApi.getDiff(scan.id) as Promise<ScanDiff>,
+    staleTime: 60_000,
+    retry: false,
+    enabled: scan.status === "completed",
+  });
+
+  const changeCount = diffData
+    ? (diffData.new_assets?.length ?? 0) +
+      (diffData.removed_assets?.length ?? 0) +
+      (diffData.new_findings?.length ?? 0) +
+      (diffData.resolved_findings?.length ?? 0)
+    : 0;
+
   return (
     <Tabs defaultValue="summary">
       <TabsList className="mb-4">
@@ -782,6 +828,14 @@ export function ScanResultsTabs({ scan }: ScanResultsTabsProps) {
           )}
         </TabsTrigger>
         <TabsTrigger value="chain">Attack Chain</TabsTrigger>
+        <TabsTrigger value="changes">
+          Changes
+          {changeCount > 0 && (
+            <span className="ml-1.5 rounded-full bg-orange-600/80 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+              {changeCount}
+            </span>
+          )}
+        </TabsTrigger>
         <TabsTrigger value="report">Report</TabsTrigger>
       </TabsList>
 
@@ -796,6 +850,9 @@ export function ScanResultsTabs({ scan }: ScanResultsTabsProps) {
       </TabsContent>
       <TabsContent value="chain">
         <AttackChainTab scan={scan} />
+      </TabsContent>
+      <TabsContent value="changes">
+        <ChangesTab scanId={scan.id} />
       </TabsContent>
       <TabsContent value="report">
         <ReportTab scanId={scan.id} />

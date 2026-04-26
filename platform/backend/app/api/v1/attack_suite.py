@@ -35,6 +35,7 @@ from pydantic import BaseModel, field_validator
 from app.core.dependencies import get_current_user, require_tool
 from app.core.config import get_settings
 from app.models.db.user import User
+from app.services.waf_service import detect_waf, get_waf_bypass_payloads
 from app.api.v1.attack_patterns import (
     CORS_ATTACK_ORIGINS, CORS_SENSITIVE_PATHS, CORS_WILDCARD_API_PATHS,
     CSRF_SENSITIVE_ACTIONS,
@@ -720,9 +721,13 @@ async def _module_csrf(target: str, client: httpx.AsyncClient,
 # ── Module: XSS ───────────────────────────────────────────────────────────────
 
 async def _module_xss(target: str, client: httpx.AsyncClient,
-                      forms: list[dict]) -> AsyncGenerator[dict, None]:
+                      forms: list[dict],
+                      waf_bypass_payloads: list[str] | None = None) -> AsyncGenerator[dict, None]:
     # Reflected XSS via URL params
     payloads = XSS_PAYLOADS[:8]
+    # Prepend WAF-specific bypass payloads if available
+    if waf_bypass_payloads:
+        payloads = list(waf_bypass_payloads) + payloads
     hit_params = set()
 
     for param in XSS_TEST_PARAMS[:8]:
@@ -801,7 +806,8 @@ async def _module_xss(target: str, client: httpx.AsyncClient,
 # ── Module: SQLi ──────────────────────────────────────────────────────────────
 
 async def _module_sqli(target: str, client: httpx.AsyncClient,
-                       forms: list[dict]) -> AsyncGenerator[dict, None]:
+                       forms: list[dict],
+                       waf_bypass_payloads: list[str] | None = None) -> AsyncGenerator[dict, None]:
     # Baseline timing
     try:
         t0 = time.monotonic()
@@ -809,6 +815,11 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
         baseline = time.monotonic() - t0
     except Exception:
         baseline = 0.5
+
+    # Augment error payloads with WAF-specific bypass payloads
+    error_payloads = list(SQLI_ERROR_PAYLOADS)
+    if waf_bypass_payloads:
+        error_payloads = list(waf_bypass_payloads) + error_payloads
 
     # Test URL parameters
     for param in SQLI_TEST_PARAMS[:5]:
@@ -2863,6 +2874,22 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGe
                 "module": "spa_detection"
             })
 
+        # ── WAF Detection ──────────────────────────────────────────────────
+        yield _sse("progress", {"message": "🛡️ Detecting WAF...", "module": "waf"})
+        waf_info = await detect_waf(req.target)
+        yield _sse("waf_detected", waf_info)
+        if waf_info["detected"]:
+            yield _sse("progress", {
+                "message": f"🛡️ WAF detected: {waf_info['vendor'] or 'Unknown'} (confidence: {waf_info['confidence']}). "
+                           f"Enabling bypass payloads for XSS and SQLi.",
+                "module": "waf"
+            })
+        else:
+            yield _sse("progress", {
+                "message": "🛡️ No WAF detected.",
+                "module": "waf"
+            })
+
         # ── Crawl ──────────────────────────────────────────────────────────
         crawl_result = CrawlResult()
         if "crawl" in req.modules and req.crawler.enabled:
@@ -2911,12 +2938,16 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGe
                 yield _sse("progress", {"message": f"AI planning skipped: {e}", "module": "ai"})
 
         # ── Run modules ────────────────────────────────────────────────────
+        # Collect WAF-specific bypass payloads for relevant modules
+        _waf_xss_extra = get_waf_bypass_payloads(waf_info.get("vendor"), "xss")
+        _waf_sqli_extra = get_waf_bypass_payloads(waf_info.get("vendor"), "sqli")
+
         module_runners = {
             "headers":   lambda: _module_headers(req.target, client),
             "cors":      lambda: _module_cors(req.target, client),
             "csrf":      lambda: _module_csrf(req.target, client, crawl_result.forms),
-            "xss":       lambda: _module_xss(req.target, client, crawl_result.forms),
-            "sqli":      lambda: _module_sqli(req.target, client, crawl_result.forms),
+            "xss":       lambda _x=_waf_xss_extra: _module_xss(req.target, client, crawl_result.forms, _x),
+            "sqli":      lambda _s=_waf_sqli_extra: _module_sqli(req.target, client, crawl_result.forms, _s),
             "ssrf":      lambda: _module_ssrf(req.target, client),
             "idor":      lambda: _module_idor(req.target, client, client2,
                                                crawl_result.endpoints, crawl_result.ids_found,
@@ -2969,6 +3000,7 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGe
         "scan_id": scan_id, "total_findings": len(findings),
         "counts": counts, "duration_seconds": duration,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "waf_info": waf_info,
     })
 
 

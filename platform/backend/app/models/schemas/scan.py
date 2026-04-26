@@ -22,7 +22,7 @@ class ScanCreate(BaseModel):
     @field_validator("intensity")
     @classmethod
     def validate_intensity(cls, v: str) -> str:
-        valid = {"passive", "normal", "aggressive"}
+        valid = {"passive", "normal", "aggressive", "passive_due_diligence"}
         if v not in valid:
             raise ValueError(f"Intensity must be one of: {valid}")
         return v

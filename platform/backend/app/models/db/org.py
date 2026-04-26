@@ -3,6 +3,7 @@ Organization and Workspace database models.
 """
 
 import enum
+import uuid as _uuid_module
 from datetime import datetime
 from typing import Optional
 from uuid import uuid4, UUID
@@ -16,7 +17,7 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, UUID as PGUUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -41,6 +42,7 @@ class Organization(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     max_scans_per_month: Mapped[int] = mapped_column(default=10, nullable=False)
     logo_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    sla_config: Mapped[Optional[dict]] = mapped_column(JSONB(), nullable=True)
 
     # Relationships
     workspaces: Mapped[list["Workspace"]] = relationship(
@@ -173,3 +175,42 @@ class OrgCredentials(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<OrgCredentials org_id={self.org_id}>"
+
+
+class NotificationChannel(Base):
+    """
+    Notification channel configuration for an organization.
+    Supports Slack, Jira, Microsoft Teams, and generic webhooks.
+    Config is AES-encrypted to protect webhook URLs and API tokens.
+    """
+
+    __tablename__ = "notification_channels"
+
+    id: Mapped[_uuid_module.UUID] = mapped_column(
+        PGUUID(as_uuid=True), primary_key=True, default=_uuid_module.uuid4
+    )
+    org_id: Mapped[_uuid_module.UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # channel_type: slack | jira | webhook | teams
+    channel_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    # AES-256-GCM Fernet-encrypted JSON containing channel-specific config
+    config_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # event subscriptions e.g. ["scan.completed", "finding.critical", "sla.breached"]
+    events: Mapped[list[str]] = mapped_column(
+        ARRAY(String(50)), nullable=False, default=list
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:
+        return f"<NotificationChannel id={self.id} type={self.channel_type} name={self.name}>"

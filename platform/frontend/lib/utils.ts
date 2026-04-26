@@ -87,6 +87,7 @@ export function assetTypeIcon(type: AssetType): string {
     domain: "Globe2",
     webapp: "Link",
     cloud: "Cloud",
+    endpoint: "Plug",
   };
   return icons[type] ?? "Circle";
 }

@@ -17,7 +17,7 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
 from app.models.db.user import User
-from app.services.report_service import generate_report
+from app.services.report_service import generate_report, generate_pdf_report
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
 settings = get_settings()
@@ -158,4 +158,48 @@ async def download_report(
         path=report_meta["path"],
         filename=report_meta["filename"],
         media_type="text/html",
+    )
+
+
+@router.get(
+    "/{scan_job_id}/pdf",
+    summary="Download the PDF report for a scan",
+    description="Converts the HTML report to PDF using weasyprint and streams it.",
+    response_class=FileResponse,
+)
+async def download_pdf_report(
+    scan_job_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> FileResponse:
+    try:
+        pdf_path = await generate_pdf_report(
+            db=db,
+            scan_job_id=str(scan_job_id),
+            org_id=org_id,
+            workspace_dir=settings.ATTACKTRACE_WORKSPACE_DIR,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"code": "REPORT_ERROR", "message": str(e)}},
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": {"code": "PDF_GENERATION_FAILED", "message": str(e)}},
+        )
+
+    if not pdf_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"code": "NOT_FOUND", "message": "PDF report not found"}},
+        )
+
+    return FileResponse(
+        path=str(pdf_path),
+        media_type="application/pdf",
+        filename=f"report_{scan_job_id}.pdf",
+        headers={"Content-Disposition": f"attachment; filename=report_{scan_job_id}.pdf"},
     )

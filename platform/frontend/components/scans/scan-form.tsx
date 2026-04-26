@@ -29,7 +29,7 @@ import type { ScanModule, ScanIntensity } from "@/types";
 const scanSchema = z.object({
   company_name: z.string().min(2, "Engagement name is required"),
   domains: z.array(z.string().min(1)).min(1, "At least one domain is required"),
-  intensity: z.enum(["passive", "normal", "aggressive"]),
+  intensity: z.enum(["passive", "normal", "aggressive", "passive_due_diligence"]),
   skip_modules: z.array(z.string()),
   schedule_type: z.enum(["now", "scheduled"]),
   run_at: z.string().optional(),
@@ -64,6 +64,12 @@ const INTENSITIES: { value: ScanIntensity; label: string; description: string; c
     label: "Aggressive",
     description: "Deep scan with full port scanning. Noisy.",
     color: "border-red-500/30 bg-red-500/5 text-red-400",
+  },
+  {
+    value: "passive_due_diligence",
+    label: "Due Diligence",
+    description: "Passive OSINT only — no active scanning. Ideal for M&A target assessment without triggering alerts.",
+    color: "border-purple-500/30 bg-purple-500/5 text-purple-400",
   },
 ];
 
@@ -304,7 +310,7 @@ export function ScanForm() {
 
               <div className="space-y-2">
                 <Label>Scan Intensity</Label>
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-2 gap-3">
                   {INTENSITIES.map((intensity) => (
                     <Controller
                       key={intensity.value}

@@ -28,6 +28,7 @@ class AssetType(str, enum.Enum):
     IP = "ip"
     WEBAPP = "webapp"
     CLOUD = "cloud"
+    ENDPOINT = "endpoint"
 
 
 class Asset(Base, UUIDPrimaryKeyMixin, TimestampMixin):

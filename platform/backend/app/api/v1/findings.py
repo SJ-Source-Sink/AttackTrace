@@ -207,6 +207,8 @@ async def list_findings(
     min_cvss: Optional[float] = None,
     kev_only: Optional[bool] = None,
     confidence: Optional[str] = None,
+    overdue: bool = False,
+    sort_by: str = "created_at",
     page: int = 1,
     per_page: int = 50,
 ) -> dict:
@@ -277,21 +279,26 @@ async def list_findings(
     if confidence:
         query = query.where(Finding.confidence == confidence)
 
+    if overdue:
+        query = query.where(Finding.sla_deadline < datetime.now(timezone.utc))
+
     # Count
     count_query = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_query)).scalar_one()
 
-    # Severity order for sorting
-    severity_order = {
-        FindingSeverity.CRITICAL: 0,
-        FindingSeverity.HIGH: 1,
-        FindingSeverity.MEDIUM: 2,
-        FindingSeverity.LOW: 3,
-        FindingSeverity.INFO: 4,
-    }
+    # Sort
+    if sort_by == "risk_score":
+        order_col = Finding.risk_score.desc().nulls_last()
+    elif sort_by == "severity":
+        # Severity order via CASE expression is complex; fall back to created_at for now
+        order_col = Finding.created_at.desc()
+    elif sort_by == "sla_deadline":
+        order_col = Finding.sla_deadline.asc().nulls_last()
+    else:
+        order_col = Finding.created_at.desc()
 
     offset = (page - 1) * per_page
-    query = query.order_by(Finding.created_at.desc()).offset(offset).limit(per_page)
+    query = query.order_by(order_col).offset(offset).limit(per_page)
     result = await db.execute(query)
     findings = result.scalars().all()
 

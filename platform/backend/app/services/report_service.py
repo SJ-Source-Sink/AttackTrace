@@ -101,6 +101,55 @@ async def generate_report(
     }
 
 
+async def generate_pdf_report(
+    db: AsyncSession,
+    scan_job_id: str,
+    org_id: UUID,
+    workspace_dir: str,
+) -> Path:
+    """
+    Generate a PDF report for a completed scan.
+
+    Generates the HTML report first (if not already present), then converts it
+    to PDF using weasyprint running in a thread pool to avoid blocking the event loop.
+
+    Returns:
+        Path to the generated PDF file.
+    """
+    # Resolve an existing HTML report or generate one
+    report_dir = Path(workspace_dir) / "reports" / str(org_id)
+    existing_html = sorted(
+        report_dir.glob(f"report_{scan_job_id}_*.html"),
+        key=lambda x: x.stat().st_mtime,
+        reverse=True,
+    ) if report_dir.exists() else []
+
+    if existing_html and existing_html[0].stat().st_size > 0:
+        html_path = existing_html[0]
+    else:
+        # Generate fresh HTML report
+        report_meta = await generate_report(
+            db=db,
+            scan_job_id=UUID(scan_job_id),
+            org_id=org_id,
+            report_format="html",
+            include_evidence=True,
+        )
+        html_path = Path(report_meta["path"])
+
+    pdf_path = html_path.with_suffix(".pdf")
+
+    if not pdf_path.exists() or pdf_path.stat().st_size == 0:
+        def _generate_pdf() -> None:
+            from weasyprint import HTML  # type: ignore[import]
+            HTML(filename=str(html_path)).write_pdf(str(pdf_path))
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _generate_pdf)
+
+    return pdf_path
+
+
 def _write_file(path: Path, content: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)

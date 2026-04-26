@@ -21,10 +21,12 @@ from app.models.db.asset import Asset
 from app.models.db.finding import Finding, FindingStatus
 from app.models.db.scan import ScanJob, ScanStatus
 from app.models.db.user import User
+from app.services.executive_service import get_executive_metrics
 
 router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
 settings = get_settings()
 _CACHE_TTL = 300  # 5 minutes
+_EXEC_CACHE_TTL = 900  # 15 minutes
 
 # Module-level Redis connection pool — created once, reused across requests
 _redis_pool: aioredis.Redis | None = None
@@ -187,3 +189,37 @@ async def get_dashboard_stats(
             pass
 
     return result
+
+
+@router.get("/executive", summary="Get executive-level security KPIs")
+async def get_executive_dashboard(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    cache_key = f"dashboard:executive:{org_id}"
+    lock_key = f"dashboard:executive:lock:{org_id}"
+    redis = await _get_redis()
+    if redis:
+        try:
+            cached = await redis.get(cache_key)
+            if cached:
+                return json.loads(cached)
+            acquired = await redis.set(lock_key, "1", nx=True, ex=30)
+            if not acquired:
+                stale = await redis.get(cache_key)
+                if stale:
+                    return json.loads(stale)
+        except Exception:
+            redis = None
+
+    metrics = await get_executive_metrics(db, org_id)
+
+    if redis:
+        try:
+            await redis.set(cache_key, json.dumps(metrics), ex=_EXEC_CACHE_TTL)
+            await redis.delete(lock_key)
+        except Exception:
+            pass
+
+    return metrics

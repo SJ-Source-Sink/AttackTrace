@@ -1,5 +1,13 @@
 import { getAccessToken, refreshAccessToken } from "@/lib/auth";
-import type { OrgMember } from "@/types";
+import type {
+  OrgMember,
+  ScheduledScan,
+  ScheduledScanListResponse,
+  CreateScheduleRequest,
+  NotificationChannel,
+  NotificationChannelListResponse,
+  CreateChannelRequest,
+} from "@/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
 
@@ -145,6 +153,7 @@ export const scansApi = {
   create: (data: unknown) => api.post("/scans", data),
   cancel: (id: string) => api.delete(`/scans/${id}`),
   delete: (id: string) => api.delete(`/scans/${id}`),
+  getDiff: (id: string) => api.get(`/scans/${id}/diff`),
 };
 
 export const assetsApi = {
@@ -200,6 +209,31 @@ export const reportsApi = {
       URL.revokeObjectURL(url);
     }
   },
+  /** Authenticated PDF download — fetches with JWT then triggers browser save-as dialog */
+  downloadPdf: async (scanId: string, filename = `report_${scanId.slice(0, 8)}.pdf`): Promise<void> => {
+    const token = getAccessToken();
+    const res = await fetch(`${API_BASE}/reports/${scanId}/pdf`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => `HTTP ${res.status}`);
+      throw new ApiError(res.status, detail);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    try {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  },
+  /** Return the PDF endpoint URL string */
+  pdfUrl: (scanId: string): string => `${API_BASE}/reports/${scanId}/pdf`,
 };
 
 export const aiApi = {
@@ -214,6 +248,41 @@ export const aiApi = {
 
 export const dashboardApi = {
   stats: () => api.get("/dashboard/stats"),
+  executive: () => api.get("/dashboard/executive"),
+};
+
+export const nucleiApi = {
+  scan: (data: unknown) => api.post("/nuclei/scan", data),
+  scans: () => api.get("/nuclei/scans"),
+  getScan: (id: string) => api.get(`/nuclei/scans/${id}`),
+  templates: (params?: { search?: string; severity?: string; category?: string; page?: number; per_page?: number }) =>
+    api.get("/nuclei/templates", params),
+  categories: () => api.get("/nuclei/templates/categories"),
+  browseTemplates: (params?: { search?: string; category?: string; page?: number; per_page?: number }) =>
+    api.get("/nuclei/templates/browse", params),
+  toggleTemplate: (templateId: string, enabled: boolean) =>
+    api.post(`/nuclei/templates/${encodeURIComponent(templateId)}/toggle`, { enabled }),
+  uploadTemplate: async (file: File): Promise<{ filename: string; status: string }> => {
+    const token = getAccessToken();
+    const formData = new FormData();
+    formData.append("file", file);
+    const res = await fetch(`${API_BASE}/nuclei/templates/upload`, {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => `HTTP ${res.status}`);
+      throw new ApiError(res.status, detail);
+    }
+    return res.json();
+  },
+};
+
+export const cloudApi = {
+  discover: (provider: string, credentials: Record<string, string>) =>
+    api.post("/cloud/discover", { provider, credentials }),
+  listAssets: () => api.get("/cloud/assets"),
 };
 
 export const orgApi = {
@@ -243,6 +312,48 @@ export const orgApi = {
     api.post<{ user_id: string; full_name: string; email: string; role: string; joined_at: string }>("/org/members/create", data),
   updateMemberPermissions: (userId: string, toolPermissions: string[] | null) =>
     api.patch<OrgMember>(`/org/members/${userId}/permissions`, { tool_permissions: toolPermissions }),
+  updateSlaConfig: (orgId: string, config: Record<string, number>) =>
+    api.patch(`/orgs/${orgId}/sla-config`, config),
+};
+
+export const schedulesApi = {
+  list: (params?: { page?: number; per_page?: number }) =>
+    apiFetch<ScheduledScanListResponse>("/schedules", { method: "GET", params }),
+  get: (id: string) => apiFetch<ScheduledScan>(`/schedules/${id}`),
+  create: (data: CreateScheduleRequest) =>
+    apiFetch<ScheduledScan>("/schedules", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  update: (id: string, data: Partial<CreateScheduleRequest>) =>
+    apiFetch<ScheduledScan>(`/schedules/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+  delete: (id: string) => apiFetch<void>(`/schedules/${id}`, { method: "DELETE" }),
+  trigger: (id: string) =>
+    apiFetch<{ scan_job_id: string }>(`/schedules/${id}/trigger`, { method: "POST" }),
+};
+
+export const notificationsApi = {
+  listChannels: () => apiFetch<NotificationChannelListResponse>("/notifications/channels"),
+  createChannel: (data: CreateChannelRequest) =>
+    apiFetch<NotificationChannel>("/notifications/channels", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  updateChannel: (id: string, data: Partial<CreateChannelRequest>) =>
+    apiFetch<NotificationChannel>(`/notifications/channels/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+  deleteChannel: (id: string) =>
+    apiFetch<void>(`/notifications/channels/${id}`, { method: "DELETE" }),
+  testChannel: (id: string) =>
+    apiFetch<{ success: boolean; message: string }>(
+      `/notifications/channels/${id}/test`,
+      { method: "POST" },
+    ),
 };
 
 export interface InviteCodeItem {
