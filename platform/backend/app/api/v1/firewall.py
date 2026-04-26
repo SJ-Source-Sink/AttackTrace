@@ -5,11 +5,18 @@ and firewall rule analysis, all streamed via SSE where applicable.
 
 import asyncio
 import difflib
+import hashlib
+import hmac
 import io
 import ipaddress
 import json
+import os
 import re
 import shutil
+import socket
+import ssl
+import struct
+import time
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -2709,3 +2716,1323 @@ async def get_firewall_scans(
         ],
         "total": len(logs),
     })
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHYSICAL FIREWALL SCANNER
+# Hardware NGFW fingerprinting, CVE correlation, behavioral analysis
+# Supports: Cisco ASA/FTD, Palo Alto PAN-OS, Fortinet FortiGate, Check Point,
+#           SonicWall, Juniper SRX, pfSense, OPNsense
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+# ── Physical scanner models ───────────────────────────────────────────────────
+
+class PhysicalScanRequest(BaseModel):
+    target: str  # IP or hostname
+    scan_mode: str = "full"  # quick | full | aggressive
+    include_snmp: bool = True
+    include_ike: bool = True
+    include_cve_probes: bool = True
+
+    @field_validator("target")
+    @classmethod
+    def validate_target(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Target is required")
+        return v
+
+    @field_validator("scan_mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        if v not in ("quick", "full", "aggressive"):
+            raise ValueError("scan_mode must be quick, full, or aggressive")
+        return v
+
+
+# ── Vendor signature database ─────────────────────────────────────────────────
+
+PHYSICAL_VENDORS = {
+    "cisco_asa": {
+        "name": "Cisco ASA/FTD",
+        "ssh_patterns": [r"SSH-2\.0-Cisco", r"SSH-2\.0-AsyncOS"],
+        "http_paths": ["/+CSCOE+/logon.html", "/+webvpn+/index.html", "/admin/public/index.html"],
+        "http_titles": [r"Cisco ASDM", r"Cisco Adaptive Security Appliance"],
+        "http_body": [r"ciscoLogo", r"CSCOE", r"Cisco Systems", r"csc-logo"],
+        "http_headers": {"Server": r"Cisco ASDM"},
+        "snmp_oid_prefix": "1.3.6.1.4.1.9",
+        "snmp_version_oid": "1.3.6.1.4.1.9.9.25.1.1.1.2.5",
+        "default_ttl": 255,
+        "mgmt_ports": [22, 443, 23, 8443],
+        "vpn_paths": ["/+CSCOE+/logon.html", "/+webvpn+/"],
+        "vpn_name": "Cisco AnyConnect",
+        "color": "#049fd9",
+    },
+    "paloalto": {
+        "name": "Palo Alto Networks PAN-OS",
+        "ssh_patterns": [],  # Uses standard OpenSSH — identified by other signals
+        "http_paths": ["/php/login.php", "/global-protect/login.esp", "/global-protect/getsoftware.esp"],
+        "http_titles": [r"Palo Alto Networks", r"GlobalProtect", r"PAN-OS"],
+        "http_body": [r"pan_form_token", r"GlobalProtect", r"PAN-OS", r"paloaltonetworks"],
+        "http_headers": {},
+        "snmp_oid_prefix": "1.3.6.1.4.1.25461",
+        "snmp_version_oid": "1.3.6.1.4.1.25461.2.1.2.1.1.0",
+        "default_ttl": 64,
+        "mgmt_ports": [22, 443, 3978, 4443],
+        "vpn_paths": ["/global-protect/login.esp", "/global-protect/getsoftware.esp"],
+        "vpn_name": "GlobalProtect",
+        "color": "#fa582d",
+    },
+    "fortinet": {
+        "name": "Fortinet FortiGate",
+        "ssh_patterns": [],  # Standard OpenSSH, identified via other signals
+        "http_paths": ["/login", "/remote/login", "/remote/logincheck", "/ng/"],
+        "http_titles": [r"FortiGate", r"FortiOS", r"Fortinet"],
+        "http_body": [r"fgt_lang", r"FortiToken", r"ftm_push", r"fortigate", r"fortinet"],
+        "http_headers": {},
+        "snmp_oid_prefix": "1.3.6.1.4.1.12356",
+        "snmp_version_oid": "1.3.6.1.4.1.12356.101.4.1.1.0",
+        "default_ttl": 64,
+        "mgmt_ports": [22, 443, 8443, 10443, 541],
+        "vpn_paths": ["/remote/login", "/remote/logincheck"],
+        "vpn_name": "FortiSSL VPN",
+        "color": "#ee3124",
+    },
+    "checkpoint": {
+        "name": "Check Point",
+        "ssh_patterns": [],
+        "http_paths": ["/sslvpn/Login/Login", "/", "/dana-na/auth/url_default/welcome.cgi"],
+        "http_titles": [r"Check Point", r"Gaia"],
+        "http_body": [r"cplogo", r"Check Point Software", r"chkp", r"check.point"],
+        "http_headers": {},
+        "snmp_oid_prefix": "1.3.6.1.4.1.2620",
+        "snmp_version_oid": "1.3.6.1.4.1.2620.1.6.4.1.0",
+        "default_ttl": 64,
+        "mgmt_ports": [22, 443, 257, 18190, 18191, 18192, 8443],
+        "vpn_paths": ["/sslvpn/Login/Login"],
+        "vpn_name": "Check Point Mobile Access",
+        "color": "#d40000",
+    },
+    "sonicwall": {
+        "name": "SonicWall",
+        "ssh_patterns": [],
+        "http_paths": ["/auth.html", "/"],
+        "http_titles": [r"SonicWall", r"SonicOS"],
+        "http_body": [r"swm_ver", r"SonicWall", r"sonicwall_logo", r"sonicwall"],
+        "http_headers": {"Server": r"SonicWALL"},
+        "snmp_oid_prefix": "1.3.6.1.4.1.8741",
+        "snmp_version_oid": "1.3.6.1.4.1.8741.1.3.1.3.0",
+        "default_ttl": 64,
+        "mgmt_ports": [22, 443, 8443, 80],
+        "vpn_paths": [],
+        "vpn_name": "SonicWall SSL-VPN",
+        "color": "#f68b1f",
+    },
+    "juniper": {
+        "name": "Juniper SRX/Junos",
+        "ssh_patterns": [r"SSH-2\.0-JUNOS"],
+        "http_paths": ["/", "/dana-na/auth"],
+        "http_titles": [r"J-Web", r"Juniper Networks"],
+        "http_body": [r"juniper_logo", r"Juniper Networks", r"junos", r"jweb"],
+        "http_headers": {},
+        "snmp_oid_prefix": "1.3.6.1.4.1.2636",
+        "snmp_version_oid": "1.3.6.1.4.1.2636.3.1.2.0",
+        "default_ttl": 64,
+        "mgmt_ports": [22, 443, 830, 80],
+        "vpn_paths": ["/dana-na/auth"],
+        "vpn_name": "Pulse/Juniper SSL VPN",
+        "color": "#009bde",
+    },
+    "pfsense": {
+        "name": "pfSense",
+        "ssh_patterns": [],
+        "http_paths": ["/index.php", "/"],
+        "http_titles": [r"pfSense"],
+        "http_body": [r"pfsense", r"pfSense"],
+        "http_headers": {},
+        "snmp_oid_prefix": None,
+        "snmp_version_oid": None,
+        "default_ttl": 64,
+        "mgmt_ports": [22, 443, 80],
+        "vpn_paths": [],
+        "vpn_name": "OpenVPN",
+        "color": "#212a34",
+    },
+    "opnsense": {
+        "name": "OPNsense",
+        "ssh_patterns": [],
+        "http_paths": ["/", "/ui/core/firmware"],
+        "http_titles": [r"OPNsense"],
+        "http_body": [r"opnsense", r"OPNsense"],
+        "http_headers": {},
+        "snmp_oid_prefix": None,
+        "snmp_version_oid": None,
+        "default_ttl": 64,
+        "mgmt_ports": [22, 443, 80],
+        "vpn_paths": [],
+        "vpn_name": "OpenVPN",
+        "color": "#d94f00",
+    },
+}
+
+# ── CVE database ──────────────────────────────────────────────────────────────
+
+PHYSICAL_CVE_DB: list[dict] = [
+    {
+        "id": "CVE-2024-3400", "cvss": 10.0, "vendor_key": "paloalto",
+        "severity": "critical", "actively_exploited": True,
+        "title": "PAN-OS GlobalProtect Command Injection — Unauthenticated RCE",
+        "description": "Unauthenticated remote code execution via GlobalProtect gateway. CVSS 10.0. Actively exploited by UTA0218 (Volt Typhoon). Affects PAN-OS 10.2 < 10.2.9-h1, 11.0 < 11.0.4-h1, 11.1 < 11.1.2-h3.",
+        "affected_versions": {"10.2": (0, 9), "11.0": (0, 4), "11.1": (0, 2)},
+        "detection": "version+portal",
+        "remediation": "Patch immediately. Temp workaround: disable GlobalProtect gateway.",
+    },
+    {
+        "id": "CVE-2024-0012", "cvss": 9.8, "vendor_key": "paloalto",
+        "severity": "critical", "actively_exploited": True,
+        "title": "PAN-OS Management Interface Authentication Bypass",
+        "description": "Unauthenticated management interface access. Chained with CVE-2024-9474 for privilege escalation.",
+        "affected_versions": {"10.2": (0, 12), "11.0": (0, 6), "11.1": (0, 5), "11.2": (0, 4)},
+        "detection": "version",
+        "remediation": "Restrict management interface to trusted IPs. Apply patch.",
+    },
+    {
+        "id": "CVE-2024-21762", "cvss": 9.8, "vendor_key": "fortinet",
+        "severity": "critical", "actively_exploited": True,
+        "title": "FortiOS SSL-VPN Out-of-Bounds Write — Unauthenticated RCE",
+        "description": "Out-of-bounds write in SSL-VPN web management interface allows unauthenticated RCE. CISA KEV listed.",
+        "affected_versions": {},
+        "detection": "version+portal",
+        "remediation": "Upgrade FortiOS. Disable SSL-VPN if not needed.",
+    },
+    {
+        "id": "CVE-2023-27997", "cvss": 9.2, "vendor_key": "fortinet",
+        "severity": "critical", "actively_exploited": False,
+        "title": "FortiGate SSL-VPN Heap Buffer Overflow — Unauthenticated RCE",
+        "description": "Pre-authentication heap-based buffer overflow in SSL-VPN WebGUI.",
+        "affected_versions": {},
+        "detection": "portal",
+        "remediation": "Upgrade to FortiOS 6.0.17, 6.2.15, 6.4.13, 7.0.12, 7.2.5+",
+    },
+    {
+        "id": "CVE-2024-24919", "cvss": 8.6, "vendor_key": "checkpoint",
+        "severity": "high", "actively_exploited": True,
+        "title": "Check Point Security Gateway Information Disclosure",
+        "description": "Path traversal allows reading arbitrary files without authentication. Actively exploited to exfiltrate /etc/shadow.",
+        "affected_versions": {},
+        "detection": "portal",
+        "remediation": "Apply hotfix HF_T-1694_HOTFIX_sk182337 immediately.",
+    },
+    {
+        "id": "CVE-2024-20353", "cvss": 8.6, "vendor_key": "cisco_asa",
+        "severity": "high", "actively_exploited": True,
+        "title": "Cisco ASA/FTD DoS via Crafted HTTP — ArcaneDoor Campaign",
+        "description": "Denial of service via crafted HTTP request. Used in ArcaneDoor espionage campaign attributed to state-sponsored actor.",
+        "affected_versions": {},
+        "detection": "banner+portal",
+        "remediation": "Upgrade ASA firmware. Restrict management interface access.",
+    },
+    {
+        "id": "CVE-2024-20359", "cvss": 6.0, "vendor_key": "cisco_asa",
+        "severity": "medium", "actively_exploited": True,
+        "title": "Cisco ASA Persistent Local Code Execution — ArcaneDoor",
+        "description": "Allows persistence after reboot. Part of ArcaneDoor campaign toolkit.",
+        "affected_versions": {},
+        "detection": "banner",
+        "remediation": "Verify device integrity with 'show version' and compare to known-good baseline.",
+    },
+    {
+        "id": "CVE-2023-20269", "cvss": 5.0, "vendor_key": "cisco_asa",
+        "severity": "medium", "actively_exploited": True,
+        "title": "Cisco ASA/FTD VPN Brute Force / Unauthorized Session",
+        "description": "Allows unauthenticated attackers to brute force VPN credentials. Part of ransomware group TTPs.",
+        "affected_versions": {},
+        "detection": "portal",
+        "remediation": "Enable VPN lockout, MFA for VPN, restrict AnyConnect to known IPs.",
+    },
+    {
+        "id": "CVE-2024-40766", "cvss": 9.8, "vendor_key": "sonicwall",
+        "severity": "critical", "actively_exploited": True,
+        "title": "SonicWall SonicOS Improper Access Control — CISA KEV",
+        "description": "Improper access control in management interface and SSL-VPN. CISA KEV listed.",
+        "affected_versions": {},
+        "detection": "portal",
+        "remediation": "Upgrade SonicOS. Restrict management access to trusted networks.",
+    },
+    {
+        "id": "CVE-2023-36845", "cvss": 9.8, "vendor_key": "juniper",
+        "severity": "critical", "actively_exploited": True,
+        "title": "Juniper SRX/EX PHP Environment Variable Injection — Unauthenticated RCE",
+        "description": "Unauthenticated RCE via J-Web PHP env var injection. Actively exploited in the wild.",
+        "affected_versions": {},
+        "detection": "portal",
+        "remediation": "Upgrade Junos OS. Disable J-Web if not needed.",
+    },
+    {
+        "id": "CVE-2021-20038", "cvss": 9.8, "vendor_key": "sonicwall",
+        "severity": "critical", "actively_exploited": True,
+        "title": "SonicWall SMA 100 Buffer Overflow — Unauthenticated RCE",
+        "description": "Stack-based buffer overflow in SMA 100 management interface.",
+        "affected_versions": {},
+        "detection": "portal",
+        "remediation": "Upgrade SMA firmware to 10.2.0.8-37sv or later.",
+    },
+]
+
+# ── SNMP community strings to try ─────────────────────────────────────────────
+
+SNMP_COMMUNITIES = [
+    "public", "private", "cisco", "firewall", "admin", "monitor",
+    "community", "snmp", "fortinet", "checkpoint", "sonicwall",
+    "netscreen", "juniper", "paloalto", "network", "secret",
+    "manager", "default", "read", "readonly", "1234", "password",
+    "internal", "external", "router", "switch", "all", "0",
+]
+
+SNMP_OIDS = {
+    "sysDescr":    "1.3.6.1.2.1.1.1.0",
+    "sysObjectID": "1.3.6.1.2.1.1.2.0",
+    "sysName":     "1.3.6.1.2.1.1.5.0",
+    "sysLocation": "1.3.6.1.2.1.1.6.0",
+    "sysContact":  "1.3.6.1.2.1.1.4.0",
+}
+
+# Vendor enterprise OID prefixes
+VENDOR_OID_MAP = {
+    "1.3.6.1.4.1.9":     "cisco_asa",
+    "1.3.6.1.4.1.12356": "fortinet",
+    "1.3.6.1.4.1.25461": "paloalto",
+    "1.3.6.1.4.1.2620":  "checkpoint",
+    "1.3.6.1.4.1.8741":  "sonicwall",
+    "1.3.6.1.4.1.2636":  "juniper",
+}
+
+# IKE Vendor ID hashes (MD5 prefixes)
+IKE_VENDOR_IDS = {
+    "09002689dfd6b712":                         "Cisco Unity",
+    "afcad71368a1f1c96b8696fc7757060":          "Dead Peer Detection (RFC 3706)",
+    "f4ed19e0c114eb516faaac0ee37daf2807cbf9d1": "Check Point FW-1",
+    "7d9419a65310ca6f2c179d9215529d56":          "Cisco VPN Concentrator",
+    "4048b7d56ebce88525e7de7f00d6c2d3":          "IKE Fragmentation",
+    "27bab5dc01ea0760ea4e3190ac27c0d0":          "XAUTH",
+    "1e2b516905991c7d7c96fcbfb587e46100":        "Fortinet FortiGate",
+}
+
+# ── Phase implementations ──────────────────────────────────────────────────────
+
+async def _port_probe_physical(target: str, ports: list[int], timeout: float = 2.0) -> dict[int, bool]:
+    """Phase 1: TCP SYN scan on management ports using asyncio connections."""
+    results: dict[int, bool] = {}
+
+    async def check_port(port: int) -> tuple[int, bool]:
+        try:
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection(target, port), timeout=timeout
+            )
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return port, True
+        except Exception:
+            return port, False
+
+    tasks = [check_port(p) for p in ports]
+    results_list = await asyncio.gather(*tasks)
+    return dict(results_list)
+
+
+async def _ssh_banner_grab(target: str, port: int = 22, timeout: float = 3.0) -> dict:
+    """Phase 2a: Grab SSH banner and infer vendor."""
+    result = {"open": False, "banner": None, "vendor_hint": None}
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(target, port), timeout=timeout
+        )
+        banner_bytes = await asyncio.wait_for(reader.read(256), timeout=timeout)
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        banner = banner_bytes.decode("utf-8", errors="ignore").strip()
+        result["open"] = True
+        result["banner"] = banner
+
+        # Vendor inference from banner
+        if re.search(r"Cisco", banner, re.I):
+            result["vendor_hint"] = "cisco_asa"
+        elif re.search(r"JUNOS", banner, re.I):
+            result["vendor_hint"] = "juniper"
+        elif re.search(r"FreeBSD", banner, re.I):
+            result["vendor_hint"] = "pfsense"  # pfSense/OPNsense run FreeBSD
+    except Exception:
+        pass
+    return result
+
+
+async def _tls_cert_probe(target: str, port: int = 443, timeout: float = 5.0) -> dict:
+    """Phase 2b: Parse TLS certificate for vendor fingerprints."""
+    result = {"open": False, "subject": {}, "issuer": {}, "san": [], "vendor_hint": None,
+              "fingerprint": None, "expires": None, "self_signed": False, "expired": False}
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        loop = asyncio.get_event_loop()
+
+        def _get_cert():
+            s = socket.create_connection((target, port), timeout=timeout)
+            ss = ctx.wrap_socket(s, server_hostname=target)
+            cert_bin = ss.getpeercert(binary_form=True)
+            ss.close()
+            return cert_bin
+
+        cert_bin = await loop.run_in_executor(None, _get_cert)
+        result["open"] = True
+        result["fingerprint"] = hashlib.sha256(cert_bin).hexdigest()[:16]
+
+        # Parse with ssl module (no cryptography dependency needed)
+        ctx2 = ssl.create_default_context()
+        ctx2.check_hostname = False
+        ctx2.verify_mode = ssl.CERT_NONE
+        pem = ssl.DER_cert_to_PEM_cert(cert_bin)
+        cert_dict = ssl.PEM_cert_to_DER_cert(pem)
+
+        # Use raw DER parsing for subject/issuer via ssl module
+        with socket.create_connection((target, port), timeout=timeout) as raw_sock:
+            with ctx.wrap_socket(raw_sock, server_hostname=target) as ssock:
+                peer = ssock.getpeercert()
+                if peer:
+                    for field in peer.get("subject", []):
+                        for k, v in field:
+                            result["subject"][k] = v
+                    for field in peer.get("issuer", []):
+                        for k, v in field:
+                            result["issuer"][k] = v
+                    result["san"] = [s for typ, s in peer.get("subjectAltName", [])]
+                    result["expires"] = peer.get("notAfter", None)
+
+        # Check self-signed
+        if result["subject"] == result["issuer"]:
+            result["self_signed"] = True
+
+        # Vendor from cert fields
+        cert_text = " ".join([
+            result["subject"].get("organizationName", ""),
+            result["subject"].get("commonName", ""),
+            result["issuer"].get("organizationName", ""),
+            result["issuer"].get("commonName", ""),
+        ]).lower()
+
+        vendor_cert_map = {
+            "cisco": "cisco_asa", "cisco systems": "cisco_asa",
+            "fortinet": "fortinet", "fortigate": "fortinet",
+            "palo alto": "paloalto",
+            "check point": "checkpoint",
+            "sonicwall": "sonicwall",
+            "juniper": "juniper",
+            "pfsense": "pfsense",
+            "opnsense": "opnsense",
+        }
+        for kw, vendor_key in vendor_cert_map.items():
+            if kw in cert_text:
+                result["vendor_hint"] = vendor_key
+                break
+
+    except ssl.SSLError:
+        result["open"] = True  # Port is open, just TLS issue
+    except Exception:
+        pass
+    return result
+
+
+async def _http_fingerprint_physical(target: str, port: int, use_ssl: bool = True) -> dict:
+    """Phase 2c: HTTP/HTTPS management page fingerprinting."""
+    proto = "https" if use_ssl else "http"
+    base = f"{proto}://{target}:{port}"
+    result = {"vendor_hint": None, "paths_found": [], "indicators": [], "version": None, "vpn_portal": None}
+
+    try:
+        async with httpx.AsyncClient(verify=False, follow_redirects=True, timeout=5.0) as client:
+            for vendor_key, sigs in PHYSICAL_VENDORS.items():
+                if result["vendor_hint"]:
+                    break
+                for path in (sigs["http_paths"][:3] if use_ssl else []):
+                    try:
+                        resp = await client.get(f"{base}{path}")
+                        body = resp.text
+                        body_low = body.lower()
+                        matched = False
+
+                        # Check titles
+                        title_m = re.search(r"<title>(.*?)</title>", body, re.I | re.S)
+                        title = title_m.group(1).strip() if title_m else ""
+                        for pat in sigs["http_titles"]:
+                            if re.search(pat, title, re.I):
+                                result["vendor_hint"] = vendor_key
+                                result["indicators"].append(f"title:{title[:60]}")
+                                result["paths_found"].append(path)
+                                matched = True
+                                break
+
+                        if not matched:
+                            # Check body
+                            for pat in sigs["http_body"]:
+                                if re.search(pat, body_low, re.I):
+                                    result["vendor_hint"] = vendor_key
+                                    result["indicators"].append(f"body:{pat}")
+                                    result["paths_found"].append(path)
+                                    matched = True
+                                    break
+
+                        if not matched:
+                            # Check headers
+                            for hdr, pat in sigs["http_headers"].items():
+                                if hdr.lower() in {k.lower() for k in resp.headers}:
+                                    val = resp.headers.get(hdr, "")
+                                    if re.search(pat, val, re.I):
+                                        result["vendor_hint"] = vendor_key
+                                        result["indicators"].append(f"header:{hdr}={val[:40]}")
+                                        result["paths_found"].append(path)
+                                        matched = True
+                                        break
+
+                        if matched:
+                            # Try to extract version
+                            for vp in [
+                                r"(?:version|ver)[\":\s]+([0-9]+\.[0-9]+[\w\.\-]*)",
+                                r"FortiOS\s+([0-9]+\.[0-9]+\.[0-9]+)",
+                                r"PAN-OS\s+([0-9]+\.[0-9]+)",
+                                r"ASA\s+([0-9]+\.[0-9]+[\w\(\)]*)",
+                                r"v([0-9]+\.[0-9]+\.[0-9]+)",
+                            ]:
+                                vm = re.search(vp, body, re.I)
+                                if vm:
+                                    result["version"] = vm.group(1)
+                                    break
+                            # Check VPN portal
+                            for vpn_path in sigs["vpn_paths"]:
+                                for p_found in result["paths_found"]:
+                                    if vpn_path in p_found:
+                                        result["vpn_portal"] = sigs["vpn_name"]
+                            break
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+    return result
+
+
+async def _snmp_probe_physical(target: str) -> dict:
+    """Phase 3: SNMP community brute force + OID fingerprinting via raw UDP."""
+    result = {"accessible": False, "community": None, "sysDescr": None,
+              "sysObjectID": None, "sysName": None, "vendor_hint": None}
+
+    def _build_snmp_get(community: str, oid_str: str, request_id: int = 1) -> bytes:
+        """Build minimal SNMPv1 GET-REQUEST packet."""
+        def encode_oid(oid_str: str) -> bytes:
+            parts = [int(x) for x in oid_str.split(".")]
+            first = parts[0] * 40 + parts[1]
+            encoded = [first]
+            for part in parts[2:]:
+                if part < 128:
+                    encoded.append(part)
+                else:
+                    result_parts = []
+                    while part > 0:
+                        result_parts.append(part & 0x7f)
+                        part >>= 7
+                    result_parts.reverse()
+                    for i, b in enumerate(result_parts):
+                        encoded.append(b | (0x80 if i < len(result_parts) - 1 else 0))
+            return bytes(encoded)
+
+        def tlv(tag: int, value: bytes) -> bytes:
+            length = len(value)
+            if length < 128:
+                return bytes([tag, length]) + value
+            elif length < 256:
+                return bytes([tag, 0x81, length]) + value
+            else:
+                return bytes([tag, 0x82, (length >> 8) & 0xff, length & 0xff]) + value
+
+        oid_encoded = encode_oid(oid_str)
+        oid_tlv = tlv(0x06, oid_encoded)
+        null_tlv = bytes([0x05, 0x00])
+        var_bind = tlv(0x30, oid_tlv + null_tlv)
+        var_binds = tlv(0x30, var_bind)
+
+        req_id = struct.pack(">i", request_id)
+        req_id_tlv = tlv(0x02, req_id)
+        error_status = bytes([0x02, 0x01, 0x00])
+        error_index = bytes([0x02, 0x01, 0x00])
+
+        get_request = tlv(0xa0, req_id_tlv + error_status + error_index + var_binds)
+
+        version = bytes([0x02, 0x01, 0x00])  # version = 0 (SNMPv1)
+        community_bytes = community.encode()
+        community_tlv = tlv(0x04, community_bytes)
+
+        message = tlv(0x30, version + community_tlv + get_request)
+        return message
+
+    def _parse_snmp_string(data: bytes) -> str | None:
+        """Minimal SNMP response parser — extract first OCTET STRING or OID value."""
+        try:
+            # Find OCTET STRING (0x04) or OID (0x06) after variable bindings
+            idx = 0
+            while idx < len(data) - 2:
+                tag = data[idx]
+                length = data[idx + 1]
+                if length & 0x80:
+                    extra = length & 0x7f
+                    if idx + 1 + extra >= len(data):
+                        break
+                    length = int.from_bytes(data[idx + 2:idx + 2 + extra], "big")
+                    idx += extra
+                if tag == 0x04 and length > 0:  # OCTET STRING with content
+                    val = data[idx + 2:idx + 2 + length]
+                    try:
+                        decoded = val.decode("utf-8", errors="replace").strip()
+                        if len(decoded) > 2:
+                            return decoded
+                    except Exception:
+                        pass
+                idx += 2 + length
+        except Exception:
+            pass
+        return None
+
+    loop = asyncio.get_event_loop()
+
+    def _snmp_get_sync(community: str, oid: str) -> str | None:
+        try:
+            pkt = _build_snmp_get(community, oid)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(1.0)
+            sock.sendto(pkt, (target, 161))
+            resp, _ = sock.recvfrom(4096)
+            sock.close()
+            return _parse_snmp_string(resp)
+        except Exception:
+            return None
+
+    # Try each community string
+    for community in SNMP_COMMUNITIES:
+        val = await loop.run_in_executor(None, _snmp_get_sync, community, SNMP_OIDS["sysDescr"])
+        if val and len(val) > 3:
+            result["accessible"] = True
+            result["community"] = community
+            result["sysDescr"] = val
+
+            # Get sysObjectID and sysName
+            for name, oid in [("sysObjectID", SNMP_OIDS["sysObjectID"]),
+                               ("sysName", SNMP_OIDS["sysName"])]:
+                v = await loop.run_in_executor(None, _snmp_get_sync, community, oid)
+                if v:
+                    result[name] = v
+
+            # Infer vendor from OID
+            oid_str = result.get("sysObjectID", "")
+            for prefix, vendor_key in VENDOR_OID_MAP.items():
+                if oid_str.startswith(prefix):
+                    result["vendor_hint"] = vendor_key
+                    break
+
+            # Fallback: sysDescr keyword
+            if not result["vendor_hint"]:
+                desc = result["sysDescr"].lower()
+                keyword_map = {
+                    "cisco": "cisco_asa", "fortinet": "fortinet", "fortigate": "fortinet",
+                    "palo alto": "paloalto", "pan-os": "paloalto",
+                    "check point": "checkpoint", "gaia": "checkpoint",
+                    "sonicwall": "sonicwall", "juniper": "juniper", "junos": "juniper",
+                    "pfsense": "pfsense", "opnsense": "opnsense",
+                }
+                for kw, vk in keyword_map.items():
+                    if kw in desc:
+                        result["vendor_hint"] = vk
+                        break
+            break
+
+    return result
+
+
+async def _ike_probe_physical(target: str, timeout: float = 3.0) -> dict:
+    """Phase 4: IKEv1 Main Mode probe for VPN/firewall fingerprinting."""
+    result = {"ike_open": False, "vendor_ids": [], "vendor_hint": None}
+
+    def _build_ike_probe() -> bytes:
+        """Build IKEv1 Main Mode SA proposal."""
+        initiator_spi = os.urandom(8)
+        # Minimal IKEv1 SA payload: 3DES-SHA1-PSK-DH2
+        transform = (
+            b"\x00\x00\x00\x24"  # Next=0, Res=0, Len=36
+            b"\x01\x01"          # Transform# 1, KEY_IKE
+            b"\x00\x00"          # Reserved
+            b"\x80\x01\x00\x05" # Encrypt=3DES
+            b"\x80\x02\x00\x02" # Hash=SHA1
+            b"\x80\x03\x00\x01" # Auth=PSK
+            b"\x80\x04\x00\x02" # DH=group2
+        )
+        proposal = (
+            b"\x00\x00\x00\x2c"  # Next=0, Len=44
+            b"\x01\x01\x00\x01" # Prop#1, ISAKMP, 1 transform
+        ) + initiator_spi + transform
+        sa = b"\x00\x00\x00\x30" + proposal  # Next=0, Len=48
+        hdr = (
+            initiator_spi +
+            b"\x00" * 8 +  # Responder SPI
+            b"\x01" +      # Next payload = SA
+            b"\x10" +      # Version 1.0
+            b"\x02" +      # Exchange = Main Mode
+            b"\x00" +      # Flags
+            b"\x00\x00\x00\x00"  # Msg ID
+        )
+        total_len = 28 + len(sa)
+        hdr += struct.pack("!I", total_len)
+        return hdr + sa
+
+    loop = asyncio.get_event_loop()
+
+    def _ike_probe_sync() -> tuple[bool, list[str]]:
+        try:
+            pkt = _build_ike_probe()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(timeout)
+            sock.sendto(pkt, (target, 500))
+            resp, _ = sock.recvfrom(4096)
+            sock.close()
+            # Extract Vendor ID payloads (type 13)
+            vendor_ids = []
+            if len(resp) > 28:
+                offset = 28
+                next_p = resp[16] if len(resp) > 16 else 0
+                while offset < len(resp) - 4 and next_p != 0:
+                    cur_p = next_p
+                    next_p = resp[offset]
+                    plen = struct.unpack("!H", resp[offset+2:offset+4])[0]
+                    if cur_p == 13 and plen > 4:  # Vendor ID payload
+                        vid = resp[offset+4:offset+plen].hex()
+                        vendor_ids.append(vid)
+                    if plen < 4:
+                        break
+                    offset += plen
+            return True, vendor_ids
+        except Exception:
+            return False, []
+
+    ike_open, vendor_ids = await loop.run_in_executor(None, _ike_probe_sync)
+    result["ike_open"] = ike_open
+    result["vendor_ids"] = vendor_ids[:10]
+
+    # Match known Vendor ID hashes
+    for vid in vendor_ids:
+        for known_prefix, name in IKE_VENDOR_IDS.items():
+            if vid.startswith(known_prefix[:16]):
+                result["vendor_hint"] = name
+                break
+
+    return result
+
+
+async def _tcp_behavior_probe(target: str, open_port: int, closed_port: int = 19999) -> dict:
+    """Phase 5: TCP behavioral analysis to infer firewall type."""
+    result = {
+        "stateful": None,
+        "response_type": None,
+        "ttl": None,
+        "tcp_window": None,
+        "inference": "unknown",
+    }
+
+    try:
+        # Measure TTL via ICMP echo using raw socket
+        loop = asyncio.get_event_loop()
+
+        def _icmp_ttl() -> tuple[int | None, float | None]:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP) as s:
+                    s.settimeout(2.0)
+                    # ICMP echo
+                    data = struct.pack("!BBHHH", 8, 0, 0, 1, 1) + b"AttackTrace"
+                    checksum = 0
+                    for i in range(0, len(data), 2):
+                        w = data[i] + (data[i+1] << 8) if i+1 < len(data) else data[i]
+                        checksum += w
+                    checksum = ~((checksum >> 16) + (checksum & 0xffff)) & 0xffff
+                    data = struct.pack("!BBHHH", 8, 0, checksum, 1, 1) + b"AttackTrace"
+                    start = time.time()
+                    s.sendto(data, (target, 0))
+                    resp, _ = s.recvfrom(1024)
+                    rtt = (time.time() - start) * 1000
+                    if len(resp) >= 20:
+                        ttl = resp[8]
+                        return ttl, round(rtt, 2)
+            except PermissionError:
+                pass
+            except Exception:
+                pass
+            return None, None
+
+        ttl, rtt = await loop.run_in_executor(None, _icmp_ttl)
+        result["ttl"] = ttl
+        if rtt:
+            result["rtt_ms"] = rtt
+
+        if ttl:
+            if ttl >= 252:
+                result["inference"] = "Cisco IOS/ASA or Juniper Junos (TTL≈255)"
+            elif 60 <= ttl <= 65:
+                result["inference"] = "Linux-based firewall (FortiOS/PAN-OS/pfSense/Check Point Gaia)"
+            elif 124 <= ttl <= 128:
+                result["inference"] = "Windows-based (unusual for perimeter firewall)"
+
+        # TCP ACK probe to test stateful vs stateless
+        def _ack_probe(port: int) -> str:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP) as s:
+                    s.settimeout(2.0)
+                    # Build ACK packet
+                    src_port = 54321
+                    seq_num = 12345
+                    ack_num = 0
+                    offset_res = (5 << 4) | 0
+                    flags = 0x10  # ACK
+                    window = 64240
+                    tcp_header = struct.pack(
+                        "!HHLLBBHHH",
+                        src_port, port, seq_num, ack_num,
+                        offset_res, flags, window, 0, 0
+                    )
+                    # Build pseudo header for checksum
+                    src_ip = socket.gethostbyname(socket.gethostname())
+                    pseudo = socket.inet_aton(src_ip) + socket.inet_aton(target) + b"\x00\x06" + struct.pack("!H", len(tcp_header))
+                    chk_data = pseudo + tcp_header
+                    checksum = 0
+                    for i in range(0, len(chk_data), 2):
+                        w = chk_data[i] + (chk_data[i+1] << 8) if i+1 < len(chk_data) else chk_data[i]
+                        checksum += w
+                    checksum = ~((checksum >> 16) + (checksum & 0xffff)) & 0xffff
+                    tcp_header = struct.pack(
+                        "!HHLLBBHHH",
+                        src_port, port, seq_num, ack_num,
+                        offset_res, flags, window, checksum, 0
+                    )
+                    s.sendto(tcp_header, (target, port))
+                    resp = s.recv(1024)
+                    if len(resp) >= 20:
+                        flags_byte = resp[13]
+                        if flags_byte & 0x04:  # RST
+                            return "rst"
+                        elif flags_byte & 0x02:  # SYN
+                            return "syn"
+                    return "unknown"
+            except PermissionError:
+                return "no_raw_socket"
+            except socket.timeout:
+                return "timeout"
+            except Exception:
+                return "error"
+
+        ack_result = await loop.run_in_executor(None, _ack_probe, open_port)
+        result["ack_response"] = ack_result
+        if ack_result == "timeout":
+            result["stateful"] = True
+            result["inference"] += " | Stateful (ACK probe dropped)"
+        elif ack_result == "rst":
+            result["stateful"] = False
+            result["inference"] += " | Stateless or ACL-based (ACK RST received)"
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
+async def _ssl_vpn_portal_probe(target: str, ports: list[int], timeout: float = 5.0) -> list[dict]:
+    """Phase 6: Detect SSL VPN portals exposed on management ports."""
+    portals = []
+    vpn_paths = [
+        ("/+CSCOE+/logon.html", "Cisco AnyConnect"),
+        ("/+webvpn+/", "Cisco AnyConnect"),
+        ("/global-protect/login.esp", "Palo Alto GlobalProtect"),
+        ("/global-protect/getsoftware.esp", "Palo Alto GlobalProtect"),
+        ("/remote/login", "Fortinet SSL-VPN"),
+        ("/remote/logincheck", "Fortinet SSL-VPN"),
+        ("/sslvpn/Login/Login", "Check Point Mobile Access"),
+        ("/dana-na/auth/url_default/welcome.cgi", "Juniper Pulse Secure"),
+        ("/auth.html", "SonicWall SSL-VPN"),
+    ]
+
+    open_ssl_ports = [p for p in ports if p in (443, 4443, 8443, 10443)]
+    if not open_ssl_ports:
+        return portals
+
+    async with httpx.AsyncClient(verify=False, follow_redirects=True, timeout=timeout) as client:
+        for port in open_ssl_ports[:2]:
+            for path, vpn_name in vpn_paths:
+                try:
+                    resp = await client.get(f"https://{target}:{port}{path}")
+                    if resp.status_code in (200, 301, 302, 401, 403):
+                        body = resp.text.lower()
+                        # Confirm it's not a generic 404/500 page
+                        if any(kw in body for kw in ["login", "vpn", "connect", "portal", "gateway", "remote"]):
+                            portals.append({
+                                "path": path,
+                                "vpn_name": vpn_name,
+                                "port": port,
+                                "status_code": resp.status_code,
+                                "url": f"https://{target}:{port}{path}",
+                            })
+                except Exception:
+                    continue
+
+    # Deduplicate by vpn_name
+    seen = set()
+    unique = []
+    for p in portals:
+        if p["vpn_name"] not in seen:
+            seen.add(p["vpn_name"])
+            unique.append(p)
+    return unique
+
+
+def _correlate_cves(vendor_key: str | None, version: str | None) -> list[dict]:
+    """Phase 7: Correlate detected vendor/version against CVE database."""
+    if not vendor_key:
+        return []
+
+    results = []
+    for cve in PHYSICAL_CVE_DB:
+        if cve["vendor_key"] != vendor_key:
+            continue
+
+        finding = {**cve}
+
+        # Version-based check if we have version info
+        if version and cve.get("affected_versions"):
+            try:
+                parts = version.replace("(", ".").replace(")", "").split(".")
+                major, minor = int(parts[0]), int(parts[1])
+                patch = int(parts[2]) if len(parts) > 2 else 0
+                key = f"{major}.{minor}"
+                if key in cve["affected_versions"]:
+                    patch_min, patch_max = cve["affected_versions"][key]
+                    if patch_min <= patch < patch_max:
+                        finding["version_confirmed"] = True
+                else:
+                    finding["version_confirmed"] = False
+            except Exception:
+                finding["version_confirmed"] = None
+        else:
+            finding["version_confirmed"] = None  # version detection needed
+
+        results.append(finding)
+
+    return sorted(results, key=lambda c: c["cvss"], reverse=True)
+
+
+def _calculate_risk_score(scan_data: dict) -> dict:
+    """Phase 8: Composite risk score calculation."""
+    exposure = 0
+    vuln = 0
+    config = 0
+    surface = 0
+
+    # Exposure factors
+    open_ports = scan_data.get("open_ports", [])
+    if 23 in open_ports:
+        exposure += 25  # Telnet is critical
+    if 161 in open_ports or scan_data.get("snmp_accessible"):
+        exposure += 20
+    if len(open_ports) > 3:
+        exposure += 10
+    if scan_data.get("mgmt_internet_exposed"):
+        exposure += 25
+    if scan_data.get("ike_open"):
+        exposure += 10
+
+    # Vulnerability factors
+    cves = scan_data.get("cves", [])
+    if cves:
+        max_cvss = max(c["cvss"] for c in cves)
+        kev_boost = 1.2 if any(c.get("actively_exploited") for c in cves) else 1.0
+        vuln = min(100, (max_cvss / 10) * 100 * kev_boost)
+
+    # Configuration risk
+    if scan_data.get("snmp_accessible"):
+        community = scan_data.get("snmp_community", "")
+        if community in ("public", "private", "cisco", "admin"):
+            config += 40  # Default/common community
+        else:
+            config += 20
+    if scan_data.get("tls_self_signed"):
+        config += 15
+    if scan_data.get("tls_expired"):
+        config += 20
+    if scan_data.get("ssh_open") and not scan_data.get("version"):
+        config += 5
+
+    # Attack surface
+    surface = min(100, len(open_ports) * 12)
+
+    composite = (
+        exposure * 0.25 +
+        vuln * 0.40 +
+        config * 0.20 +
+        surface * 0.15
+    )
+    composite = min(100, composite)
+
+    return {
+        "composite": round(composite, 1),
+        "severity": (
+            "CRITICAL" if composite >= 80 else
+            "HIGH" if composite >= 60 else
+            "MEDIUM" if composite >= 40 else
+            "LOW" if composite >= 20 else
+            "INFO"
+        ),
+        "breakdown": {
+            "exposure": round(exposure * 0.25, 1),
+            "vulnerability": round(vuln * 0.40, 1),
+            "configuration": round(config * 0.20, 1),
+            "attack_surface": round(surface * 0.15, 1),
+        },
+    }
+
+
+# ── Main physical scan orchestrator ──────────────────────────────────────────
+
+async def _run_physical_scan(
+    target: str,
+    scan_mode: str,
+    include_snmp: bool,
+    include_ike: bool,
+    include_cve_probes: bool,
+) -> AsyncGenerator[str, None]:
+    """Master scan orchestrator — runs all phases and streams SSE events."""
+
+    scan_id = str(uuid.uuid4())
+    started_at = datetime.now(timezone.utc).isoformat()
+
+    # Define port sets by scan mode
+    if scan_mode == "quick":
+        mgmt_ports = [22, 443, 80]
+        udp_ports = [161] if include_snmp else []
+    elif scan_mode == "aggressive":
+        mgmt_ports = [22, 23, 80, 443, 257, 541, 830, 3978, 4443, 4444, 8080, 8443, 10443, 18190, 18191]
+        udp_ports = [161, 500, 4500] if include_snmp or include_ike else []
+    else:  # full
+        mgmt_ports = [22, 23, 80, 443, 541, 830, 3978, 4443, 8080, 8443, 10443, 18190]
+        udp_ports = [161, 500] if include_snmp or include_ike else []
+
+    yield _sse("start", {
+        "scan_id": scan_id, "target": target, "mode": scan_mode,
+        "phases": 8, "started_at": started_at,
+        "ports_to_check": len(mgmt_ports),
+    })
+
+    scan_data: dict = {
+        "scan_id": scan_id, "target": target, "mode": scan_mode,
+        "vendor_key": None, "vendor_name": None, "version": None,
+        "open_ports": [], "ssh_open": False, "snmp_accessible": False,
+        "ike_open": False, "tls_self_signed": False, "ssl_vpn_portals": [],
+        "cves": [], "indicators": [], "risk_score": {},
+    }
+
+    # ── Phase 1: Port Discovery ───────────────────────────────────────────────
+    yield _sse("phase", {"phase": 1, "name": "Port Discovery", "status": "running"})
+    try:
+        port_results = await _port_probe_physical(target, mgmt_ports, timeout=2.5 if scan_mode != "quick" else 1.5)
+        open_ports = [p for p, open_ in port_results.items() if open_]
+        scan_data["open_ports"] = open_ports
+        yield _sse("ports", {
+            "open": open_ports,
+            "closed": [p for p, open_ in port_results.items() if not open_],
+            "total_checked": len(mgmt_ports),
+        })
+        yield _sse("phase", {"phase": 1, "name": "Port Discovery", "status": "complete",
+                              "finding": f"{len(open_ports)} management ports open"})
+    except Exception as e:
+        yield _sse("phase", {"phase": 1, "name": "Port Discovery", "status": "error", "error": str(e)})
+        open_ports = []
+
+    if not open_ports:
+        yield _sse("warning", {"message": "No management ports open. Target may be unreachable or fully filtered."})
+        # Still continue with HTTP probes on default ports
+        open_ports = [443, 22]
+
+    # ── Phase 2a: SSH Banner ──────────────────────────────────────────────────
+    vendor_votes: dict[str, int] = {}
+    version_hint: str | None = None
+
+    if 22 in open_ports:
+        yield _sse("phase", {"phase": 2, "name": "SSH Banner Grab", "status": "running"})
+        ssh_result = await _ssh_banner_grab(target)
+        scan_data["ssh_open"] = ssh_result["open"]
+        if ssh_result.get("banner"):
+            yield _sse("ssh_banner", {"banner": ssh_result["banner"], "vendor_hint": ssh_result.get("vendor_hint")})
+            if ssh_result.get("vendor_hint"):
+                vendor_votes[ssh_result["vendor_hint"]] = vendor_votes.get(ssh_result["vendor_hint"], 0) + 2
+        yield _sse("phase", {"phase": 2, "name": "SSH Banner Grab", "status": "complete",
+                              "finding": ssh_result.get("banner", "No banner")[:60]})
+
+    # ── Phase 2b: TLS Certificate ─────────────────────────────────────────────
+    ssl_ports = [p for p in open_ports if p in (443, 4443, 8443, 10443)]
+    if ssl_ports:
+        yield _sse("phase", {"phase": 3, "name": "TLS Certificate Analysis", "status": "running"})
+        cert_result = await _tls_cert_probe(target, ssl_ports[0])
+        if cert_result.get("open"):
+            scan_data["tls_self_signed"] = cert_result.get("self_signed", False)
+            scan_data["tls_expired"] = cert_result.get("expired", False)
+            yield _sse("tls_cert", {
+                "subject": cert_result.get("subject", {}),
+                "issuer": cert_result.get("issuer", {}),
+                "san": cert_result.get("san", [])[:5],
+                "fingerprint": cert_result.get("fingerprint"),
+                "expires": cert_result.get("expires"),
+                "self_signed": cert_result.get("self_signed"),
+                "vendor_hint": cert_result.get("vendor_hint"),
+            })
+            if cert_result.get("vendor_hint"):
+                vendor_votes[cert_result["vendor_hint"]] = vendor_votes.get(cert_result["vendor_hint"], 0) + 3
+        yield _sse("phase", {"phase": 3, "name": "TLS Certificate Analysis", "status": "complete",
+                              "finding": f"Issuer: {cert_result.get('issuer', {}).get('organizationName', 'unknown')}"})
+
+    # ── Phase 2c: HTTP Fingerprinting ─────────────────────────────────────────
+    http_ports = [p for p in open_ports if p in (443, 4443, 8443, 10443, 80, 8080)]
+    if http_ports:
+        yield _sse("phase", {"phase": 4, "name": "HTTP Management Interface Fingerprint", "status": "running"})
+        use_ssl = http_ports[0] != 80
+        http_result = await _http_fingerprint_physical(target, http_ports[0], use_ssl)
+        if http_result.get("vendor_hint"):
+            vendor_votes[http_result["vendor_hint"]] = vendor_votes.get(http_result["vendor_hint"], 0) + 4
+        if http_result.get("version"):
+            version_hint = http_result["version"]
+        yield _sse("http_fingerprint", {
+            "vendor_hint": http_result.get("vendor_hint"),
+            "indicators": http_result.get("indicators", []),
+            "paths_found": http_result.get("paths_found", []),
+            "version": http_result.get("version"),
+            "vpn_portal": http_result.get("vpn_portal"),
+        })
+        if http_result.get("vpn_portal"):
+            scan_data["ssl_vpn_portals"].append({"name": http_result["vpn_portal"], "port": http_ports[0]})
+        yield _sse("phase", {"phase": 4, "name": "HTTP Management Interface Fingerprint", "status": "complete",
+                              "finding": f"Vendor: {PHYSICAL_VENDORS.get(http_result.get('vendor_hint') or '', {}).get('name', 'Unknown')}"})
+
+    # ── Phase 3: SNMP Probe ───────────────────────────────────────────────────
+    if include_snmp and (scan_mode in ("full", "aggressive") or 161 in open_ports):
+        yield _sse("phase", {"phase": 5, "name": "SNMP Community Brute Force", "status": "running"})
+        snmp_result = await _snmp_probe_physical(target)
+        scan_data["snmp_accessible"] = snmp_result["accessible"]
+        if snmp_result["accessible"]:
+            scan_data["snmp_community"] = snmp_result.get("community")
+            yield _sse("snmp", {
+                "accessible": True,
+                "community": snmp_result.get("community"),
+                "sysDescr": snmp_result.get("sysDescr"),
+                "sysObjectID": snmp_result.get("sysObjectID"),
+                "sysName": snmp_result.get("sysName"),
+                "vendor_hint": snmp_result.get("vendor_hint"),
+                "severity": "critical" if snmp_result.get("community") in ("public", "private") else "high",
+            })
+            if snmp_result.get("vendor_hint"):
+                vendor_votes[snmp_result["vendor_hint"]] = vendor_votes.get(snmp_result["vendor_hint"], 0) + 5
+        else:
+            yield _sse("snmp", {"accessible": False})
+        yield _sse("phase", {"phase": 5, "name": "SNMP Community Brute Force", "status": "complete",
+                              "finding": f"SNMP {'ACCESSIBLE (community: ' + str(snmp_result.get('community')) + ')' if snmp_result['accessible'] else 'not accessible'}"})
+
+    # ── Phase 4: IKE/IPsec Probe ──────────────────────────────────────────────
+    if include_ike and scan_mode in ("full", "aggressive"):
+        yield _sse("phase", {"phase": 6, "name": "IKE/IPsec VPN Fingerprint", "status": "running"})
+        ike_result = await _ike_probe_physical(target)
+        scan_data["ike_open"] = ike_result["ike_open"]
+        if ike_result["ike_open"]:
+            yield _sse("ike", {
+                "open": True,
+                "vendor_ids": ike_result["vendor_ids"][:5],
+                "vendor_hint": ike_result.get("vendor_hint"),
+                "finding": "IKE/IPsec VPN endpoint detected",
+            })
+            if ike_result.get("vendor_hint"):
+                scan_data["indicators"].append(f"IKE Vendor ID: {ike_result['vendor_hint']}")
+        else:
+            yield _sse("ike", {"open": False})
+        yield _sse("phase", {"phase": 6, "name": "IKE/IPsec VPN Fingerprint", "status": "complete",
+                              "finding": "IKE open" if ike_result["ike_open"] else "No IKE response"})
+
+    # ── Phase 5: TCP Behavioral Analysis ──────────────────────────────────────
+    if scan_mode in ("full", "aggressive") and open_ports:
+        yield _sse("phase", {"phase": 7, "name": "TCP Behavioral Analysis", "status": "running"})
+        tcp_result = await _tcp_behavior_probe(target, open_ports[0])
+        yield _sse("tcp_behavior", {
+            "ttl": tcp_result.get("ttl"),
+            "rtt_ms": tcp_result.get("rtt_ms"),
+            "ack_response": tcp_result.get("ack_response"),
+            "stateful": tcp_result.get("stateful"),
+            "inference": tcp_result.get("inference"),
+        })
+        if tcp_result.get("ttl") == 255 and not scan_data.get("vendor_key"):
+            vendor_votes["cisco_asa"] = vendor_votes.get("cisco_asa", 0) + 1
+            vendor_votes["juniper"] = vendor_votes.get("juniper", 0) + 1
+        yield _sse("phase", {"phase": 7, "name": "TCP Behavioral Analysis", "status": "complete",
+                              "finding": tcp_result.get("inference", "Inconclusive")})
+
+    # ── Phase 6: SSL VPN Portal Detection ────────────────────────────────────
+    if open_ports and scan_mode in ("full", "aggressive"):
+        yield _sse("phase", {"phase": 8, "name": "SSL VPN Portal Detection", "status": "running"})
+        portals = await _ssl_vpn_portal_probe(target, open_ports)
+        for p in portals:
+            if p not in scan_data["ssl_vpn_portals"]:
+                scan_data["ssl_vpn_portals"].append(p)
+                yield _sse("vpn_portal", {**p, "severity": "high", "finding": f"{p['vpn_name']} portal exposed"})
+        yield _sse("phase", {"phase": 8, "name": "SSL VPN Portal Detection", "status": "complete",
+                              "finding": f"{len(portals)} VPN portal(s) detected"})
+
+    # ── Vendor Determination ──────────────────────────────────────────────────
+    if vendor_votes:
+        best_vendor = max(vendor_votes, key=vendor_votes.get)  # type: ignore[arg-type]
+        scan_data["vendor_key"] = best_vendor
+        scan_data["vendor_name"] = PHYSICAL_VENDORS.get(best_vendor, {}).get("name", best_vendor)
+        scan_data["version"] = version_hint
+
+        yield _sse("vendor_identified", {
+            "vendor_key": best_vendor,
+            "vendor_name": scan_data["vendor_name"],
+            "confidence": min(100, vendor_votes[best_vendor] * 14),
+            "version": version_hint,
+            "vote_breakdown": vendor_votes,
+        })
+    else:
+        yield _sse("vendor_identified", {
+            "vendor_key": None,
+            "vendor_name": "Unknown",
+            "confidence": 0,
+            "version": None,
+            "vote_breakdown": {},
+        })
+
+    # ── Phase 7: CVE Correlation ──────────────────────────────────────────────
+    if include_cve_probes and scan_data.get("vendor_key"):
+        yield _sse("phase", {"phase": 9, "name": "CVE Correlation & Active Probes", "status": "running"})
+        cves = _correlate_cves(scan_data["vendor_key"], scan_data.get("version"))
+        scan_data["cves"] = cves
+
+        for cve in cves:
+            yield _sse("cve", {
+                "id": cve["id"],
+                "cvss": cve["cvss"],
+                "severity": cve["severity"],
+                "title": cve["title"],
+                "description": cve["description"],
+                "actively_exploited": cve.get("actively_exploited", False),
+                "version_confirmed": cve.get("version_confirmed"),
+                "remediation": cve["remediation"],
+            })
+
+        yield _sse("phase", {"phase": 9, "name": "CVE Correlation & Active Probes", "status": "complete",
+                              "finding": f"{len(cves)} CVE(s) applicable to {scan_data['vendor_name']}"})
+
+    # ── Phase 8: Risk Scoring ─────────────────────────────────────────────────
+    scan_data["risk_score"] = _calculate_risk_score(scan_data)
+    yield _sse("risk_score", scan_data["risk_score"])
+
+    # ── Final Summary ─────────────────────────────────────────────────────────
+    yield _sse("complete", {
+        "scan_id": scan_id,
+        "target": target,
+        "vendor_key": scan_data.get("vendor_key"),
+        "vendor_name": scan_data.get("vendor_name", "Unknown"),
+        "version": scan_data.get("version"),
+        "open_ports": scan_data["open_ports"],
+        "snmp_accessible": scan_data["snmp_accessible"],
+        "ike_open": scan_data["ike_open"],
+        "ssl_vpn_portals": len(scan_data["ssl_vpn_portals"]),
+        "cve_count": len(scan_data["cves"]),
+        "critical_cves": len([c for c in scan_data["cves"] if c["severity"] == "critical"]),
+        "risk_score": scan_data["risk_score"],
+        "started_at": started_at,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+# ── API endpoints ─────────────────────────────────────────────────────────────
+
+@router.post(
+    "/physical/scan",
+    summary="Physical/hardware NGFW fingerprinting and CVE assessment",
+    description=(
+        "Scans a physical firewall (Cisco ASA, Palo Alto PAN-OS, FortiGate, Check Point, "
+        "SonicWall, Juniper SRX, pfSense, OPNsense) via management port probing, "
+        "SNMP community brute-force, IKE/IPsec fingerprinting, TLS cert analysis, "
+        "SSH banner grab, SSL VPN portal detection, and CVE correlation. "
+        "Results stream as SSE events."
+    ),
+)
+async def physical_firewall_scan(
+    payload: PhysicalScanRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: uuid.UUID = Depends(get_current_org_id),
+) -> StreamingResponse:
+    return StreamingResponse(
+        _run_physical_scan(
+            payload.target,
+            payload.scan_mode,
+            payload.include_snmp,
+            payload.include_ike,
+            payload.include_cve_probes,
+        ),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get(
+    "/physical/vendors",
+    summary="List supported physical firewall vendors",
+)
+async def list_physical_vendors(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    return {
+        "vendors": [
+            {
+                "key": k,
+                "name": v["name"],
+                "mgmt_ports": v["mgmt_ports"],
+                "color": v["color"],
+                "vpn_name": v["vpn_name"],
+                "cve_count": len([c for c in PHYSICAL_CVE_DB if c["vendor_key"] == k]),
+            }
+            for k, v in PHYSICAL_VENDORS.items()
+        ]
+    }
+
+
+@router.get(
+    "/physical/cves",
+    summary="List physical firewall CVE database",
+)
+async def list_physical_cves(
+    current_user: Annotated[User, Depends(get_current_user)],
+    vendor_key: str | None = None,
+    min_cvss: float = 0.0,
+) -> dict:
+    cves = [
+        c for c in PHYSICAL_CVE_DB
+        if (not vendor_key or c["vendor_key"] == vendor_key)
+        and c["cvss"] >= min_cvss
+    ]
+    return {
+        "items": sorted(cves, key=lambda c: c["cvss"], reverse=True),
+        "total": len(cves),
+        "critical_count": len([c for c in cves if c["severity"] == "critical"]),
+    }

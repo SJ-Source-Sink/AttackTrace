@@ -123,6 +123,125 @@ interface SmugglingComplete {
   recommendation: string;
 }
 
+// Physical Firewall Scanner types
+interface PhysicalPortResult {
+  open: number[];
+  closed: number[];
+  total_checked: number;
+}
+
+interface PhysicalSSHBanner {
+  banner: string;
+  vendor_hint: string | null;
+}
+
+interface PhysicalTLSCert {
+  subject: Record<string, string>;
+  issuer: Record<string, string>;
+  san: string[];
+  fingerprint: string | null;
+  expires: string | null;
+  self_signed: boolean;
+  vendor_hint: string | null;
+}
+
+interface PhysicalHTTPFingerprint {
+  vendor_hint: string | null;
+  indicators: string[];
+  paths_found: string[];
+  version: string | null;
+  vpn_portal: string | null;
+}
+
+interface PhysicalSNMP {
+  accessible: boolean;
+  community: string | null;
+  sysDescr: string | null;
+  sysObjectID: string | null;
+  sysName: string | null;
+  vendor_hint: string | null;
+  severity?: string;
+}
+
+interface PhysicalIKE {
+  open: boolean;
+  vendor_ids?: string[];
+  vendor_hint: string | null;
+  finding?: string;
+}
+
+interface PhysicalTCPBehavior {
+  ttl: number | null;
+  rtt_ms: number | null;
+  ack_response: string | null;
+  stateful: boolean | null;
+  inference: string;
+}
+
+interface PhysicalVPNPortal {
+  path: string;
+  vpn_name: string;
+  port: number;
+  status_code: number;
+  url: string;
+  severity: string;
+}
+
+interface PhysicalCVE {
+  id: string;
+  cvss: number;
+  severity: string;
+  title: string;
+  description: string;
+  actively_exploited: boolean;
+  version_confirmed: boolean | null;
+  remediation: string;
+}
+
+interface PhysicalVendor {
+  vendor_key: string;
+  vendor_name: string;
+  confidence: number;
+  version: string | null;
+  vote_breakdown: Record<string, number>;
+}
+
+interface PhysicalRiskScore {
+  composite: number;
+  severity: string;
+  breakdown: {
+    exposure: number;
+    vulnerability: number;
+    configuration: number;
+    attack_surface: number;
+  };
+}
+
+interface PhysicalScanComplete {
+  scan_id: string;
+  target: string;
+  vendor_key: string | null;
+  vendor_name: string;
+  version: string | null;
+  open_ports: number[];
+  snmp_accessible: boolean;
+  ike_open: boolean;
+  ssl_vpn_portals: number;
+  cve_count: number;
+  critical_cves: number;
+  risk_score: PhysicalRiskScore;
+  started_at: string;
+  completed_at: string;
+}
+
+interface PhysicalPhase {
+  phase: number;
+  name: string;
+  status: "running" | "complete" | "error";
+  finding?: string;
+  error?: string;
+}
+
 // ─── History Types ────────────────────────────────────────────────────────────
 
 type FirewallScanType = "waf_detect" | "waf_bypass" | "port_map" | "rule_analyze" | "rate_limit" | "smuggling";
@@ -1930,6 +2049,650 @@ function HistoryPanel({
   );
 }
 
+// ── Physical Firewall Scanner Tab ──────────────────────────────────────────
+
+const PHYSICAL_VENDORS: Record<string, { name: string }> = {
+  cisco_asa:  { name: "Cisco ASA" },
+  paloalto:   { name: "Palo Alto PAN-OS" },
+  fortinet:   { name: "FortiGate" },
+  checkpoint: { name: "Check Point" },
+  sonicwall:  { name: "SonicWall" },
+  juniper:    { name: "Juniper SRX" },
+  pfsense:    { name: "pfSense" },
+  opnsense:   { name: "OPNsense" },
+};
+
+const VENDOR_LOGOS: Record<string, { emoji: string; color: string; bg: string }> = {
+  cisco_asa:  { emoji: "🔵", color: "text-blue-400",   bg: "bg-blue-500/10 border-blue-500/30" },
+  paloalto:   { emoji: "🔴", color: "text-orange-400", bg: "bg-orange-500/10 border-orange-500/30" },
+  fortinet:   { emoji: "🔴", color: "text-red-400",    bg: "bg-red-500/10 border-red-500/30" },
+  checkpoint: { emoji: "🔴", color: "text-red-400",    bg: "bg-red-500/10 border-red-500/30" },
+  sonicwall:  { emoji: "🟠", color: "text-orange-400", bg: "bg-orange-500/10 border-orange-500/30" },
+  juniper:    { emoji: "🔵", color: "text-cyan-400",   bg: "bg-cyan-500/10 border-cyan-500/30" },
+  pfsense:    { emoji: "⚫", color: "text-zinc-300",   bg: "bg-zinc-500/10 border-zinc-500/30" },
+  opnsense:   { emoji: "🟠", color: "text-orange-300", bg: "bg-orange-500/10 border-orange-500/30" },
+};
+
+const PHYSICAL_SEVERITY_MAP: Record<string, string> = {
+  critical: "bg-red-500/20 text-red-300 border-red-500/40",
+  high:     "bg-orange-500/20 text-orange-300 border-orange-500/40",
+  medium:   "bg-yellow-500/20 text-yellow-300 border-yellow-500/40",
+  low:      "bg-blue-500/20 text-blue-300 border-blue-500/40",
+  info:     "bg-zinc-500/20 text-zinc-300 border-zinc-500/40",
+  CRITICAL: "bg-red-500/20 text-red-300 border-red-500/40",
+  HIGH:     "bg-orange-500/20 text-orange-300 border-orange-500/40",
+  MEDIUM:   "bg-yellow-500/20 text-yellow-300 border-yellow-500/40",
+  LOW:      "bg-blue-500/20 text-blue-300 border-blue-500/40",
+  INFO:     "bg-zinc-500/20 text-zinc-300 border-zinc-500/40",
+};
+
+function RiskMeter({ score, severity }: { score: number; severity: string }) {
+  const color =
+    severity === "CRITICAL" ? "#ef4444" :
+    severity === "HIGH"     ? "#f97316" :
+    severity === "MEDIUM"   ? "#eab308" :
+    severity === "LOW"      ? "#3b82f6" : "#71717a";
+
+  const r = 54;
+  const circ = 2 * Math.PI * r;
+  const offset = circ * (1 - score / 100);
+
+  return (
+    <div className="relative flex items-center justify-center w-36 h-36">
+      <svg viewBox="0 0 120 120" className="w-full h-full -rotate-90">
+        <circle cx="60" cy="60" r={r} fill="none" stroke="#3f3f46" strokeWidth="10" />
+        <circle
+          cx="60" cy="60" r={r} fill="none"
+          stroke={color} strokeWidth="10"
+          strokeDasharray={circ}
+          strokeDashoffset={offset}
+          strokeLinecap="round"
+          style={{ transition: "stroke-dashoffset 0.8s ease" }}
+        />
+      </svg>
+      <div className="absolute text-center">
+        <div className="text-2xl font-bold" style={{ color }}>{Math.round(score)}</div>
+        <div className="text-xs text-zinc-400">{severity}</div>
+      </div>
+    </div>
+  );
+}
+
+function PhysicalFirewallTab({ onSave }: { onSave?: (entry: FirewallHistoryEntry) => void }) {
+  const [target, setTarget] = React.useState("");
+  const [scanMode, setScanMode] = React.useState("full");
+  const [inclSNMP, setInclSNMP] = React.useState(true);
+  const [inclIKE, setInclIKE] = React.useState(true);
+  const [inclCVE, setInclCVE] = React.useState(true);
+  const [running, setRunning] = React.useState(false);
+  const [phases, setPhases] = React.useState<PhysicalPhase[]>([]);
+  const [ports, setPorts] = React.useState<PhysicalPortResult | null>(null);
+  const [sshBanner, setSSHBanner] = React.useState<PhysicalSSHBanner | null>(null);
+  const [tlsCert, setTLSCert] = React.useState<PhysicalTLSCert | null>(null);
+  const [httpFp, setHTTPFp] = React.useState<PhysicalHTTPFingerprint | null>(null);
+  const [snmpResult, setSNMPResult] = React.useState<PhysicalSNMP | null>(null);
+  const [ikeResult, setIKEResult] = React.useState<PhysicalIKE | null>(null);
+  const [tcpBehavior, setTCPBehavior] = React.useState<PhysicalTCPBehavior | null>(null);
+  const [vpnPortals, setVPNPortals] = React.useState<PhysicalVPNPortal[]>([]);
+  const [vendor, setVendor] = React.useState<PhysicalVendor | null>(null);
+  const [cves, setCVEs] = React.useState<PhysicalCVE[]>([]);
+  const [riskScore, setRiskScore] = React.useState<PhysicalRiskScore | null>(null);
+  const [summary, setSummary] = React.useState<PhysicalScanComplete | null>(null);
+  const [expandedCVE, setExpandedCVE] = React.useState<string | null>(null);
+  const esRef = React.useRef<EventSource | null>(null);
+
+  const resetState = () => {
+    setPhases([]); setPorts(null); setSSHBanner(null); setTLSCert(null);
+    setHTTPFp(null); setSNMPResult(null); setIKEResult(null); setTCPBehavior(null);
+    setVPNPortals([]); setVendor(null); setCVEs([]); setRiskScore(null); setSummary(null);
+  };
+
+  const runScan = async () => {
+    if (!target.trim() || running) return;
+    resetState();
+    setRunning(true);
+    if (esRef.current) esRef.current.close();
+
+    try {
+      const resp = await fetchWithAuth(`${API_BASE}/firewall/physical/scan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target: target.trim(),
+          scan_mode: scanMode,
+          include_snmp: inclSNMP,
+          include_ike: inclIKE,
+          include_cve_probes: inclCVE,
+        }),
+      });
+      if (!resp.ok || !resp.body) throw new Error("Failed to start scan");
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+
+      const handleSSEEvent = (event: string, data: unknown) => {
+        const d = data as Record<string, unknown>;
+        switch (event) {
+          case "phase":
+            setPhases(prev => {
+              const phased = d as unknown as PhysicalPhase;
+              const idx = prev.findIndex(p => p.phase === phased.phase && p.name === phased.name);
+              if (idx >= 0) {
+                const next = [...prev];
+                next[idx] = phased;
+                return next;
+              }
+              return [...prev, phased];
+            });
+            break;
+          case "ports":        setPorts(d as unknown as PhysicalPortResult); break;
+          case "ssh_banner":   setSSHBanner(d as unknown as PhysicalSSHBanner); break;
+          case "tls_cert":     setTLSCert(d as unknown as PhysicalTLSCert); break;
+          case "http_fingerprint": setHTTPFp(d as unknown as PhysicalHTTPFingerprint); break;
+          case "snmp":         setSNMPResult(d as unknown as PhysicalSNMP); break;
+          case "ike":          setIKEResult(d as unknown as PhysicalIKE); break;
+          case "tcp_behavior": setTCPBehavior(d as unknown as PhysicalTCPBehavior); break;
+          case "vpn_portal":   setVPNPortals(prev => [...prev, d as unknown as PhysicalVPNPortal]); break;
+          case "vendor_identified": setVendor(d as unknown as PhysicalVendor); break;
+          case "cve":          setCVEs(prev => [...prev, d as unknown as PhysicalCVE]); break;
+          case "risk_score":   setRiskScore(d as unknown as PhysicalRiskScore); break;
+          case "complete": {
+            const complete = d as unknown as PhysicalScanComplete;
+            setSummary(complete);
+            setRunning(false);
+            toast.success(`Scan complete — ${complete.vendor_name} detected`);
+            break;
+          }
+          case "warning":
+            toast.warning((d as { message?: string }).message || "Warning");
+            break;
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) { setRunning(false); break; }
+        buf += decoder.decode(value, { stream: true });
+        const parts = buf.split("\n\n");
+        buf = parts.pop() || "";
+        for (const part of parts) {
+          const eventLine = part.split("\n").find(l => l.startsWith("event:"));
+          const dataLine = part.split("\n").find(l => l.startsWith("data:"));
+          if (!eventLine || !dataLine) continue;
+          const event = eventLine.slice(7).trim();
+          try {
+            const parsed = JSON.parse(dataLine.slice(5).trim());
+            handleSSEEvent(event, parsed);
+          } catch { /* ignore parse errors */ }
+        }
+      }
+    } catch (e: unknown) {
+      toast.error((e as Error).message || "Scan failed");
+      setRunning(false);
+    }
+  };
+
+  const stop = () => {
+    if (esRef.current) esRef.current.close();
+    setRunning(false);
+  };
+
+  const vendorInfo = vendor?.vendor_key ? VENDOR_LOGOS[vendor.vendor_key] : null;
+
+  // suppress unused warning — httpFp data is captured for future display
+  void httpFp;
+
+  return (
+    <div className="space-y-6">
+      {/* Config Panel */}
+      <Card className="bg-zinc-900 border-zinc-700">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center gap-2 text-zinc-200">
+            <Network className="w-4 h-4 text-blue-400" />
+            Physical / Hardware NGFW Scanner
+          </CardTitle>
+          <p className="text-xs text-zinc-500">
+            Fingerprints Cisco ASA, Palo Alto PAN-OS, FortiGate, Check Point, SonicWall, Juniper SRX, pfSense, OPNsense via management port probing, SNMP, IKE, TLS cert analysis and CVE correlation.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <div className="col-span-2">
+              <Label className="text-zinc-400 text-xs mb-1 block">Target IP or Hostname</Label>
+              <Input
+                placeholder="192.168.1.1 or firewall.corp.example.com"
+                value={target}
+                onChange={e => setTarget(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && runScan()}
+                className="bg-zinc-800 border-zinc-600 text-zinc-200"
+                disabled={running}
+              />
+            </div>
+            <div>
+              <Label className="text-zinc-400 text-xs mb-1 block">Scan Mode</Label>
+              <Select value={scanMode} onValueChange={setScanMode} disabled={running}>
+                <SelectTrigger className="bg-zinc-800 border-zinc-600 text-zinc-200">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-zinc-800 border-zinc-600">
+                  <SelectItem value="quick">Quick — 3 ports, 60s</SelectItem>
+                  <SelectItem value="full">Full — 12 ports, all phases (rec.)</SelectItem>
+                  <SelectItem value="aggressive">Aggressive — 15 ports, all probes</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex flex-col justify-end gap-2">
+              <div className="flex items-center gap-4 text-xs text-zinc-400">
+                {[
+                  { label: "SNMP Brute", state: inclSNMP, set: setInclSNMP },
+                  { label: "IKE/IPsec", state: inclIKE, set: setInclIKE },
+                  { label: "CVE Check", state: inclCVE, set: setInclCVE },
+                ].map(({ label, state, set }) => (
+                  <label key={label} className="flex items-center gap-1.5 cursor-pointer">
+                    <input type="checkbox" checked={state} onChange={e => set(e.target.checked)}
+                      disabled={running} className="accent-blue-500" />
+                    {label}
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="flex gap-3">
+            <Button
+              onClick={runScan}
+              disabled={running || !target.trim()}
+              className="bg-blue-600 hover:bg-blue-700 text-white"
+            >
+              {running ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Scanning...</> : "Run Physical Scan"}
+            </Button>
+            {running && (
+              <Button variant="outline" onClick={stop} className="border-zinc-600 text-zinc-300">
+                Stop
+              </Button>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Live Phase Progress */}
+      {phases.length > 0 && (
+        <Card className="bg-zinc-900 border-zinc-700">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm text-zinc-300">Scan Progress</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-1.5">
+              {phases.map((p, i) => (
+                <div key={i} className="flex items-center gap-3 text-sm">
+                  <div className="w-5">
+                    {p.status === "running" && <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />}
+                    {p.status === "complete" && <CheckCircle2 className="w-4 h-4 text-green-400" />}
+                    {p.status === "error" && <XCircle className="w-4 h-4 text-red-400" />}
+                  </div>
+                  <span className="text-zinc-400 w-8 text-xs">P{p.phase}</span>
+                  <span className={cn("font-medium", p.status === "running" ? "text-blue-300" : p.status === "error" ? "text-red-300" : "text-zinc-200")}>
+                    {p.name}
+                  </span>
+                  {p.finding && <span className="text-xs text-zinc-500 ml-auto truncate max-w-xs">{p.finding}</span>}
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Vendor Identification Banner */}
+      {vendor && (
+        <Card className={cn("border", vendorInfo?.bg || "bg-zinc-900 border-zinc-700")}>
+          <CardContent className="pt-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <div className="text-4xl">{vendorInfo?.emoji || "🔥"}</div>
+                <div>
+                  <div className="text-xl font-bold text-zinc-100">
+                    {vendor.vendor_name}
+                    {vendor.version && <span className="text-zinc-400 font-normal text-sm ml-2">v{vendor.version}</span>}
+                  </div>
+                  <div className="flex items-center gap-2 mt-1">
+                    <div className="text-xs text-zinc-400">Detection confidence:</div>
+                    <div className="flex-1 bg-zinc-700 rounded-full h-2 w-32">
+                      <div
+                        className="h-2 rounded-full bg-blue-500 transition-all"
+                        style={{ width: `${vendor.confidence}%` }}
+                      />
+                    </div>
+                    <div className="text-xs text-zinc-300 font-medium">{vendor.confidence}%</div>
+                  </div>
+                </div>
+              </div>
+              {riskScore && <RiskMeter score={riskScore.composite} severity={riskScore.severity} />}
+            </div>
+            {/* Vote breakdown */}
+            {Object.keys(vendor.vote_breakdown).length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {Object.entries(vendor.vote_breakdown).map(([k, v]) => (
+                  <span key={k} className="text-xs px-2 py-0.5 bg-zinc-800 border border-zinc-700 rounded text-zinc-400">
+                    {PHYSICAL_VENDORS[k]?.name || k}: {v} signal{v > 1 ? "s" : ""}
+                  </span>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Results Grid */}
+      {(ports || sshBanner || tlsCert || snmpResult || ikeResult) && (
+        <div className="grid grid-cols-2 gap-4">
+          {/* Open Ports */}
+          {ports && (
+            <Card className="bg-zinc-900 border-zinc-700">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm text-zinc-300 flex items-center gap-2">
+                  <Network className="w-4 h-4 text-blue-400" />
+                  Management Ports
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="flex flex-wrap gap-2">
+                  {ports.open.map(p => (
+                    <span key={p} className="px-2.5 py-1 bg-green-500/15 border border-green-500/30 rounded text-green-300 text-sm font-mono font-medium">
+                      {p}
+                    </span>
+                  ))}
+                  {ports.open.length === 0 && <span className="text-zinc-500 text-sm">None detected</span>}
+                </div>
+                <div className="text-xs text-zinc-500 mt-2">{ports.closed.length} ports filtered/closed</div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* SSH Banner */}
+          {sshBanner && (
+            <Card className="bg-zinc-900 border-zinc-700">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm text-zinc-300 flex items-center gap-2">
+                  <Terminal className="w-4 h-4 text-green-400" />
+                  SSH Banner
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <code className="text-xs text-green-300 bg-zinc-800 px-2 py-1 rounded block break-all">
+                  {sshBanner.banner || "No banner"}
+                </code>
+                {sshBanner.vendor_hint && (
+                  <div className="mt-1 text-xs text-zinc-400">Vendor hint: <span className="text-blue-300">{sshBanner.vendor_hint}</span></div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* TLS Certificate */}
+          {tlsCert && (
+            <Card className="bg-zinc-900 border-zinc-700">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm text-zinc-300 flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-yellow-400" />
+                  TLS Certificate
+                  {tlsCert.self_signed && <Badge className="bg-orange-500/20 text-orange-300 border-orange-500/40 text-xs">Self-signed</Badge>}
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-1.5 text-xs">
+                {tlsCert.subject.organizationName && (
+                  <div><span className="text-zinc-500">Subject O: </span><span className="text-zinc-200">{tlsCert.subject.organizationName}</span></div>
+                )}
+                {tlsCert.issuer.organizationName && (
+                  <div><span className="text-zinc-500">Issuer O: </span><span className="text-zinc-200">{tlsCert.issuer.organizationName}</span></div>
+                )}
+                {tlsCert.subject.commonName && (
+                  <div><span className="text-zinc-500">CN: </span><span className="text-zinc-300 font-mono">{tlsCert.subject.commonName}</span></div>
+                )}
+                {tlsCert.expires && (
+                  <div><span className="text-zinc-500">Expires: </span><span className="text-zinc-300">{tlsCert.expires}</span></div>
+                )}
+                {tlsCert.fingerprint && (
+                  <div><span className="text-zinc-500">SHA-256: </span><span className="text-zinc-500 font-mono">{tlsCert.fingerprint}...</span></div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* SNMP */}
+          {snmpResult && (
+            <Card className={cn("border", snmpResult.accessible ? "bg-red-900/20 border-red-500/30" : "bg-zinc-900 border-zinc-700")}>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <AlertTriangle className={cn("w-4 h-4", snmpResult.accessible ? "text-red-400" : "text-zinc-500")} />
+                  <span className={snmpResult.accessible ? "text-red-300" : "text-zinc-300"}>SNMP Probe</span>
+                  {snmpResult.accessible && <Badge className="bg-red-500/20 text-red-300 border-red-500/40 text-xs">EXPOSED</Badge>}
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="text-xs space-y-1">
+                {snmpResult.accessible ? (
+                  <>
+                    <div><span className="text-zinc-400">Community: </span><code className="text-red-300 font-mono">{snmpResult.community}</code></div>
+                    {snmpResult.sysDescr && <div className="text-zinc-400 truncate" title={snmpResult.sysDescr}>{snmpResult.sysDescr.slice(0, 80)}...</div>}
+                    {snmpResult.sysName && <div><span className="text-zinc-400">System: </span><span className="text-zinc-200">{snmpResult.sysName}</span></div>}
+                    <div className="text-red-400 text-xs mt-1 font-medium">Warning: Unauthenticated device access. Change default community string immediately.</div>
+                  </>
+                ) : (
+                  <div className="text-zinc-500">SNMP not accessible (all community strings failed)</div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* IKE/IPsec */}
+          {ikeResult && (
+            <Card className={cn("border", ikeResult.open ? "bg-yellow-900/20 border-yellow-500/30" : "bg-zinc-900 border-zinc-700")}>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <Zap className={cn("w-4 h-4", ikeResult.open ? "text-yellow-400" : "text-zinc-500")} />
+                  <span className={ikeResult.open ? "text-yellow-300" : "text-zinc-300"}>IKE/IPsec VPN</span>
+                  {ikeResult.open && <Badge className="bg-yellow-500/20 text-yellow-300 border-yellow-500/40 text-xs">DETECTED</Badge>}
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="text-xs space-y-1">
+                {ikeResult.open ? (
+                  <>
+                    {ikeResult.vendor_hint && <div><span className="text-zinc-400">Vendor ID: </span><span className="text-yellow-300">{ikeResult.vendor_hint}</span></div>}
+                    {ikeResult.vendor_ids && ikeResult.vendor_ids.length > 0 && (
+                      <div className="text-zinc-500 font-mono truncate" title={ikeResult.vendor_ids.join(", ")}>
+                        VID: {ikeResult.vendor_ids[0]?.slice(0, 32)}...
+                      </div>
+                    )}
+                    <div className="text-zinc-400">UDP/500 — VPN endpoint accepting IKEv1 Main Mode</div>
+                  </>
+                ) : (
+                  <div className="text-zinc-500">No IKE response on UDP/500</div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* TCP Behavior */}
+          {tcpBehavior && (
+            <Card className="bg-zinc-900 border-zinc-700">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm text-zinc-300 flex items-center gap-2">
+                  <BarChart3 className="w-4 h-4 text-purple-400" />
+                  TCP/IP Behavior Analysis
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="text-xs space-y-1">
+                {tcpBehavior.ttl !== null && (
+                  <div><span className="text-zinc-400">TTL: </span><span className="text-zinc-200 font-mono">{tcpBehavior.ttl}</span>
+                    <span className="text-zinc-500 ml-1">({tcpBehavior.ttl >= 252 ? "Cisco/Juniper" : tcpBehavior.ttl >= 60 ? "Linux-based" : "other"})</span>
+                  </div>
+                )}
+                {tcpBehavior.rtt_ms !== null && (
+                  <div><span className="text-zinc-400">RTT: </span><span className="text-zinc-200">{tcpBehavior.rtt_ms}ms</span></div>
+                )}
+                {tcpBehavior.stateful !== null && (
+                  <div><span className="text-zinc-400">Firewall type: </span>
+                    <span className={tcpBehavior.stateful ? "text-blue-300" : "text-orange-300"}>
+                      {tcpBehavior.stateful ? "Stateful" : "Stateless/ACL-based"}
+                    </span>
+                  </div>
+                )}
+                {tcpBehavior.inference && <div className="text-zinc-400">{tcpBehavior.inference}</div>}
+              </CardContent>
+            </Card>
+          )}
+        </div>
+      )}
+
+      {/* SSL VPN Portals */}
+      {vpnPortals.length > 0 && (
+        <Card className="bg-orange-900/20 border-orange-500/30">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm text-orange-300 flex items-center gap-2">
+              <ShieldAlert className="w-4 h-4" />
+              SSL VPN Portals Detected ({vpnPortals.length})
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {vpnPortals.map((p, i) => (
+                <div key={i} className="flex items-center justify-between bg-zinc-800/50 rounded px-3 py-2">
+                  <div>
+                    <span className="text-orange-300 font-medium text-sm">{p.vpn_name}</span>
+                    <code className="text-zinc-400 text-xs ml-3">{p.url}</code>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-zinc-500">HTTP {p.status_code}</span>
+                    <Badge className="bg-orange-500/20 text-orange-300 border-orange-500/40 text-xs">EXPOSED</Badge>
+                  </div>
+                </div>
+              ))}
+              <p className="text-xs text-orange-400 mt-1">Warning: VPN portals are high-value targets. Restrict access to corporate IPs and ensure MFA is enforced.</p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* CVE Findings */}
+      {cves.length > 0 && (
+        <Card className="bg-zinc-900 border-zinc-700">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm text-zinc-200 flex items-center gap-2">
+              <ShieldX className="w-4 h-4 text-red-400" />
+              CVE Findings ({cves.length})
+              {cves.filter(c => c.actively_exploited).length > 0 && (
+                <Badge className="bg-red-500/20 text-red-300 border-red-500/40 text-xs ml-1">
+                  {cves.filter(c => c.actively_exploited).length} CISA KEV
+                </Badge>
+              )}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {cves.map((cve) => (
+              <div key={cve.id}
+                className={cn("border rounded-lg overflow-hidden cursor-pointer transition-colors", PHYSICAL_SEVERITY_MAP[cve.severity] || PHYSICAL_SEVERITY_MAP.info)}
+                onClick={() => setExpandedCVE(expandedCVE === cve.id ? null : cve.id)}
+              >
+                <div className="flex items-center justify-between px-4 py-3">
+                  <div className="flex items-center gap-3">
+                    <span className="font-mono text-sm font-bold">{cve.id}</span>
+                    <Badge className={cn("text-xs border", PHYSICAL_SEVERITY_MAP[cve.severity])}>
+                      CVSS {cve.cvss}
+                    </Badge>
+                    {cve.actively_exploited && (
+                      <Badge className="bg-red-500/20 text-red-300 border-red-500/40 text-xs">KEV</Badge>
+                    )}
+                    {cve.version_confirmed === true && (
+                      <Badge className="bg-red-700/30 text-red-200 border-red-500/40 text-xs">Version Confirmed Vulnerable</Badge>
+                    )}
+                  </div>
+                  <ChevronDown className={cn("w-4 h-4 transition-transform", expandedCVE === cve.id && "rotate-180")} />
+                </div>
+                <div className="px-4 pb-2 text-sm font-medium">{cve.title}</div>
+                {expandedCVE === cve.id && (
+                  <div className="px-4 pb-4 space-y-3 border-t border-current/20 pt-3">
+                    <p className="text-sm opacity-80">{cve.description}</p>
+                    <div className="bg-black/20 rounded p-3">
+                      <div className="text-xs font-semibold mb-1 opacity-60 uppercase tracking-wider">Remediation</div>
+                      <p className="text-sm">{cve.remediation}</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Risk Score Breakdown */}
+      {riskScore && (
+        <Card className="bg-zinc-900 border-zinc-700">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm text-zinc-200 flex items-center gap-2">
+              <Gauge className="w-4 h-4 text-blue-400" />
+              Composite Risk Score
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-4 gap-3">
+              {Object.entries(riskScore.breakdown).map(([key, val]) => {
+                const labels: Record<string, string> = {
+                  exposure: "Exposure", vulnerability: "Vulnerability",
+                  configuration: "Config Risk", attack_surface: "Attack Surface"
+                };
+                const pct = Math.min(100, (val / 25) * 100);
+                return (
+                  <div key={key} className="text-center">
+                    <div className="text-xl font-bold text-zinc-100">{val.toFixed(1)}</div>
+                    <div className="text-xs text-zinc-500 mb-1">{labels[key]}</div>
+                    <div className="h-1.5 bg-zinc-700 rounded-full">
+                      <div className="h-1.5 bg-blue-500 rounded-full transition-all" style={{ width: `${pct}%` }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="text-center mt-4 text-zinc-400 text-xs">
+              Composite = Exposure×25% + Vulnerability×40% + Config×20% + Surface×15%
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Summary Card */}
+      {summary && (
+        <Card className="bg-zinc-900 border-zinc-700">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm text-green-300 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4" />
+              Scan Complete
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-3 gap-4 text-sm">
+              {[
+                { label: "Target", value: summary.target },
+                { label: "Vendor", value: summary.vendor_name },
+                { label: "Version", value: summary.version || "Unknown" },
+                { label: "Open Ports", value: summary.open_ports.join(", ") || "None" },
+                { label: "CVEs Found", value: `${summary.cve_count} (${summary.critical_cves} critical)` },
+                { label: "Risk Score", value: `${summary.risk_score.composite} — ${summary.risk_score.severity}` },
+                { label: "SNMP", value: summary.snmp_accessible ? "Accessible (exposed)" : "Secure" },
+                { label: "VPN Portals", value: summary.ssl_vpn_portals.toString() },
+                { label: "Scan ID", value: summary.scan_id.slice(0, 8) + "..." },
+              ].map(({ label, value }) => (
+                <div key={label}>
+                  <span className="text-zinc-500 text-xs">{label}</span>
+                  <div className="text-zinc-200 font-medium truncate">{value}</div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  );
+}
+
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function FirewallPage() {
@@ -1980,6 +2743,7 @@ export default function FirewallPage() {
             { value: "rule-analyzer", icon: FileText,      label: "Rule Analyzer" },
             { value: "rate-limit",    icon: Gauge,         label: "Rate Limit" },
             { value: "smuggling",     icon: ArrowLeftRight, label: "Smuggling" },
+            { value: "physical",      icon: Shield,         label: "Physical FW" },
           ].map(({ value, icon: Icon, label }) => (
             <TabsTrigger key={value} value={value}
               className="flex items-center gap-2 text-xs data-[state=active]:bg-zinc-800 data-[state=active]:text-zinc-100 text-zinc-400 px-3 py-1.5 rounded-md transition-colors">
@@ -1994,6 +2758,7 @@ export default function FirewallPage() {
         <TabsContent value="rule-analyzer"><RuleAnalyzerTab onSave={addHistory} /></TabsContent>
         <TabsContent value="rate-limit"><RateLimitTab onSave={addHistory} /></TabsContent>
         <TabsContent value="smuggling"><SmugglingTab onSave={addHistory} /></TabsContent>
+        <TabsContent value="physical"><PhysicalFirewallTab onSave={addHistory} /></TabsContent>
       </Tabs>
 
       {showHistory && <HistoryPanel history={history} onClear={clearHistory} />}
