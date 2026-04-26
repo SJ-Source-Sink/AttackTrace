@@ -1171,13 +1171,21 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
             # Trigger AI triage
             triage_scan_findings.delay(scan_job_id)
 
-            # Notifications
+            # Notifications: scan.completed channels (Slack, Jira, Teams, webhooks)
             try:
                 asyncio.run(_async_notify_completion(
                     str(job.org_id), scan_job_id, job.target_domains, findings_count
                 ))
             except Exception as e:
                 logger.warning(f"Notification failed: {e}")
+
+            # Notifications: finding.critical channels for each critical/high finding
+            try:
+                asyncio.run(_async_notify_critical_findings(
+                    str(job.org_id), scan_job_id, findings_count
+                ))
+            except Exception as e:
+                logger.warning(f"Critical finding notification failed: {e}")
 
             logger.info(f"Scan {scan_job_id} completed. {sum(findings_count.values())} findings.")
             return {"status": "completed", "findings_count": findings_count}
@@ -1331,6 +1339,77 @@ def triage_scan_findings(self, scan_job_id: str) -> dict:
 async def _import_and_triage(finding, asset_ctx: dict, org_context: dict) -> dict:
     from app.services.ai_service import triage_finding
     return await triage_finding(finding, asset_ctx, org_context)
+
+
+async def _async_notify_critical_findings(org_id: str, scan_job_id: str, findings_count: dict) -> None:
+    """
+    Fire finding.critical dispatch_notifications for critical/high findings in this scan.
+    Runs once after the scan completes — queries the DB for the newly persisted findings
+    so we have real finding IDs to include in the payload.
+    """
+    critical = findings_count.get("critical", 0)
+    high = findings_count.get("high", 0)
+    if critical == 0 and high == 0:
+        return
+
+    try:
+        from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+        from sqlalchemy.orm import sessionmaker as _sessionmaker
+        from sqlalchemy import select as _async_select
+        from app.models.db.finding import Finding as _DBFinding, FindingSeverity as _FindingSeverity
+        from app.services.notification_service import dispatch_notifications
+
+        async_db_url = settings.DATABASE_URL
+        if not async_db_url.startswith("postgresql+asyncpg"):
+            async_db_url = async_db_url.replace("postgresql://", "postgresql+asyncpg://").replace(
+                "postgresql+psycopg2://", "postgresql+asyncpg://"
+            )
+
+        _engine = create_async_engine(
+            async_db_url, pool_pre_ping=True, pool_size=1, max_overflow=0
+        )
+        _AsyncSessionFactory = _sessionmaker(
+            _engine, class_=AsyncSession, expire_on_commit=False
+        )
+
+        try:
+            from uuid import UUID as _UUID
+            _scan_uuid = _UUID(scan_job_id)
+            _org_uuid = _UUID(org_id)
+
+            async with _AsyncSessionFactory() as _db:
+                _result = await _db.execute(
+                    _async_select(_DBFinding).where(
+                        _DBFinding.scan_job_id == _scan_uuid,
+                        _DBFinding.org_id == _org_uuid,
+                        _DBFinding.severity.in_([
+                            _FindingSeverity.CRITICAL, _FindingSeverity.HIGH
+                        ]),
+                    ).limit(50)
+                )
+                crit_findings = _result.scalars().all()
+
+                for f in crit_findings:
+                    try:
+                        await dispatch_notifications(
+                            org_id=org_id,
+                            event_type="finding.critical",
+                            payload={
+                                "finding_id": str(f.id),
+                                "scan_id": scan_job_id,
+                                "org_id": org_id,
+                                "title": f.title,
+                                "severity": f.severity.value,
+                                "affected_asset": f.affected_asset or "",
+                            },
+                            db_session=_db,
+                        )
+                    except Exception as _fe:
+                        logger.warning(f"dispatch_notifications finding.critical failed for {f.id}: {_fe}")
+        finally:
+            await _engine.dispose()
+    except Exception as exc:
+        logger.warning(f"_async_notify_critical_findings failed: {exc}")
 
 
 async def _async_notify_completion(org_id, scan_job_id, target_domains, findings_count):

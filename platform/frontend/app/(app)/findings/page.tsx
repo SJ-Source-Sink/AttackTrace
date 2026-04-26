@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { ShieldAlert, ChevronLeft, ChevronRight, X, Plus, AlertTriangle, Lock, Clock } from "lucide-react";
+import { ShieldAlert, ChevronLeft, ChevronRight, X, Plus, AlertTriangle, Lock, Clock, Search, Download, CheckSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/shared/empty-state";
 import { FindingRow } from "@/components/findings/finding-row";
@@ -12,6 +12,7 @@ import { useFindings } from "@/hooks/use-findings";
 import { useCreateFinding } from "@/hooks/use-findings";
 import { toast } from "sonner";
 import type { FindingFilters, FindingSeverity, FindingStatus } from "@/types";
+import { API_BASE } from "@/lib/api";
 
 const SEVERITIES: FindingSeverity[] = ["critical", "high", "medium", "low", "info"];
 const STATUSES: FindingStatus[] = ["open", "in_progress", "remediated", "accepted_risk", "false_positive"];
@@ -327,6 +328,9 @@ export default function FindingsPage() {
   const [overdueOnly, setOverdueOnly] = useState(false);
   const [page, setPage] = useState(1);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkLoading, setBulkLoading] = useState(false);
 
   // Build query params based on view mode + filters
   const activeQueryFilters: FindingFilters & { page?: number; per_page?: number; category?: string; overdue?: boolean } = viewMode === 'active'
@@ -380,6 +384,93 @@ export default function FindingsPage() {
     setSecretsOnly(false);
     setOverdueOnly(false);
     setPage(1);
+  };
+
+  // Search filter applied client-side on the current page's findings
+  const filteredFindings = searchQuery.trim()
+    ? findings.filter((f) =>
+        f.title?.toLowerCase().includes(searchQuery.toLowerCase())
+      )
+    : findings;
+
+  // Select all visible (filtered) findings on current page
+  const allVisibleSelected =
+    filteredFindings.length > 0 &&
+    filteredFindings.every((f) => selectedIds.has(f.id));
+
+  const toggleSelectAll = () => {
+    if (allVisibleSelected) {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        filteredFindings.forEach((f) => next.delete(f.id));
+        return next;
+      });
+    } else {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        filteredFindings.forEach((f) => next.add(f.id));
+        return next;
+      });
+    }
+  };
+
+  const toggleSelectOne = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const handleBulkStatus = async (status: string) => {
+    if (selectedIds.size === 0) return;
+    setBulkLoading(true);
+    try {
+      const token = localStorage.getItem("access_token") || "";
+      const resp = await fetch(`${API_BASE}/findings/bulk-status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ finding_ids: Array.from(selectedIds), status }),
+      });
+      if (!resp.ok) throw new Error("Bulk status update failed");
+      toast.success(`Marked ${selectedIds.size} finding(s) as ${status.replace("_", " ")}`);
+      setSelectedIds(new Set());
+    } catch {
+      toast.error("Failed to update findings");
+    } finally {
+      setBulkLoading(false);
+    }
+  };
+
+  const handleExportSelected = async () => {
+    if (selectedIds.size === 0) return;
+    const token = localStorage.getItem("access_token") || "";
+    const ids = Array.from(selectedIds).join(",");
+    const url = `${API_BASE}/findings/export?fmt=csv&finding_ids=${encodeURIComponent(ids)}`;
+    const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!resp.ok) { toast.error("Export failed"); return; }
+    const blob = await resp.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "findings-selected.csv";
+    a.click();
+  };
+
+  const handleExportAll = async () => {
+    const token = localStorage.getItem("access_token") || "";
+    const resp = await fetch(`${API_BASE}/findings/export?fmt=csv`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!resp.ok) { toast.error("Export failed"); return; }
+    const blob = await resp.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "findings-all.csv";
+    a.click();
   };
 
   const hasFilters =
@@ -548,21 +639,52 @@ export default function FindingsPage() {
 
       {/* Main content */}
       <div className="flex-1 min-w-0 space-y-4">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-bold text-zinc-100">Findings</h1>
             <p className="text-sm text-zinc-400 mt-0.5">
               {total.toLocaleString()} findings {hasFilters && viewMode === 'active' && "matching filters"}
             </p>
           </div>
-          <Button
-            onClick={() => setDrawerOpen(true)}
-            className="bg-orange-600 hover:bg-orange-500 text-white gap-1.5"
-            size="sm"
-          >
-            <Plus className="h-4 w-4" />
-            Create Finding
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* Search bar */}
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500 pointer-events-none" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search findings..."
+                className="pl-8 pr-3 py-1.5 rounded-md border border-zinc-700 bg-zinc-900 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500 w-52"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery("")}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+            {/* Export All CSV */}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleExportAll}
+              className="gap-1.5 border-zinc-700 text-zinc-300 hover:text-zinc-100"
+            >
+              <Download className="h-3.5 w-3.5" />
+              Export CSV
+            </Button>
+            <Button
+              onClick={() => setDrawerOpen(true)}
+              className="bg-orange-600 hover:bg-orange-500 text-white gap-1.5"
+              size="sm"
+            >
+              <Plus className="h-4 w-4" />
+              Create Finding
+            </Button>
+          </div>
         </div>
 
         {/* Active / Suppressed tab bar */}
@@ -608,20 +730,50 @@ export default function FindingsPage() {
               </div>
             ))}
           </div>
-        ) : findings.length === 0 ? (
+        ) : filteredFindings.length === 0 ? (
           <EmptyState
             icon={<ShieldAlert className="h-8 w-8" />}
-            title={viewMode === 'suppressed' ? "No suppressed findings" : "No findings"}
+            title={
+              searchQuery
+                ? "No findings match your search"
+                : viewMode === 'suppressed' ? "No suppressed findings" : "No findings"
+            }
             description={
-              viewMode === 'suppressed'
-                ? "No findings have been suppressed or marked as false positive."
-                : "No findings match your current filters. Run a scan or create a manual finding."
+              searchQuery
+                ? `No findings matched "${searchQuery}". Try a different search term.`
+                : viewMode === 'suppressed'
+                  ? "No findings have been suppressed or marked as false positive."
+                  : "No findings match your current filters. Run a scan or create a manual finding."
             }
           />
         ) : (
           <div className="rounded-lg border border-zinc-800 overflow-hidden divide-y divide-zinc-800">
-            {findings.map((f) => (
-              <FindingRow key={f.id} finding={f} />
+            {/* Select-all header row */}
+            <div className="flex items-center gap-3 px-4 py-2 bg-zinc-900/60 border-b border-zinc-800">
+              <Checkbox
+                checked={allVisibleSelected}
+                onCheckedChange={toggleSelectAll}
+                aria-label="Select all findings"
+              />
+              <span className="text-xs text-zinc-500">
+                {selectedIds.size > 0
+                  ? `${selectedIds.size} selected`
+                  : `Select all (${filteredFindings.length})`}
+              </span>
+            </div>
+            {filteredFindings.map((f) => (
+              <div key={f.id} className="flex items-start gap-3 px-4 group">
+                <div className="flex items-center pt-3.5 shrink-0">
+                  <Checkbox
+                    checked={selectedIds.has(f.id)}
+                    onCheckedChange={() => toggleSelectOne(f.id)}
+                    aria-label={`Select finding ${f.title}`}
+                  />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <FindingRow finding={f} />
+                </div>
+              </div>
             ))}
           </div>
         )}
@@ -659,6 +811,47 @@ export default function FindingsPage() {
           </div>
         )}
       </div>
+
+      {/* Floating bulk action bar */}
+      {selectedIds.size > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 bg-zinc-800 border border-zinc-600 rounded-xl px-5 py-3 shadow-2xl">
+          <span className="text-sm font-medium text-zinc-200 flex items-center gap-1.5">
+            <CheckSquare className="h-4 w-4 text-blue-400" />
+            {selectedIds.size} selected
+          </span>
+          <div className="w-px h-5 bg-zinc-600" />
+          <button
+            onClick={() => handleBulkStatus("remediated")}
+            disabled={bulkLoading}
+            className="px-3 py-1.5 rounded-md text-xs font-medium bg-green-700 hover:bg-green-600 text-white disabled:opacity-50 transition-colors"
+          >
+            Mark as Remediated
+          </button>
+          <button
+            onClick={() => handleBulkStatus("accepted_risk")}
+            disabled={bulkLoading}
+            className="px-3 py-1.5 rounded-md text-xs font-medium bg-yellow-700 hover:bg-yellow-600 text-white disabled:opacity-50 transition-colors"
+          >
+            Mark as Accepted Risk
+          </button>
+          <button
+            onClick={handleExportSelected}
+            disabled={bulkLoading}
+            className="px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-700 hover:bg-zinc-600 text-zinc-200 disabled:opacity-50 transition-colors flex items-center gap-1"
+          >
+            <Download className="h-3.5 w-3.5" />
+            Export Selected (CSV)
+          </button>
+          <div className="w-px h-5 bg-zinc-600" />
+          <button
+            onClick={() => setSelectedIds(new Set())}
+            className="text-zinc-400 hover:text-zinc-200 transition-colors"
+            aria-label="Clear selection"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
 
       <CreateFindingDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
     </div>

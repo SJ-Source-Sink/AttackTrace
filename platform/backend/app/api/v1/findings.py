@@ -5,11 +5,11 @@ Findings API: list, filter, update lifecycle, add comments, and manage suppressi
 import math
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, List, Optional
+from typing import Annotated, Any, List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -290,8 +290,14 @@ async def list_findings(
     if sort_by == "risk_score":
         order_col = Finding.risk_score.desc().nulls_last()
     elif sort_by == "severity":
-        # Severity order via CASE expression is complex; fall back to created_at for now
-        order_col = Finding.created_at.desc()
+        order_col = case(
+            (Finding.severity == "critical", 0),
+            (Finding.severity == "high", 1),
+            (Finding.severity == "medium", 2),
+            (Finding.severity == "low", 3),
+            (Finding.severity == "info", 4),
+            else_=5,
+        ).asc()
     elif sort_by == "sla_deadline":
         order_col = Finding.sla_deadline.asc().nulls_last()
     else:
@@ -385,6 +391,84 @@ async def kev_summary(
             pass
     total_kev = (await db.execute(query)).scalar_one()
     return {"kev_findings": total_kev}
+
+
+@router.get(
+    "/export",
+    summary="Export findings as CSV or JSON",
+)
+async def export_findings(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+    fmt: str = "json",
+    scan_job_id: Optional[str] = None,
+    severity: Optional[str] = None,
+    finding_status: Optional[str] = None,
+) -> Any:
+    from fastapi.responses import StreamingResponse
+    import csv, io
+
+    query = select(Finding).where(Finding.org_id == org_id)
+    if scan_job_id:
+        query = query.where(Finding.scan_job_id == UUID(scan_job_id))
+    if severity:
+        query = query.where(Finding.severity == severity)
+    if finding_status:
+        query = query.where(Finding.status == FindingStatus(finding_status))
+
+    result = await db.execute(query.order_by(Finding.created_at.desc()))
+    findings = result.scalars().all()
+
+    if fmt == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["id", "title", "severity", "status", "affected_asset", "cvss_score", "created_at"])
+        for f in findings:
+            writer.writerow([
+                str(f.id), f.title, f.severity.value, f.status.value,
+                f.affected_asset or "", f.cvss_score or "",
+                f.created_at.isoformat() if f.created_at else ""
+            ])
+        output.seek(0)
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=findings.csv"},
+        )
+    else:
+        return {"items": [FindingResponse.from_orm(f, 0).model_dump() for f in findings], "total": len(findings)}
+
+
+@router.post(
+    "/bulk-status",
+    summary="Bulk update finding status",
+)
+async def bulk_update_status(
+    payload: dict,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    finding_ids = payload.get("finding_ids", [])
+    new_status = payload.get("status")
+    if not finding_ids or not new_status:
+        raise HTTPException(status_code=400, detail="finding_ids and status required")
+    try:
+        target_status = FindingStatus(new_status)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid status: {new_status}")
+
+    from sqlalchemy import update as _update
+    stmt = (
+        _update(Finding)
+        .where(Finding.org_id == org_id, Finding.id.in_([UUID(fid) for fid in finding_ids]))
+        .values(status=target_status)
+    )
+    result = await db.execute(stmt)
+    await db.commit()
+    return {"updated": result.rowcount}
 
 
 @router.get(
@@ -527,6 +611,34 @@ async def update_finding(
     )
     comment_count = cc_result.scalar_one()
     return FindingResponse.from_orm(finding, comment_count)
+
+
+@router.delete(
+    "/{finding_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a finding",
+)
+async def delete_finding(
+    finding_id: UUID,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    finding = await _get_finding_or_404(db, finding_id, org_id)
+    log = AuditLog(
+        org_id=org_id,
+        user_id=current_user.id,
+        action="finding.deleted",
+        resource_type="finding",
+        resource_id=str(finding_id),
+        before_state={"title": finding.title, "severity": finding.severity.value},
+        after_state=None,
+        ip_address=_get_client_ip(request),
+    )
+    db.add(log)
+    await db.delete(finding)
+    await db.commit()
 
 
 @router.post(

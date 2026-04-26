@@ -54,6 +54,10 @@ from app.api.v1.attack_patterns import (
     TECH_SIGNATURES,
 )
 
+from fastapi import APIRouter as _APIRouter
+
+router = _APIRouter(prefix="/burp", tags=["Burp Analyzer"])
+
 # ─── Limits ───────────────────────────────────────────────────────────────────
 
 MAX_FILE_BYTES = 500 * 1024 * 1024  # 500 MB

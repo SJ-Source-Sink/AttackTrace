@@ -34,6 +34,10 @@ import {
   BarChart3,
   FileCode2,
   Cloud,
+  Bot,
+  Link2,
+  GitBranch,
+  Target,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -121,6 +125,18 @@ const toolItems: NavItem[] = [
     icon: FlaskConical,
     toolKey: "test_generator",
   },
+  {
+    label: "AI/LLM Scanner",
+    href: "/ai-scanner",
+    icon: Bot,
+    badge: "New",
+  },
+  {
+    label: "MCP Scanner",
+    href: "/mcp-scanner",
+    icon: Link2,
+    badge: "New",
+  },
 ];
 
 const mobileItems: NavItem[] = [
@@ -171,6 +187,19 @@ const cloudItems: NavItem[] = [
     label: "Cloud Discovery",
     href: "/cloud",
     icon: Cloud,
+  },
+];
+
+const intelligenceItems: NavItem[] = [
+  {
+    label: "MITRE ATT&CK",
+    href: "/mitre",
+    icon: Target,
+  },
+  {
+    label: "CI/CD Integration",
+    href: "/cicd",
+    icon: GitBranch,
   },
 ];
 
@@ -274,6 +303,7 @@ export function Sidebar({ className }: SidebarProps) {
   const visibleMobileItems = filterItems(mobileItems);
   const visibleAttackSuiteItems = filterItems(attackSuiteItems);
   const visibleCloudItems = filterItems(cloudItems);
+  const visibleIntelligenceItems = filterItems(intelligenceItems);
 
   return (
     <aside
@@ -364,6 +394,21 @@ export function Sidebar({ className }: SidebarProps) {
             </div>
             <div className="space-y-0.5">
               {visibleCloudItems.map((item) => (
+                <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {visibleIntelligenceItems.length > 0 && (
+          <div className="mb-4">
+            <div className="px-3 pb-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                Intelligence
+              </p>
+            </div>
+            <div className="space-y-0.5">
+              {visibleIntelligenceItems.map((item) => (
                 <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
               ))}
             </div>

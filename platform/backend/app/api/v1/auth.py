@@ -142,11 +142,40 @@ async def login(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
+    # Check account lockout
+    import redis.asyncio as _aioredis
+    _lockout_key = f"lockout:{payload.email}"
+    _attempt_key = f"loginattempts:{payload.email}"
+    try:
+        _redis = _aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=1)
+        _locked = await _redis.get(_lockout_key)
+        if _locked:
+            await _redis.aclose()
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={"error": {"code": "ACCOUNT_LOCKED", "message": "Account temporarily locked due to too many failed login attempts. Try again in 15 minutes."}},
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        _redis = None
+
     # Load user
     result = await db.execute(select(User).where(User.email == payload.email))
     user = result.scalar_one_or_none()
 
     if not user or not verify_password(payload.password, user.hashed_password):
+        # Increment failed attempt counter
+        try:
+            if _redis:
+                attempts = await _redis.incr(_attempt_key)
+                await _redis.expire(_attempt_key, 900)  # 15 min window
+                if int(attempts) >= 5:
+                    await _redis.set(_lockout_key, "1", ex=900)  # Lock for 15 min
+                    await _redis.delete(_attempt_key)
+                await _redis.aclose()
+        except Exception:
+            pass
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error": {"code": "INVALID_CREDENTIALS", "message": "Invalid email or password"}},
@@ -177,6 +206,15 @@ async def login(
     )
     refresh_token = create_refresh_token(subject=str(user.id))
     await store_refresh_token(str(user.id), refresh_token)
+
+    # Clear failed attempt counter on success
+    try:
+        if '_redis' in locals() and _redis:
+            await _redis.delete(_attempt_key)
+            await _redis.delete(_lockout_key)
+            await _redis.aclose()
+    except Exception:
+        pass
 
     return TokenResponse(
         access_token=access_token,

@@ -27,6 +27,12 @@ from app.api.v1.network_graph import router as network_graph_router
 from app.api.v1.schedules import router as schedules_router
 from app.api.v1.notifications import router as notifications_router
 from app.api.v1.cloud import router as cloud_router
+from app.api.v1.burp_analyzer import router as burp_analyzer_router
+from app.api.v1.cicd import router as cicd_router
+from app.api.v1.attack_mapper import router as attack_mapper_router
+from app.api.v1.webhooks import router as webhooks_router
+from app.api.v1.ai_scanner import router as ai_scanner_router
+from app.api.v1.mcp_scanner import router as mcp_scanner_router
 
 api_router = APIRouter()
 
@@ -54,3 +60,9 @@ api_router.include_router(network_graph_router)
 api_router.include_router(schedules_router)
 api_router.include_router(notifications_router)
 api_router.include_router(cloud_router)
+api_router.include_router(burp_analyzer_router)
+api_router.include_router(cicd_router)
+api_router.include_router(attack_mapper_router)
+api_router.include_router(webhooks_router)
+api_router.include_router(ai_scanner_router)
+api_router.include_router(mcp_scanner_router)

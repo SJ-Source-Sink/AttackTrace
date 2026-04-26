@@ -646,13 +646,23 @@ async def upload_template(
     except yaml.YAMLError as e:
         raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
 
+    import os
+    safe_name = os.path.basename(file.filename or "custom.yaml")
+    # Only allow alphanumeric, dash, underscore, dot
+    import re as _re
+    if not _re.match(r'^[a-zA-Z0-9_\-\.]+\.yaml$', safe_name):
+        raise HTTPException(status_code=400, detail="Invalid filename. Use alphanumeric, dash, underscore only, with .yaml extension.")
+
     custom_dir = (
         Path(_settings.ATTACKTRACE_WORKSPACE_DIR) / str(org_id) / "custom-templates"
     )
     custom_dir.mkdir(parents=True, exist_ok=True)
-    dest = custom_dir / (file.filename or "custom.yaml")
+    dest = custom_dir / safe_name
+    # Verify dest is under custom_dir (extra safety)
+    if not str(dest.resolve()).startswith(str(custom_dir.resolve())):
+        raise HTTPException(status_code=400, detail="Invalid file path")
     dest.write_bytes(content)
-    return {"filename": file.filename, "status": "uploaded", "path": str(dest)}
+    return {"filename": safe_name, "status": "uploaded", "path": str(dest)}
 
 
 @router.get("/templates", summary="List and search nuclei templates")
