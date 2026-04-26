@@ -44,8 +44,9 @@ _ACTIVE_FINDING_STATUSES = [
 
 
 def _worse_severity(a: str, b: str) -> str:
-    """Return whichever severity string is more severe."""
-    return a if _SEV_ORDER.get(a, 0) >= _SEV_ORDER.get(b, 0) else b
+    """Return whichever severity string is more severe (case-insensitive)."""
+    a_lower, b_lower = a.lower(), b.lower()
+    return a_lower if _SEV_ORDER.get(a_lower, 0) >= _SEV_ORDER.get(b_lower, 0) else b_lower
 
 
 def _extract_hostname(url: str) -> str:
@@ -92,36 +93,76 @@ async def _fetch_findings_for_assets(
     db: AsyncSession,
     org_id: UUID,
     asset_ids: list[UUID],
-) -> list[Finding]:
-    """Fetch only columns needed for the finding index."""
+    assets: list,
+) -> list:
+    """Fetch findings and return records keyed to asset IDs.
+
+    Two strategies used together:
+    1. Direct asset_id FK match (populated for newer scans).
+    2. affected_asset text match against asset.value (covers older scans
+       where asset_id was not backfilled on findings).
+    """
     if not asset_ids:
         return []
-    stmt = select(Finding.id, Finding.asset_id, Finding.severity, Finding.status).where(
+
+    # Build value → id map for fuzzy matching
+    value_to_asset_id: dict[str, UUID] = {
+        a.value.lower().rstrip("/"): a.id for a in assets
+    }
+
+    stmt = select(
+        Finding.id, Finding.asset_id, Finding.affected_asset,
+        Finding.severity, Finding.status,
+    ).where(
         and_(
             Finding.org_id == org_id,
-            Finding.asset_id.in_(asset_ids),
             Finding.status.in_(_ACTIVE_FINDING_STATUSES),
+        )
+    ).where(
+        # Either directly linked OR same scan scope
+        Finding.asset_id.in_(asset_ids) | Finding.scan_job_id.in_(
+            select(Asset.scan_job_id).where(Asset.id.in_(asset_ids)).distinct()
         )
     )
     result = await db.execute(stmt)
-    return list(result.mappings().all())  # type: ignore[return-value]
+    rows = list(result.mappings().all())
+
+    # Enrich rows that lack asset_id by matching affected_asset → asset.value
+    enriched = []
+    for row in rows:
+        r = dict(row)
+        if r.get("asset_id") is None and r.get("affected_asset"):
+            key = (r["affected_asset"] or "").lower().rstrip("/")
+            matched_id = value_to_asset_id.get(key)
+            if matched_id is None:
+                # Try stripping scheme for webapp matching
+                for suffix in [key.removeprefix("https://"), key.removeprefix("http://")]:
+                    matched_id = value_to_asset_id.get(suffix)
+                    if matched_id:
+                        break
+            if matched_id:
+                r["asset_id"] = matched_id
+        enriched.append(r)
+    return enriched
 
 
 def _build_finding_index(
-    findings: list[Finding],
+    findings: list,
 ) -> dict[UUID, dict]:
     """
     Returns a dict keyed by asset_id → {count, worst_severity}.
+    Handles both UUID asset_id values and None (skips unresolved findings).
     """
     index: dict[UUID, dict] = defaultdict(lambda: {"count": 0, "worst_severity": "none"})
     for f in findings:
-        if f.asset_id is None:
+        aid = f.get("asset_id") if hasattr(f, "get") else getattr(f, "asset_id", None)
+        if aid is None:
             continue
-        entry = index[f.asset_id]
+        entry = index[aid]
         entry["count"] += 1
-        entry["worst_severity"] = _worse_severity(
-            entry["worst_severity"], f.severity.value
-        )
+        sev = f.get("severity") if hasattr(f, "get") else getattr(f, "severity", None)
+        sev_val = sev.value if hasattr(sev, "value") else str(sev)
+        entry["worst_severity"] = _worse_severity(entry["worst_severity"], sev_val.lower())
     return dict(index)
 
 
@@ -225,6 +266,75 @@ def _build_edges(assets: list[Asset]) -> list[dict]:
     return edges
 
 
+def _build_attack_path_edges(
+    edges: list[dict],
+    finding_index: dict,
+    assets: list,
+) -> list[dict]:
+    """
+    Derive attack_path edges: connect nodes with critical/high findings
+    that are already linked via any existing edge. This surfaces the most
+    dangerous traversal paths through the graph.
+
+    Strategy:
+    1. Collect all node IDs that have critical or high severity findings.
+    2. For each existing edge where BOTH endpoints are high-risk, add an
+       attack_path edge in the same direction.
+    3. Also add attack_path edges from any critical node to nodes it
+       connects to (even if the target is medium severity) — a critical
+       entry point can pivot anywhere it reaches.
+    """
+    # Build asset id → node id map
+    asset_node_map: dict = {f"asset:{a.id}": a.id for a in assets}
+
+    critical_nodes: set[str] = set()
+    high_nodes: set[str] = set()
+    medium_nodes: set[str] = set()
+    for node_id, asset_id in asset_node_map.items():
+        sev = finding_index.get(asset_id, {}).get("worst_severity", "none")
+        if sev == "critical":
+            critical_nodes.add(node_id)
+        elif sev == "high":
+            high_nodes.add(node_id)
+        elif sev == "medium":
+            medium_nodes.add(node_id)
+
+    # Use the highest available tier; fall back to medium if no critical/high exist
+    if critical_nodes or high_nodes:
+        primary_nodes = critical_nodes | high_nodes
+        pivot_nodes = critical_nodes          # critical can reach anything
+    elif medium_nodes:
+        primary_nodes = medium_nodes
+        pivot_nodes = medium_nodes
+    else:
+        return []
+
+    attack_edges_set: set[tuple] = set()
+    attack_edges: list[dict] = []
+
+    def _add(src: str, tgt: str) -> None:
+        key = (src, tgt)
+        if key not in attack_edges_set and src != tgt:
+            attack_edges_set.add(key)
+            attack_edges.append({
+                "source": src,
+                "target": tgt,
+                "type": "attack_path",
+                "label": "attack path",
+            })
+
+    for edge in edges:
+        src, tgt = edge["source"], edge["target"]
+        # Both endpoints are risk nodes → definite attack path
+        if src in primary_nodes and tgt in primary_nodes:
+            _add(src, tgt)
+        # Pivot nodes (critical/high) can reach any connected node
+        elif src in pivot_nodes:
+            _add(src, tgt)
+
+    return attack_edges
+
+
 def _compute_stats(
     assets: list[Asset],
     edges: list[dict],
@@ -267,7 +377,7 @@ async def get_network_graph(
 
     # 2. Findings grouped by asset
     asset_ids = [a.id for a in assets]
-    findings = await _fetch_findings_for_assets(db, org_id, asset_ids)
+    findings = await _fetch_findings_for_assets(db, org_id, asset_ids, assets)
     finding_index = _build_finding_index(findings)
 
     # 3. Nodes
@@ -275,6 +385,8 @@ async def get_network_graph(
 
     # 4. Edges
     edges = _build_edges(assets)
+    attack_path_edges = _build_attack_path_edges(edges, finding_index, assets)
+    edges = edges + attack_path_edges
 
     # 5. Stats
     stats = _compute_stats(assets, edges, finding_index)
