@@ -17,7 +17,7 @@ from typing import Annotated, AsyncGenerator
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -123,9 +123,14 @@ def _check_mcp_response(resp: httpx.Response, probe: dict) -> dict:
 
 
 class MCPScanRequest(BaseModel):
-    target_url: str
+    target: str = ""
+    target_url: str = ""
     timeout: int = 10
     check_sse: bool = True
+
+    @property
+    def resolved_target(self) -> str:
+        return (self.target_url or self.target).rstrip("/")
 
 
 async def _run_mcp_scan(target_url: str, timeout: int, check_sse: bool) -> AsyncGenerator[str, None]:
@@ -221,8 +226,10 @@ async def scan_mcp_server(
     current_user: Annotated[User, Depends(get_current_user)],
     org_id: UUID = Depends(get_current_org_id),
 ) -> StreamingResponse:
+    if not payload.resolved_target:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="target or target_url is required")
     return StreamingResponse(
-        _run_mcp_scan(payload.target_url, payload.timeout, payload.check_sse),
+        _run_mcp_scan(payload.resolved_target, payload.timeout, payload.check_sse),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

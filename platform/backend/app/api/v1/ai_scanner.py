@@ -28,7 +28,7 @@ from typing import Annotated, AsyncGenerator
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -153,9 +153,19 @@ def _fingerprint_response(resp: httpx.Response, endpoint: dict) -> dict:
 
 
 class AIScanRequest(BaseModel):
-    target_url: str
+    target: str = ""
+    target_url: str = ""
     test_owasp: bool = True
+    owasp_tests: list[str] = []
     timeout: int = 10
+
+    @property
+    def resolved_target(self) -> str:
+        return (self.target_url or self.target).rstrip("/")
+
+    @property
+    def run_owasp(self) -> bool:
+        return self.test_owasp or bool(self.owasp_tests)
 
 
 async def _run_ai_scan(target_url: str, test_owasp: bool, timeout: int) -> AsyncGenerator[str, None]:
@@ -245,8 +255,10 @@ async def scan_ai_endpoints(
     current_user: Annotated[User, Depends(get_current_user)],
     org_id: UUID = Depends(get_current_org_id),
 ) -> StreamingResponse:
+    if not payload.resolved_target:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="target or target_url is required")
     return StreamingResponse(
-        _run_ai_scan(payload.target_url, payload.test_owasp, payload.timeout),
+        _run_ai_scan(payload.resolved_target, payload.run_owasp, payload.timeout),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
