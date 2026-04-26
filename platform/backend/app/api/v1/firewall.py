@@ -3161,7 +3161,7 @@ async def _http_fingerprint_physical(target: str, port: int, use_ssl: bool = Tru
             for vendor_key, sigs in PHYSICAL_VENDORS.items():
                 if result["vendor_hint"]:
                     break
-                for path in (sigs["http_paths"][:3] if use_ssl else []):
+                for path in sigs["http_paths"][:3]:
                     try:
                         resp = await client.get(f"{base}{path}")
                         body = resp.text
@@ -3781,7 +3781,7 @@ async def _run_physical_scan(
             if ssh_result.get("vendor_hint"):
                 vendor_votes[ssh_result["vendor_hint"]] = vendor_votes.get(ssh_result["vendor_hint"], 0) + 2
         yield _sse("phase", {"phase": 2, "name": "SSH Banner Grab", "status": "complete",
-                              "finding": ssh_result.get("banner", "No banner")[:60]})
+                              "finding": (ssh_result.get("banner") or "No banner")[:60]})
 
     # ── Phase 2b: TLS Certificate ─────────────────────────────────────────────
     ssl_ports = [p for p in open_ports if p in (443, 4443, 8443, 10443)]
@@ -3809,7 +3809,7 @@ async def _run_physical_scan(
     http_ports = [p for p in open_ports if p in (443, 4443, 8443, 10443, 80, 8080)]
     if http_ports:
         yield _sse("phase", {"phase": 4, "name": "HTTP Management Interface Fingerprint", "status": "running"})
-        use_ssl = http_ports[0] != 80
+        use_ssl = http_ports[0] in (443, 4443, 8443, 10443)
         http_result = await _http_fingerprint_physical(target, http_ports[0], use_ssl)
         if http_result.get("vendor_hint"):
             vendor_votes[http_result["vendor_hint"]] = vendor_votes.get(http_result["vendor_hint"], 0) + 4
