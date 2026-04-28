@@ -2,6 +2,8 @@
 Main v1 API router — combines all sub-routers.
 """
 
+import logging
+
 from fastapi import APIRouter
 
 from app.api.v1.auth import router as auth_router
@@ -19,7 +21,6 @@ from app.api.v1.attack_suite import router as attack_suite_router
 from app.api.v1.ai_attack_suite import router as ai_attack_suite_router
 from app.api.v1.takeover import router as takeover_router
 from app.api.v1.suppression_rules import router as suppression_rules_router
-from app.api.v1.attackmapper import router as attackmapper_router
 from app.api.v1.testgen import router as testgen_router
 from app.api.v1.mobile import router as mobile_router
 from app.api.v1.firewall import router as firewall_router
@@ -28,11 +29,45 @@ from app.api.v1.schedules import router as schedules_router
 from app.api.v1.notifications import router as notifications_router
 from app.api.v1.cloud import router as cloud_router
 from app.api.v1.burp_analyzer import router as burp_analyzer_router
-from app.api.v1.cicd import router as cicd_router
-from app.api.v1.attack_mapper import router as attack_mapper_router
-from app.api.v1.webhooks import router as webhooks_router
-from app.api.v1.ai_scanner import router as ai_scanner_router
-from app.api.v1.mcp_scanner import router as mcp_scanner_router
+
+_log = logging.getLogger(__name__)
+
+# Optional modules — added recently; wrapped so server starts even on stale installs
+try:
+    from app.api.v1.attackmapper import router as attackmapper_router
+except ImportError:
+    _log.warning("attackmapper module not found — Attack Path Mapper disabled")
+    attackmapper_router = None
+
+try:
+    from app.api.v1.cicd import router as cicd_router
+except ImportError:
+    _log.warning("cicd module not found — CI/CD integration disabled")
+    cicd_router = None
+
+try:
+    from app.api.v1.attack_mapper import router as attack_mapper_router
+except ImportError:
+    _log.warning("attack_mapper module not found — MITRE ATT&CK mapper disabled")
+    attack_mapper_router = None
+
+try:
+    from app.api.v1.webhooks import router as webhooks_router
+except ImportError:
+    _log.warning("webhooks module not found — Webhooks disabled")
+    webhooks_router = None
+
+try:
+    from app.api.v1.ai_scanner import router as ai_scanner_router
+except ImportError:
+    _log.warning("ai_scanner module not found — AI/LLM Scanner disabled")
+    ai_scanner_router = None
+
+try:
+    from app.api.v1.mcp_scanner import router as mcp_scanner_router
+except ImportError:
+    _log.warning("mcp_scanner module not found — MCP Scanner disabled")
+    mcp_scanner_router = None
 
 api_router = APIRouter()
 
@@ -52,7 +87,6 @@ api_router.include_router(attack_suite_router)
 api_router.include_router(ai_attack_suite_router)
 api_router.include_router(takeover_router)
 api_router.include_router(suppression_rules_router)
-api_router.include_router(attackmapper_router)
 api_router.include_router(testgen_router)
 api_router.include_router(mobile_router)
 api_router.include_router(firewall_router)
@@ -61,8 +95,16 @@ api_router.include_router(schedules_router)
 api_router.include_router(notifications_router)
 api_router.include_router(cloud_router)
 api_router.include_router(burp_analyzer_router)
-api_router.include_router(cicd_router)
-api_router.include_router(attack_mapper_router)
-api_router.include_router(webhooks_router)
-api_router.include_router(ai_scanner_router)
-api_router.include_router(mcp_scanner_router)
+
+if attackmapper_router:
+    api_router.include_router(attackmapper_router)
+if cicd_router:
+    api_router.include_router(cicd_router)
+if attack_mapper_router:
+    api_router.include_router(attack_mapper_router)
+if webhooks_router:
+    api_router.include_router(webhooks_router)
+if ai_scanner_router:
+    api_router.include_router(ai_scanner_router)
+if mcp_scanner_router:
+    api_router.include_router(mcp_scanner_router)
