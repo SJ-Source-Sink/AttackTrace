@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import shutil
+import sys
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -94,7 +95,7 @@ async def _run_attackmapper_cmd(cmd: list[str], output_file: str) -> dict | None
 
 
 async def _stream_attackmapper(scan_id: str, req: AttackMapperRequest) -> AsyncGenerator[str, None]:
-    am_bin = shutil.which("attackmapper") or "attackmapper"
+    am_bin = [sys.executable, "-m", "attackmapper"]
     infra = req.infrastructure_type
     infra_label = INFRA_LABELS[infra]
 
@@ -128,7 +129,7 @@ async def _stream_attackmapper(scan_id: str, req: AttackMapperRequest) -> AsyncG
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
             tech_file = tmp.name
 
-        tech_cmd = [am_bin, infra, "--format", "json", "--output", tech_file]
+        tech_cmd = [*am_bin, infra, "--format", "json", "--output", tech_file]
         if req.category:
             tech_cmd += ["--category", req.category]
         if req.phase:
@@ -153,7 +154,7 @@ async def _stream_attackmapper(scan_id: str, req: AttackMapperRequest) -> AsyncG
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
             chain_file = tmp.name
 
-        chain_cmd = [am_bin, "full-chain", "--infra", infra, "--format", "json", "--output", chain_file]
+        chain_cmd = [*am_bin, "full-chain", "--infra", infra, "--format", "json", "--output", chain_file]
         chain_data = await _run_attackmapper_cmd(chain_cmd, chain_file)
         if chain_data:
             attack_chain = chain_data.get("attack_path")
@@ -170,7 +171,7 @@ async def _stream_attackmapper(scan_id: str, req: AttackMapperRequest) -> AsyncG
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
             intel_file = tmp.name
 
-        intel_cmd = [am_bin, "threat-intel", "--infra", infra, "--format", "json", "--output", intel_file]
+        intel_cmd = [*am_bin, "threat-intel", "--infra", infra, "--format", "json", "--output", intel_file]
         intel_data = await _run_attackmapper_cmd(intel_cmd, intel_file)
         if intel_data:
             threat_intel = intel_data.get("threat_intel")
@@ -211,7 +212,8 @@ async def run_attackmapper_scan(
     payload: AttackMapperRequest,
     current_user: Annotated[User, Depends(require_tool("attackmapper"))],
 ) -> StreamingResponse:
-    if not shutil.which("attackmapper"):
+    import importlib.util
+    if not importlib.util.find_spec("attackmapper"):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="attackmapper is not installed on this server",
@@ -269,7 +271,7 @@ async def _stream_update_intel() -> AsyncGenerator[str, None]:
     """Stream `attackmapper update-intel` output as SSE progress lines."""
     import re
 
-    am_bin = shutil.which("attackmapper") or "attackmapper"
+    am_bin = [sys.executable, "-m", "attackmapper"]
     items_total = 0
     failed: list[str] = []
 
@@ -280,7 +282,7 @@ async def _stream_update_intel() -> AsyncGenerator[str, None]:
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            am_bin, "update-intel",
+            *am_bin, "update-intel",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -328,7 +330,7 @@ async def _stream_update_intel() -> AsyncGenerator[str, None]:
 
         # Fetch final stats
         stats_proc = await asyncio.create_subprocess_exec(
-            am_bin, "stats",
+            *am_bin, "stats",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -362,7 +364,8 @@ async def _stream_update_intel() -> AsyncGenerator[str, None]:
 async def update_intel(
     current_user: Annotated[User, Depends(require_tool("attackmapper"))],
 ) -> StreamingResponse:
-    if not shutil.which("attackmapper"):
+    import importlib.util
+    if not importlib.util.find_spec("attackmapper"):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="attackmapper is not installed on this server",
@@ -684,12 +687,12 @@ async def correlate_cves(
         conn.close()
 
     # ── 2. Load techniques via CLI ─────────────────────────────────────────────
-    am_bin = shutil.which("attackmapper") or "attackmapper"
+    am_bin = [sys.executable, "-m", "attackmapper"]
     techniques: list[dict] = []
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
         tech_file = tmp.name
     tech_data = await _run_attackmapper_cmd(
-        [am_bin, payload.infrastructure_type, "--format", "json", "--output", tech_file],
+        [*am_bin, payload.infrastructure_type, "--format", "json", "--output", tech_file],
         tech_file,
     )
     if tech_data:
@@ -769,11 +772,11 @@ async def correlate_cves(
 async def get_attackmapper_stats(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
-    am_bin = shutil.which("attackmapper") or "attackmapper"
+    am_bin = [sys.executable, "-m", "attackmapper"]
     try:
         import re
         proc = await asyncio.create_subprocess_exec(
-            am_bin, "stats",
+            *am_bin, "stats",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
