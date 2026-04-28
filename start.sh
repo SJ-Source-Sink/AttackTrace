@@ -110,8 +110,11 @@ info "Installing/updating Python dependencies..."
 "$PIP" install --quiet --upgrade pip
 "$PIP" install --quiet -r "$BACKEND_DIR/requirements.txt"
 "$PIP" install --quiet -e "$REPO_ROOT" 2>/dev/null || true
-# Install bundled attackmapper CLI
-[ -d "$REPO_ROOT/tools/attackmapper" ] && "$PIP" install --quiet "$REPO_ROOT/tools/attackmapper" || true
+# Install all bundled tools (attackmapper, etc.)
+for tool_dir in "$REPO_ROOT"/tools/*/; do
+  [ -f "$tool_dir/pyproject.toml" ] || [ -f "$tool_dir/setup.py" ] || continue
+  "$PIP" install --quiet "$tool_dir" || true
+done
 ok "Python dependencies installed"
 
 # ─── 3. Frontend dependencies ─────────────────────────────────────────────────

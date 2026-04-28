@@ -266,6 +266,13 @@ if [ "$BACKEND_CHANGED" = true ]; then
   info "Installing any new requirements..."
   "$PIP" install --quiet --upgrade pip
   "$PIP" install --quiet -r "$BACKEND_DIR/requirements.txt"
+  # Install bundled tools (attackmapper CLI, etc.)
+  for tool_dir in "$REPO_ROOT"/tools/*/; do
+    [ -f "$tool_dir/pyproject.toml" ] || [ -f "$tool_dir/setup.py" ] || continue
+    tool_name=$(basename "$tool_dir")
+    info "Installing bundled tool: $tool_name"
+    "$PIP" install --quiet "$tool_dir"
+  done
   ok "Python dependencies up to date"
 fi
 
@@ -315,26 +322,17 @@ restart_service() {
 }
 
 if [ "$BACKEND_CHANGED" = true ]; then
-  # If uvicorn is running with --reload it auto-picks up file changes.
-  # We only need a hard restart when the process isn't running at all.
-  BACKEND_PID=""
-  [ -f "$PIDS_DIR/backend.pid" ] && BACKEND_PID=$(cat "$PIDS_DIR/backend.pid")
-
-  if [ -n "$BACKEND_PID" ] && kill -0 "$BACKEND_PID" 2>/dev/null; then
-    # Running with --reload: touch any Python file to trigger reload
-    touch "$BACKEND_DIR/app/main.py"
-    ok "Backend reload triggered (--reload detected file change)"
-  else
-    # Not running or no PID — start fresh
-    info "Starting backend..."
-    restart_service backend
-    cd "$BACKEND_DIR"
-    "$UVICORN" app.main:app --host 0.0.0.0 --port 8000 --reload \
-      > "$LOGS_DIR/backend.log" 2>&1 &
-    echo $! > "$PIDS_DIR/backend.pid"
-    ok "Backend started (pid $(cat "$PIDS_DIR/backend.pid"))"
-    cd "$REPO_ROOT"
-  fi
+  # Always hard-restart so new packages and module-level code take effect.
+  # A hot-reload (touch) is not enough — it doesn't re-install packages or
+  # re-run sys.path manipulation added at module load time.
+  info "Restarting backend..."
+  restart_service backend
+  cd "$BACKEND_DIR"
+  "$UVICORN" app.main:app --host 0.0.0.0 --port 8000 --reload \
+    > "$LOGS_DIR/backend.log" 2>&1 &
+  echo $! > "$PIDS_DIR/backend.pid"
+  ok "Backend restarted (pid $(cat "$PIDS_DIR/backend.pid"))"
+  cd "$REPO_ROOT"
 
   # Always restart Celery (doesn't auto-reload)
   info "Restarting Celery worker..."
