@@ -129,13 +129,11 @@ const toolItems: NavItem[] = [
     label: "AI/LLM Scanner",
     href: "/ai-scanner",
     icon: Bot,
-    badge: "New",
   },
   {
     label: "MCP Scanner",
     href: "/mcp-scanner",
     icon: Link2,
-    badge: "New",
   },
 ];
 
