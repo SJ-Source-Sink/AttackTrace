@@ -9,6 +9,7 @@ Commands used:
 """
 
 import asyncio
+import importlib.util
 import json
 import os
 import shutil
@@ -16,6 +17,7 @@ import sys
 import tempfile
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -26,6 +28,35 @@ from app.core.dependencies import get_current_user, require_tool
 from app.models.db.user import User
 
 router = APIRouter(prefix="/attackmapper", tags=["AttackMapper"])
+
+# ── attackmapper invocation helpers ──────────────────────────────────────────
+# We always use sys.executable so the subprocess shares the same Python env.
+# If the package isn't pip-installed yet (e.g. fresh clone without install-tools),
+# we add the bundled tools/attackmapper directory to PYTHONPATH as a fallback.
+
+def _am_cmd() -> list[str]:
+    """Return [python, -m, attackmapper] using the current interpreter."""
+    return [sys.executable, "-m", "attackmapper"]
+
+
+def _am_env() -> dict:
+    """Return os.environ extended with PYTHONPATH pointing at bundled package."""
+    env = os.environ.copy()
+    # Repo root is 6 levels up: v1/ → api/ → app/ → backend/ → platform/ → repo/
+    bundled = Path(__file__).parents[5] / "tools" / "attackmapper"
+    if bundled.is_dir():
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(bundled) + (":" + existing if existing else "")
+    return env
+
+
+def _am_available() -> bool:
+    """True if attackmapper package is importable in the current interpreter."""
+    if importlib.util.find_spec("attackmapper"):
+        return True
+    # Fallback: bundled directory exists
+    bundled = Path(__file__).parents[5] / "tools" / "attackmapper"
+    return bundled.is_dir()
 
 # In-memory scan history
 _scan_history: dict[str, dict] = {}
@@ -77,6 +108,7 @@ async def _run_attackmapper_cmd(cmd: list[str], output_file: str) -> dict | None
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=_am_env(),
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
 
@@ -95,7 +127,7 @@ async def _run_attackmapper_cmd(cmd: list[str], output_file: str) -> dict | None
 
 
 async def _stream_attackmapper(scan_id: str, req: AttackMapperRequest) -> AsyncGenerator[str, None]:
-    am_bin = [sys.executable, "-m", "attackmapper"]
+    am_bin = _am_cmd()
     infra = req.infrastructure_type
     infra_label = INFRA_LABELS[infra]
 
@@ -212,8 +244,7 @@ async def run_attackmapper_scan(
     payload: AttackMapperRequest,
     current_user: Annotated[User, Depends(require_tool("attackmapper"))],
 ) -> StreamingResponse:
-    import importlib.util
-    if not importlib.util.find_spec("attackmapper"):
+    if not _am_available():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="attackmapper is not installed on this server",
@@ -271,7 +302,7 @@ async def _stream_update_intel() -> AsyncGenerator[str, None]:
     """Stream `attackmapper update-intel` output as SSE progress lines."""
     import re
 
-    am_bin = [sys.executable, "-m", "attackmapper"]
+    am_bin = _am_cmd()
     items_total = 0
     failed: list[str] = []
 
@@ -285,6 +316,7 @@ async def _stream_update_intel() -> AsyncGenerator[str, None]:
             *am_bin, "update-intel",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=_am_env(),
         )
         assert proc.stdout is not None
         assert proc.stderr is not None
@@ -333,6 +365,7 @@ async def _stream_update_intel() -> AsyncGenerator[str, None]:
             *am_bin, "stats",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=_am_env(),
         )
         stats_out, _ = await asyncio.wait_for(stats_proc.communicate(), timeout=15)
         stats_text = stats_out.decode("utf-8", errors="replace")
@@ -364,8 +397,7 @@ async def _stream_update_intel() -> AsyncGenerator[str, None]:
 async def update_intel(
     current_user: Annotated[User, Depends(require_tool("attackmapper"))],
 ) -> StreamingResponse:
-    import importlib.util
-    if not importlib.util.find_spec("attackmapper"):
+    if not _am_available():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="attackmapper is not installed on this server",
@@ -687,7 +719,7 @@ async def correlate_cves(
         conn.close()
 
     # ── 2. Load techniques via CLI ─────────────────────────────────────────────
-    am_bin = [sys.executable, "-m", "attackmapper"]
+    am_bin = _am_cmd()
     techniques: list[dict] = []
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
         tech_file = tmp.name
@@ -772,13 +804,14 @@ async def correlate_cves(
 async def get_attackmapper_stats(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
-    am_bin = [sys.executable, "-m", "attackmapper"]
+    am_bin = _am_cmd()
     try:
         import re
         proc = await asyncio.create_subprocess_exec(
             *am_bin, "stats",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=_am_env(),
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
         text = stdout.decode("utf-8", errors="replace")
