@@ -213,6 +213,16 @@ install_python_deps() {
   # Ensure pyyaml is installed (used by nuclei template loader)
   $pip_cmd install -q pyyaml
   ok "Python dependencies installed"
+
+  # Install bundled attackmapper CLI (Attack Path Mapper feature)
+  local am_pkg="$REPO_ROOT/tools/attackmapper"
+  if [ -d "$am_pkg" ]; then
+    info "Installing bundled attackmapper CLI…"
+    $pip_cmd install -q "$am_pkg"
+    ok "attackmapper CLI installed"
+  else
+    warn "tools/attackmapper not found — Attack Path Mapper will be unavailable"
+  fi
 }
 
 # ─── Node / frontend deps ────────────────────────────────────────────────────

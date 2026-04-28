@@ -97,6 +97,10 @@ WORKDIR /app
 COPY --chown=appuser:appgroup attacktrace/ /app/attacktrace/
 RUN pip install --no-cache-dir /app/attacktrace/ && rm -rf /app/attacktrace/
 
+# Copy and install the bundled attackmapper CLI package
+COPY --chown=appuser:appgroup tools/attackmapper/ /app/tools/attackmapper/
+RUN pip install --no-cache-dir /app/tools/attackmapper/ && rm -rf /app/tools/attackmapper/
+
 # Copy application source
 COPY --chown=appuser:appgroup platform/backend/app/ /app/app/
 

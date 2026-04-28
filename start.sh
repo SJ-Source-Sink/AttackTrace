@@ -110,6 +110,8 @@ info "Installing/updating Python dependencies..."
 "$PIP" install --quiet --upgrade pip
 "$PIP" install --quiet -r "$BACKEND_DIR/requirements.txt"
 "$PIP" install --quiet -e "$REPO_ROOT" 2>/dev/null || true
+# Install bundled attackmapper CLI
+[ -d "$REPO_ROOT/tools/attackmapper" ] && "$PIP" install --quiet "$REPO_ROOT/tools/attackmapper" || true
 ok "Python dependencies installed"
 
 # ─── 3. Frontend dependencies ─────────────────────────────────────────────────
