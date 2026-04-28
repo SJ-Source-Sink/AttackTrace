@@ -1,6 +1,7 @@
 "use client";
 import { useState, useEffect } from "react";
 import { API_BASE } from "@/lib/api";
+import { fetchWithAuth } from "@/lib/auth";
 
 interface MitreMapping {
   finding_id: string;
@@ -33,10 +34,10 @@ export default function MitrePage() {
   const [selected, setSelected] = useState<MitreMapping | null>(null);
 
   useEffect(() => {
-    const token = localStorage.getItem("access_token") || "";
-    fetch(`${API_BASE}/mitre/map`, { headers: { Authorization: `Bearer ${token}` } })
-      .then((r) => r.json())
+    fetchWithAuth(`${API_BASE}/mitre/map`)
+      .then((r) => r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`))
       .then(setData)
+      .catch((err) => console.error("Failed to load MITRE mappings:", err))
       .finally(() => setLoading(false));
   }, []);
 

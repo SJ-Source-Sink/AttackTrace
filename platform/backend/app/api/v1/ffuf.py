@@ -502,7 +502,7 @@ async def run_ffuf_scan(
         action="tool.ffuf.scan",
         resource_type="ffuf_scan",
         resource_id=scan_id,
-        after_state={"target": payload.target},
+        after_state={"url": payload.url},
         ip_address=request.client.host if request.client else None,
     )
     db.add(log)

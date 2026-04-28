@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
 import { API_BASE } from "@/lib/api";
+import { fetchWithAuth } from "@/lib/auth";
 
 export default function CICDPage() {
   const [target, setTarget] = useState("");
@@ -17,10 +18,9 @@ export default function CICDPage() {
     setResult(null);
     setError("");
     try {
-      const token = localStorage.getItem("access_token") || "";
-      const resp = await fetch(`${API_BASE}/cicd/scan`, {
+      const resp = await fetchWithAuth(`${API_BASE}/cicd/scan`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           target_domains: [target],
           intensity,
@@ -28,8 +28,11 @@ export default function CICDPage() {
           timeout_seconds: timeout,
         }),
       });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err?.detail?.error?.message || err?.detail || "Scan failed");
+      }
       const data = await resp.json();
-      if (!resp.ok) throw new Error(data?.detail?.error?.message || "Scan failed");
       setResult(data);
     } catch (e: any) {
       setError(e.message);

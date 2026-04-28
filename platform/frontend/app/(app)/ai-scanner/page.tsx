@@ -134,7 +134,8 @@ export default function AIScannerPage() {
           if (!eventMatch || !dataMatch) continue;
 
           const event = eventMatch[1];
-          const data = JSON.parse(dataMatch[1]);
+          let data: any;
+          try { data = JSON.parse(dataMatch[1]); } catch { continue; }
 
           if (event === "progress") {
             setRawLines((prev) => {

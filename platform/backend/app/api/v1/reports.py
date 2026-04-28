@@ -2,6 +2,7 @@
 Reports API: generate HTML reports and retrieve them.
 """
 
+import asyncio
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -132,7 +133,7 @@ async def download_report(
 
     if existing_reports:
         existing_path = existing_reports[0]
-        if os.path.getsize(existing_path) > 0:
+        if await asyncio.to_thread(os.path.getsize, existing_path) > 0:
             return FileResponse(
                 path=str(existing_path),
                 filename=existing_path.name,

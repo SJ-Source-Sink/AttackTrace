@@ -130,7 +130,8 @@ async def list_webhooks(
         webhook_ids = await redis.smembers(f"webhooks_index:{org_str}")
         webhooks = []
         for wid in webhook_ids:
-            data = await redis.get(f"webhook:{org_str}:{wid.decode()}")
+            wid_str = wid.decode() if isinstance(wid, bytes) else wid
+            data = await redis.get(f"webhook:{org_str}:{wid_str}")
             if data:
                 w = json.loads(data)
                 w.pop("secret", None)  # Never expose secret in list
@@ -219,7 +220,8 @@ async def dispatch_webhook_event(org_id: str, event: str, data: dict) -> None:
         webhook_ids = await redis.smembers(f"webhooks_index:{org_id}")
         webhooks_to_notify = []
         for wid in webhook_ids:
-            raw = await redis.get(f"webhook:{org_id}:{wid.decode()}")
+            wid_str = wid.decode() if isinstance(wid, bytes) else wid
+            raw = await redis.get(f"webhook:{org_id}:{wid_str}")
             if raw:
                 w = json.loads(raw)
                 if w.get("is_active") and event in w.get("events", []):
