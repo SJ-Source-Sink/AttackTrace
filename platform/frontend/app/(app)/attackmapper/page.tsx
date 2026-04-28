@@ -202,7 +202,7 @@ function TechniqueCard({ technique }: { technique: Technique }) {
                 PHASE_COLORS[technique.phase] ?? "bg-zinc-700 text-zinc-300"
               )}
             >
-              {technique.phase.replace(/-/g, " ")}
+              {(technique.phase ?? "").replace(/-/g, " ")}
             </span>
             <span
               className={cn(
@@ -464,7 +464,8 @@ function buildLayout(chain: AttackChain) {
   const phaseOrder: string[] = [];
   const phaseGroups: Record<string, ChainStep[]> = {};
   for (const s of chain.steps) {
-    const ph = s.technique.phase;
+    if (!s?.technique) continue;
+    const ph = s.technique.phase || "unknown";
     if (!phaseGroups[ph]) { phaseGroups[ph] = []; phaseOrder.push(ph); }
     phaseGroups[ph].push(s);
   }
@@ -766,7 +767,7 @@ function AttackChainGraph({ chain }: { chain: AttackChain }) {
                     <div style={{ paddingLeft: 27, display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
                       <span style={{ fontFamily: "monospace", fontSize: 9.5, color: "#606070" }}>{n.technique.mitre_id}</span>
                       <span style={{ fontSize: 8, color: "#44444e", textTransform: "capitalize" }}>
-                        {n.technique.phase.replace(/[_-]/g, " ")}
+                        {(n.technique.phase ?? "").replace(/[_-]/g, " ")}
                       </span>
                     </div>
 
@@ -850,7 +851,7 @@ function AttackChainGraph({ chain }: { chain: AttackChain }) {
                     border: `1px solid ${selectedNode.phaseColor}28`,
                   }}
                 >
-                  {selectedNode.technique.phase.replace(/[_-]/g, " ")}
+                  {(selectedNode.technique.phase ?? "").replace(/[_-]/g, " ")}
                 </span>
               </div>
               <p className="text-xs text-zinc-500 mt-0.5 line-clamp-1">{selectedNode.technique.description}</p>
@@ -1062,7 +1063,7 @@ function CorrelationResultCard({ result }: { result: CorrelationEntry }) {
                             {match.confidence} confidence
                           </Badge>
                           <span className={cn("text-xs px-2 py-0.5 rounded-full capitalize", PHASE_COLORS[match.technique.phase] ?? "bg-zinc-700 text-zinc-300")}>
-                            {match.technique.phase.replace(/[_-]/g, " ")}
+                            {(match.technique.phase ?? "").replace(/[_-]/g, " ")}
                           </span>
                         </div>
                         <p className="text-xs text-zinc-500 line-clamp-2">{match.technique.description}</p>

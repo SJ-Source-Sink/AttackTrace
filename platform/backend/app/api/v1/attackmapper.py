@@ -108,39 +108,49 @@ def _sse(event: str, data: dict) -> str:
 
 
 def _technique_to_dict(tech) -> dict:
-    """Convert an AttackTechnique model to a plain dict."""
+    """Convert an AttackTechnique model to a plain dict using its own serializer."""
+    if hasattr(tech, "to_dict"):
+        return tech.to_dict()
+    # fallback for any future shape changes
     return {
         "id": getattr(tech, "id", ""),
-        "name": getattr(tech, "name", ""),
-        "description": getattr(tech, "description", ""),
-        "phase": getattr(tech, "phase", ""),
-        "severity": getattr(tech, "severity", ""),
-        "infrastructure": str(getattr(tech, "infrastructure", "")),
-        "prerequisites": getattr(tech, "prerequisites", []),
-        "tools": getattr(tech, "tools", []),
         "mitre_id": getattr(tech, "mitre_id", ""),
-        "mitre_url": getattr(tech, "mitre_url", ""),
+        "name": getattr(tech, "name", ""),
+        "phase": str(getattr(tech, "phase", "") or ""),
+        "infrastructure": str(getattr(tech, "infrastructure", "") or ""),
+        "description": getattr(tech, "description", ""),
+        "prerequisites": list(getattr(tech, "prerequisites", []) or []),
+        "tools": list(getattr(tech, "tools", []) or []),
+        "commands": list(getattr(tech, "commands", []) or []),
+        "detection": getattr(tech, "detection", ""),
+        "references": list(getattr(tech, "references", []) or []),
+        "next_techniques": list(getattr(tech, "next_techniques", []) or []),
+        "risk_level": getattr(tech, "risk_level", "medium"),
     }
 
 
 def _chain_to_dict(chain) -> dict | None:
+    """Convert an AttackPath model to a plain dict using its own serializer."""
     if chain is None:
         return None
+    if hasattr(chain, "to_dict"):
+        return chain.to_dict()
+    # fallback
     steps = []
     for step in getattr(chain, "steps", []):
         steps.append({
-            "technique_id": getattr(step, "technique_id", ""),
-            "technique_name": getattr(step, "technique_name", ""),
-            "phase": str(getattr(step, "phase", "")),
+            "step_number": getattr(step, "step_number", 0),
+            "technique": _technique_to_dict(step.technique) if getattr(step, "technique", None) else {},
             "description": getattr(step, "description", ""),
-            "order": getattr(step, "order", 0),
         })
     return {
+        "id": getattr(chain, "id", ""),
         "name": getattr(chain, "name", ""),
-        "infrastructure": str(getattr(chain, "infrastructure", "")),
+        "infrastructure": str(getattr(chain, "infrastructure", "") or ""),
+        "start_phase": str(getattr(chain, "start_phase", "") or ""),
+        "end_phase": str(getattr(chain, "end_phase", "") or ""),
         "steps": steps,
-        "risk_level": getattr(chain, "risk_level", ""),
-        "description": getattr(chain, "description", ""),
+        "total_risk_score": getattr(chain, "total_risk_score", 0.0),
     }
 
 
