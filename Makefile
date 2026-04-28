@@ -35,7 +35,7 @@ WORKER_CONTAINER  ?= worker
 setup:
 	@bash setup.sh
 
-## update: Pull latest changes from GitHub and hot-update the running platform
+## update: Pull latest code + rebuild + migrate + restart — one command to update everything
 update:
 	@bash update.sh
 

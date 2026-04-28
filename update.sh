@@ -125,7 +125,7 @@ if [ "$OLD_COMMIT" != "$NEW_COMMIT" ]; then
     info "Backend source changed"
   fi
 
-  if echo "$CHANGED" | grep -qE '^platform/backend/app/migrations/'; then
+  if echo "$CHANGED" | grep -qE '^platform/backend/alembic/'; then
     MIGRATIONS_EXIST=true
     info "New database migrations detected"
   fi
@@ -315,16 +315,31 @@ restart_service() {
 }
 
 if [ "$BACKEND_CHANGED" = true ]; then
-  info "Restarting backend..."
-  restart_service backend
-  cd "$BACKEND_DIR"
-  "$UVICORN" app.main:app --host 0.0.0.0 --port 8000 --reload \
-    > "$LOGS_DIR/backend.log" 2>&1 &
-  echo $! > "$PIDS_DIR/backend.pid"
-  ok "Backend restarted (pid $(cat "$PIDS_DIR/backend.pid"))"
+  # If uvicorn is running with --reload it auto-picks up file changes.
+  # We only need a hard restart when the process isn't running at all.
+  BACKEND_PID=""
+  [ -f "$PIDS_DIR/backend.pid" ] && BACKEND_PID=$(cat "$PIDS_DIR/backend.pid")
 
+  if [ -n "$BACKEND_PID" ] && kill -0 "$BACKEND_PID" 2>/dev/null; then
+    # Running with --reload: touch any Python file to trigger reload
+    touch "$BACKEND_DIR/app/main.py"
+    ok "Backend reload triggered (--reload detected file change)"
+  else
+    # Not running or no PID — start fresh
+    info "Starting backend..."
+    restart_service backend
+    cd "$BACKEND_DIR"
+    "$UVICORN" app.main:app --host 0.0.0.0 --port 8000 --reload \
+      > "$LOGS_DIR/backend.log" 2>&1 &
+    echo $! > "$PIDS_DIR/backend.pid"
+    ok "Backend started (pid $(cat "$PIDS_DIR/backend.pid"))"
+    cd "$REPO_ROOT"
+  fi
+
+  # Always restart Celery (doesn't auto-reload)
   info "Restarting Celery worker..."
   restart_service worker
+  cd "$BACKEND_DIR"
   "$CELERY" -A app.workers.celery_app worker \
     --loglevel=warning --concurrency=4 -Q scans,default,ai \
     > "$LOGS_DIR/worker.log" 2>&1 &
