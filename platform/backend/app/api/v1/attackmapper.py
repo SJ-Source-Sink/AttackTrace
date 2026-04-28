@@ -1,20 +1,12 @@
 """
-AttackMapper integration — runs attack path visualizations via the attackmapper CLI
-and streams results via SSE.
-
-Commands used:
-  attackmapper <infra> --format json -o <file>         → all techniques for infra
-  attackmapper full-chain --infra <infra> --format json -o <file>  → full attack chain
-  attackmapper threat-intel --infra <infra> --format json -o <file> → threat intel
+AttackMapper integration — calls the attackmapper Python API directly (no subprocess).
+Works on any machine after git pull with no pip install required.
 """
 
 import asyncio
-import importlib.util
 import json
 import os
-import shutil
 import sys
-import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,34 +21,36 @@ from app.models.db.user import User
 
 router = APIRouter(prefix="/attackmapper", tags=["AttackMapper"])
 
-# ── attackmapper invocation helpers ──────────────────────────────────────────
-# We always use sys.executable so the subprocess shares the same Python env.
-# If the package isn't pip-installed yet (e.g. fresh clone without install-tools),
-# we add the bundled tools/attackmapper directory to PYTHONPATH as a fallback.
-
-def _am_cmd() -> list[str]:
-    """Return [python, -m, attackmapper] using the current interpreter."""
-    return [sys.executable, "-m", "attackmapper"]
-
-
-def _am_env() -> dict:
-    """Return os.environ extended with PYTHONPATH pointing at bundled package."""
-    env = os.environ.copy()
-    # Repo root is 6 levels up: v1/ → api/ → app/ → backend/ → platform/ → repo/
-    bundled = Path(__file__).parents[5] / "tools" / "attackmapper"
-    if bundled.is_dir():
-        existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = str(bundled) + (":" + existing if existing else "")
-    return env
+# ── Ensure bundled attackmapper package is importable ────────────────────────
+# Repo layout:  <repo>/tools/attackmapper/attackmapper/__init__.py
+# This file:    <repo>/platform/backend/app/api/v1/attackmapper.py  (parents[5])
+_BUNDLED_ROOT = Path(__file__).parents[5] / "tools" / "attackmapper"
+if _BUNDLED_ROOT.is_dir() and str(_BUNDLED_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BUNDLED_ROOT))
 
 
 def _am_available() -> bool:
-    """True if attackmapper package is importable in the current interpreter."""
-    if importlib.util.find_spec("attackmapper"):
-        return True
-    # Fallback: bundled directory exists
-    bundled = Path(__file__).parents[5] / "tools" / "attackmapper"
-    return bundled.is_dir()
+    try:
+        import importlib.util
+        return importlib.util.find_spec("attackmapper") is not None
+    except Exception:
+        return False
+
+
+def _get_module(infra: str):
+    """Return the right infrastructure module instance for the given infra key."""
+    from attackmapper.modules.ad.techniques import ADModule
+    from attackmapper.modules.aws.techniques import AWSModule
+    from attackmapper.modules.azure.techniques import AzureModule
+    from attackmapper.modules.gcp.techniques import GCPModule
+    from attackmapper.modules.network.techniques import NetworkModule
+    _MAP = {"ad": ADModule, "aws": AWSModule, "azure": AzureModule, "gcp": GCPModule, "network": NetworkModule}
+    cls = _MAP.get(infra)
+    if not cls:
+        raise ValueError(f"Unknown infra: {infra}")
+    m = cls()
+    m.load_techniques()
+    return m
 
 # In-memory scan history
 _scan_history: dict[str, dict] = {}
@@ -101,33 +95,44 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-async def _run_attackmapper_cmd(cmd: list[str], output_file: str) -> dict | None:
-    """Run an attackmapper command and return parsed JSON output."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=_am_env(),
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+def _technique_to_dict(tech) -> dict:
+    """Convert an AttackTechnique model to a plain dict."""
+    return {
+        "id": getattr(tech, "id", ""),
+        "name": getattr(tech, "name", ""),
+        "description": getattr(tech, "description", ""),
+        "phase": getattr(tech, "phase", ""),
+        "severity": getattr(tech, "severity", ""),
+        "infrastructure": str(getattr(tech, "infrastructure", "")),
+        "prerequisites": getattr(tech, "prerequisites", []),
+        "tools": getattr(tech, "tools", []),
+        "mitre_id": getattr(tech, "mitre_id", ""),
+        "mitre_url": getattr(tech, "mitre_url", ""),
+    }
 
-        if proc.returncode == 0 and os.path.exists(output_file):
-            with open(output_file, "r") as f:
-                return json.load(f)
+
+def _chain_to_dict(chain) -> dict | None:
+    if chain is None:
         return None
-    except (asyncio.TimeoutError, Exception):
-        return None
-    finally:
-        try:
-            if os.path.exists(output_file):
-                os.unlink(output_file)
-        except OSError:
-            pass
+    steps = []
+    for step in getattr(chain, "steps", []):
+        steps.append({
+            "technique_id": getattr(step, "technique_id", ""),
+            "technique_name": getattr(step, "technique_name", ""),
+            "phase": str(getattr(step, "phase", "")),
+            "description": getattr(step, "description", ""),
+            "order": getattr(step, "order", 0),
+        })
+    return {
+        "name": getattr(chain, "name", ""),
+        "infrastructure": str(getattr(chain, "infrastructure", "")),
+        "steps": steps,
+        "risk_level": getattr(chain, "risk_level", ""),
+        "description": getattr(chain, "description", ""),
+    }
 
 
 async def _stream_attackmapper(scan_id: str, req: AttackMapperRequest) -> AsyncGenerator[str, None]:
-    am_bin = _am_cmd()
     infra = req.infrastructure_type
     infra_label = INFRA_LABELS[infra]
 
@@ -149,68 +154,73 @@ async def _stream_attackmapper(scan_id: str, req: AttackMapperRequest) -> AsyncG
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
 
-    techniques = []
-    attack_chain = None
-    threat_intel = None
-    error_msg = None
+    techniques: list[dict] = []
+    attack_chain: dict | None = None
+    threat_intel: dict | None = None
 
     try:
-        # ── Step 1: Fetch attack techniques ──────────────────────────────────
+        # ── Step 1: Load attack techniques ───────────────────────────────────
         yield _sse("progress", {"message": f"Loading {infra_label} attack techniques..."})
+        await asyncio.sleep(0)
 
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
-            tech_file = tmp.name
+        mod = await asyncio.to_thread(_get_module, infra)
+        raw_techs = mod.get_all_techniques()
 
-        tech_cmd = [*am_bin, infra, "--format", "json", "--output", tech_file]
-        if req.category:
-            tech_cmd += ["--category", req.category]
+        # Apply filters
         if req.phase:
-            tech_cmd += ["--phase", req.phase]
+            raw_techs = [t for t in raw_techs if str(getattr(t, "phase", "")).lower() == req.phase.lower()]
+        if req.category:
+            raw_techs = [t for t in raw_techs if req.category.lower() in str(getattr(t, "name", "")).lower()
+                         or req.category.lower() in str(getattr(t, "description", "")).lower()]
         if req.search:
-            tech_cmd += ["--search", req.search]
+            q = req.search.lower()
+            raw_techs = [t for t in raw_techs if q in str(getattr(t, "name", "")).lower()
+                         or q in str(getattr(t, "description", "")).lower()]
 
-        tech_data = await _run_attackmapper_cmd(tech_cmd, tech_file)
-        if tech_data:
-            techniques = tech_data.get("techniques", [])
-            yield _sse("progress", {
-                "message": f"Loaded {len(techniques)} techniques for {infra_label}",
-            })
-        else:
-            yield _sse("progress", {"message": "Warning: Could not load techniques"})
-
+        techniques = [_technique_to_dict(t) for t in raw_techs]
+        yield _sse("progress", {"message": f"Loaded {len(techniques)} techniques for {infra_label}"})
         await asyncio.sleep(0)
 
-        # ── Step 2: Fetch full attack chain ───────────────────────────────────
+        # ── Step 2: Build full attack chain ──────────────────────────────────
         yield _sse("progress", {"message": "Building full attack chain..."})
-
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
-            chain_file = tmp.name
-
-        chain_cmd = [*am_bin, "full-chain", "--infra", infra, "--format", "json", "--output", chain_file]
-        chain_data = await _run_attackmapper_cmd(chain_cmd, chain_file)
-        if chain_data:
-            attack_chain = chain_data.get("attack_path")
-            step_count = len(attack_chain.get("steps", [])) if attack_chain else 0
-            yield _sse("progress", {"message": f"Attack chain built: {step_count} steps"})
-        else:
-            yield _sse("progress", {"message": "Warning: Could not build attack chain"})
-
         await asyncio.sleep(0)
 
-        # ── Step 3: Fetch threat intelligence ────────────────────────────────
+        raw_chain = await asyncio.to_thread(mod.generate_full_chain)
+        attack_chain = _chain_to_dict(raw_chain)
+        step_count = len(attack_chain.get("steps", [])) if attack_chain else 0
+        yield _sse("progress", {"message": f"Attack chain built: {step_count} steps"})
+        await asyncio.sleep(0)
+
+        # ── Step 3: Threat intelligence ──────────────────────────────────────
         yield _sse("progress", {"message": "Fetching threat intelligence..."})
+        await asyncio.sleep(0)
 
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
-            intel_file = tmp.name
+        from attackmapper.intel.manager import ThreatIntelManager
+        from attackmapper.core.models import InfrastructureType as _IT
+        _INFRA_TYPE_MAP = {
+            "ad": _IT.ACTIVE_DIRECTORY, "aws": _IT.AWS,
+            "azure": _IT.AZURE, "gcp": _IT.GCP, "network": _IT.NETWORK,
+        }
+        mgr = ThreatIntelManager()
+        report = await asyncio.to_thread(mgr.get_threat_report, _INFRA_TYPE_MAP[infra])
 
-        intel_cmd = [*am_bin, "threat-intel", "--infra", infra, "--format", "json", "--output", intel_file]
-        intel_data = await _run_attackmapper_cmd(intel_cmd, intel_file)
-        if intel_data:
-            threat_intel = intel_data.get("threat_intel")
-            cve_count = len(threat_intel.get("critical_cves", [])) if threat_intel else 0
-            yield _sse("progress", {"message": f"Threat intel loaded: {cve_count} critical CVEs"})
-        else:
-            yield _sse("progress", {"message": "Warning: Could not load threat intelligence"})
+        cves = [
+            {"cve_id": c.cve_id, "description": c.description, "cvss_score": c.cvss_score,
+             "severity": c.severity, "exploitation_status": c.exploitation_status}
+            for c in (report.critical_cves or [])
+        ]
+        actors = [
+            {"name": a.name, "aliases": a.aliases, "description": a.description,
+             "ttps": a.ttps, "recent_activity": a.recent_activity}
+            for a in (report.active_threat_actors or [])
+        ]
+        threat_intel = {
+            "critical_cves": cves,
+            "active_threat_actors": actors,
+            "trending_techniques": report.trending_techniques or [],
+            "last_updated": report.last_updated,
+        }
+        yield _sse("progress", {"message": f"Threat intel loaded: {len(cves)} critical CVEs"})
 
         _scan_history[scan_id].update({
             "status": "completed",
@@ -225,8 +235,8 @@ async def _stream_attackmapper(scan_id: str, req: AttackMapperRequest) -> AsyncG
             "infrastructure_type": infra,
             "infrastructure_label": infra_label,
             "technique_count": len(techniques),
-            "chain_steps": len(attack_chain.get("steps", [])) if attack_chain else 0,
-            "critical_cves": len(threat_intel.get("critical_cves", [])) if threat_intel else 0,
+            "chain_steps": step_count,
+            "critical_cves": len(cves),
             "techniques": techniques,
             "attack_chain": attack_chain,
             "threat_intel": threat_intel,
@@ -234,9 +244,8 @@ async def _stream_attackmapper(scan_id: str, req: AttackMapperRequest) -> AsyncG
         })
 
     except Exception as exc:
-        error_msg = str(exc)
-        _scan_history[scan_id].update({"status": "failed", "error": error_msg})
-        yield _sse("error", {"message": error_msg})
+        _scan_history[scan_id].update({"status": "failed", "error": str(exc)})
+        yield _sse("error", {"message": str(exc)})
 
 
 @router.post("/scan", summary="Run an AttackMapper analysis and stream results")
@@ -299,94 +308,50 @@ async def get_attackmapper_scan(
 
 
 async def _stream_update_intel() -> AsyncGenerator[str, None]:
-    """Stream `attackmapper update-intel` output as SSE progress lines."""
-    import re
-
-    am_bin = _am_cmd()
-    items_total = 0
-    failed: list[str] = []
+    """Stream threat intel update progress using the Python API directly."""
+    from attackmapper.intel.manager import ThreatIntelManager
 
     yield _sse("start", {
         "message": "Starting threat intelligence update from internet sources...",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
 
+    progress_events: list[dict] = []
+
+    def _progress(source: str, status: str, count: int = 0) -> None:
+        icon = "✓" if status == "success" else ("✗" if status == "error" else ("⚠" if "skip" in status else "⟳"))
+        line = f"[{source}] {status}" + (f" — {count} items" if count else "")
+        progress_events.append({"line": line, "icon": icon, "source": source, "status": status, "count": count})
+
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *am_bin, "update-intel",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=_am_env(),
-        )
-        assert proc.stdout is not None
-        assert proc.stderr is not None
+        mgr = ThreatIntelManager()
+        # update_intel is async — run it as a background task
+        stats_task = asyncio.create_task(mgr.update_intel(progress_callback=_progress))
 
-        # Use a queue so we can interleave stdout + stderr lines
-        queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
+        # Stream progress events while the update runs
+        last_sent = 0
+        while not stats_task.done():
+            while last_sent < len(progress_events):
+                yield _sse("progress", progress_events[last_sent])
+                last_sent += 1
+            await asyncio.sleep(0.2)
 
-        async def enqueue(stream: asyncio.StreamReader) -> None:
-            async for raw in stream:
-                line = raw.decode("utf-8", errors="replace").rstrip()
-                if line:
-                    await queue.put(("line", line))
-            await queue.put(None)  # sentinel
+        # Drain any remaining events
+        while last_sent < len(progress_events):
+            yield _sse("progress", progress_events[last_sent])
+            last_sent += 1
 
-        t1 = asyncio.create_task(enqueue(proc.stdout))
-        t2 = asyncio.create_task(enqueue(proc.stderr))
+        stats = await stats_task
 
-        sentinels = 0
-        while sentinels < 2:
-            item = await queue.get()
-            if item is None:
-                sentinels += 1
-                continue
-            _, line = item
-            icon = "⟳"
-            if line.startswith("[+]"):
-                icon = "✓"
-                m = re.search(r"(\d+) items cached", line)
-                if m:
-                    items_total += int(m.group(1))
-            elif line.startswith("[-]"):
-                icon = "✗"
-                src = line[4:].split(":")[0].strip()
-                if src:
-                    failed.append(src)
-            elif "Warning" in line:
-                icon = "⚠"
-            yield _sse("progress", {"line": line, "icon": icon})
-
-        await proc.wait()
-        await t1
-        await t2
-
-        # Fetch final stats
-        stats_proc = await asyncio.create_subprocess_exec(
-            *am_bin, "stats",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=_am_env(),
-        )
-        stats_out, _ = await asyncio.wait_for(stats_proc.communicate(), timeout=15)
-        stats_text = stats_out.decode("utf-8", errors="replace")
-
-        cached_cves = 0
-        last_updated = datetime.now(timezone.utc).isoformat()
-        m_cves = re.search(r"Cached CVEs:\s*(\d+)", stats_text)
-        m_updated = re.search(r"Last Updated:\s*(\S+)", stats_text)
-        if m_cves:
-            cached_cves = int(m_cves.group(1))
-        if m_updated:
-            last_updated = m_updated.group(1)
-
+        cache_stats = await asyncio.to_thread(mgr.cache.get_stats)
         yield _sse("complete", {
             "message": "Threat intelligence update complete",
-            "items_fetched": items_total,
-            "cached_cves": cached_cves,
-            "failed_sources": failed,
-            "last_updated": last_updated,
+            "items_fetched": stats.get("cves", 0) + stats.get("actors", 0),
+            "cached_cves": cache_stats.get("cve_count", 0),
+            "failed_sources": stats.get("errors", []),
+            "last_updated": cache_stats.get("last_update") or datetime.now(timezone.utc).isoformat(),
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "total_items": items_total,
+            "total_items": stats.get("cves", 0) + stats.get("actors", 0) + stats.get("techniques", 0),
         })
 
     except Exception as exc:
@@ -718,17 +683,13 @@ async def correlate_cves(
             }
         conn.close()
 
-    # ── 2. Load techniques via CLI ─────────────────────────────────────────────
-    am_bin = _am_cmd()
+    # ── 2. Load techniques via Python API ────────────────────────────────────
     techniques: list[dict] = []
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
-        tech_file = tmp.name
-    tech_data = await _run_attackmapper_cmd(
-        [*am_bin, payload.infrastructure_type, "--format", "json", "--output", tech_file],
-        tech_file,
-    )
-    if tech_data:
-        techniques = tech_data.get("techniques", [])
+    try:
+        mod = await asyncio.to_thread(_get_module, payload.infrastructure_type)
+        techniques = [_technique_to_dict(t) for t in mod.get_all_techniques()]
+    except Exception:
+        techniques = []
 
     # Pre-tokenize techniques once
     tech_token_cache: list[tuple[dict, set[str]]] = []
@@ -804,46 +765,32 @@ async def correlate_cves(
 async def get_attackmapper_stats(
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
-    am_bin = _am_cmd()
     try:
-        import re
-        proc = await asyncio.create_subprocess_exec(
-            *am_bin, "stats",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=_am_env(),
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
-        text = stdout.decode("utf-8", errors="replace")
+        from attackmapper.intel.manager import ThreatIntelManager
+        mgr = ThreatIntelManager()
+        cache_stats = await asyncio.to_thread(mgr.cache.get_stats)
 
-        stats: dict = {
-            "techniques": {},
-            "cached_cves": 0,
-            "cached_threat_actors": 0,
-            "custom_feeds": 0,
-            "last_updated": None,
-            "raw": text,
+        # Count techniques per module
+        tech_counts: dict[str, int] = {}
+        for infra_key in INFRA_LABELS:
+            try:
+                mod = await asyncio.to_thread(_get_module, infra_key)
+                tech_counts[infra_key] = len(mod.get_all_techniques())
+            except Exception:
+                tech_counts[infra_key] = 0
+
+        total_items = (
+            sum(tech_counts.values())
+            + cache_stats.get("cve_count", 0)
+            + cache_stats.get("threat_actor_count", 0)
+        )
+        return {
+            "techniques": tech_counts,
+            "cached_cves": cache_stats.get("cve_count", 0),
+            "cached_threat_actors": cache_stats.get("threat_actor_count", 0),
+            "custom_feeds": cache_stats.get("custom_feed_count", 0),
+            "last_updated": cache_stats.get("last_update"),
+            "total_items": total_items,
         }
-
-        for line in text.splitlines():
-            m = re.match(r"\s*(\w[\w\s]+) Module:\s*(\d+) techniques", line)
-            if m:
-                stats["techniques"][m.group(1).strip().lower()] = int(m.group(2))
-            m2 = re.search(r"Cached CVEs:\s*(\d+)", line)
-            if m2:
-                stats["cached_cves"] = int(m2.group(1))
-            m3 = re.search(r"Cached Threat Actors:\s*(\d+)", line)
-            if m3:
-                stats["cached_threat_actors"] = int(m3.group(1))
-            m4 = re.search(r"Last Updated:\s*(\S+)", line)
-            if m4:
-                stats["last_updated"] = m4.group(1)
-
-        stats["total_items"] = (
-            sum(stats["techniques"].values())
-            + stats["cached_cves"]
-            + stats["cached_threat_actors"]
-        )
-        return stats
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
