@@ -23,10 +23,22 @@ router = APIRouter(prefix="/attackmapper", tags=["AttackMapper"])
 
 # ── Ensure bundled attackmapper package is importable ────────────────────────
 # Repo layout:  <repo>/tools/attackmapper/attackmapper/__init__.py
-# This file:    <repo>/platform/backend/app/api/v1/attackmapper.py  (parents[5])
-_BUNDLED_ROOT = Path(__file__).parents[5] / "tools" / "attackmapper"
-if _BUNDLED_ROOT.is_dir() and str(_BUNDLED_ROOT) not in sys.path:
-    sys.path.insert(0, str(_BUNDLED_ROOT))
+# This file:    <repo>/platform/backend/app/api/v1/attackmapper.py
+# We try multiple candidate paths to handle different working directories.
+def _ensure_attackmapper_on_path() -> None:
+    import importlib.util
+    if importlib.util.find_spec("attackmapper"):
+        return  # already importable (pip-installed)
+    this_file = Path(__file__).resolve()
+    # Walk up from this file looking for tools/attackmapper
+    for parent in this_file.parents:
+        candidate = parent / "tools" / "attackmapper"
+        if (candidate / "attackmapper" / "__init__.py").exists():
+            if str(candidate) not in sys.path:
+                sys.path.insert(0, str(candidate))
+            return
+
+_ensure_attackmapper_on_path()
 
 
 def _am_available() -> bool:
