@@ -36,7 +36,6 @@ import {
   Cloud,
   Bot,
   Link2,
-  GitBranch,
   Target,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -193,11 +192,6 @@ const intelligenceItems: NavItem[] = [
     label: "MITRE ATT&CK",
     href: "/mitre",
     icon: Target,
-  },
-  {
-    label: "CI/CD Integration",
-    href: "/cicd",
-    icon: GitBranch,
   },
 ];
 

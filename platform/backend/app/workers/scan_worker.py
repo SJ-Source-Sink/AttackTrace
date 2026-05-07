@@ -1223,6 +1223,10 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
             return {"status": "failed", "error": str(exc)[:500]}
 
         finally:
+            try:
+                r.close()
+            except Exception:
+                pass
             if orchestrator:
                 try:
                     orchestrator.cleanup()
@@ -1535,5 +1539,10 @@ def recover_stuck_scans() -> dict:
             except Exception as exc:
                 logger.warning(f"Failed to fail scan {job.id}: {exc}")
                 db.rollback()
+
+    try:
+        r.close()
+    except Exception:
+        pass
 
     return {"requeued": requeued, "failed": failed}

@@ -69,27 +69,27 @@ export default function LoginPage() {
           </div>
           <div>
             <div className="text-lg font-bold text-white">AttackTrace</div>
-            <div className="text-xs text-zinc-400">Attack Surface Management</div>
+            <div className="text-xs text-zinc-400">Security Toolkit & Recon Platform</div>
           </div>
         </div>
 
         <div className="relative z-10 flex-1 flex flex-col justify-center">
           <h2 className="text-4xl font-bold text-white mb-4 leading-tight">
-            Discover your attack surface
+            Your all-in-one
             <br />
-            <span className="text-blue-400">before attackers do.</span>
+            <span className="text-blue-400">security recon toolkit.</span>
           </h2>
           <p className="text-zinc-400 text-base mb-8 leading-relaxed max-w-md">
-            Continuous external attack surface monitoring with AI-powered triage,
-            real-time alerting, and enterprise-grade reporting.
+            Integrated recon, scanning, and threat intelligence tools for red teams,
+            pentesters, and security researchers — all in one place.
           </p>
 
           <div className="space-y-3">
             {[
-              "Automated subdomain & asset discovery",
-              "AI-powered vulnerability triage",
-              "Real-time scan progress & alerts",
-              "Executive reporting & compliance",
+              "Subdomain, port & web application recon",
+              "AI-powered vulnerability triage & analysis",
+              "MITRE ATT&CK attack path mapping",
+              "Threat intel, breach data & OSINT",
             ].map((feature) => (
               <div key={feature} className="flex items-center gap-3">
                 <ShieldCheck className="h-4 w-4 text-blue-400 shrink-0" />

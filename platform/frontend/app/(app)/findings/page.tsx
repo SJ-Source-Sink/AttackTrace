@@ -448,29 +448,37 @@ export default function FindingsPage() {
 
   const handleExportSelected = async () => {
     if (selectedIds.size === 0) return;
-    const token = localStorage.getItem("access_token") || "";
-    const ids = Array.from(selectedIds).join(",");
-    const url = `${API_BASE}/findings/export?fmt=csv&finding_ids=${encodeURIComponent(ids)}`;
-    const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-    if (!resp.ok) { toast.error("Export failed"); return; }
-    const blob = await resp.blob();
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "findings-selected.csv";
-    a.click();
+    try {
+      const token = localStorage.getItem("access_token") || "";
+      const ids = Array.from(selectedIds).join(",");
+      const url = `${API_BASE}/findings/export?fmt=csv&finding_ids=${encodeURIComponent(ids)}`;
+      const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      if (!resp.ok) { toast.error("Export failed"); return; }
+      const blob = await resp.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "findings-selected.csv";
+      a.click();
+    } catch {
+      toast.error("Export failed");
+    }
   };
 
   const handleExportAll = async () => {
-    const token = localStorage.getItem("access_token") || "";
-    const resp = await fetch(`${API_BASE}/findings/export?fmt=csv`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!resp.ok) { toast.error("Export failed"); return; }
-    const blob = await resp.blob();
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "findings-all.csv";
-    a.click();
+    try {
+      const token = localStorage.getItem("access_token") || "";
+      const resp = await fetch(`${API_BASE}/findings/export?fmt=csv`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!resp.ok) { toast.error("Export failed"); return; }
+      const blob = await resp.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "findings-all.csv";
+      a.click();
+    } catch {
+      toast.error("Export failed");
+    }
   };
 
   const hasFilters =

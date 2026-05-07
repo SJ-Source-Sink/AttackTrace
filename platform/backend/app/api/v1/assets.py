@@ -91,7 +91,7 @@ async def list_assets(
     has_screenshot_sort = case((Asset.screenshot_url.isnot(None), 0), else_=1)
     query = query.order_by(
         has_screenshot_sort,
-        Asset.risk_score.desc().nullslast(),
+        Asset.risk_score.desc().nulls_last(),
         Asset.last_seen.desc(),
     ).offset((page - 1) * per_page).limit(per_page)
     result = await db.execute(query)
