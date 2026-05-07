@@ -3,8 +3,9 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import {
   Bot, Play, Square, CheckCircle2, XCircle, ChevronDown, ChevronRight,
-  Shield, Loader2, Search, Zap, Lock, Eye, EyeOff, AlertTriangle,
-  BookOpen, Target, Layers, BarChart3, RefreshCw, Info,
+  Shield, Loader2, Search, Zap, Lock, Eye, EyeOff,
+  BookOpen, Target, Layers, BarChart3, Info, History, Trash2, Clock,
+  ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -50,6 +51,28 @@ interface ScanSummary {
 
 interface PluginMeta { id: string; name: string; severity: string; owasp: string; mitre: string; description: string; multi_turn: boolean; }
 interface PluginCategories { categories: Record<string, PluginMeta[]>; strategies: { id: string; name: string }[]; total_plugins: number; }
+
+interface HistoryScan {
+  id: string;
+  target: string;
+  started_at: string;
+  completed_at: string;
+  intensity: string;
+  total_endpoints: number;
+  total_tests: number;
+  total_vulnerable: number;
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  compliance: Record<string, "pass" | "fail" | "untested">;
+}
+
+interface FullHistoryScan extends HistoryScan {
+  endpoints: DiscoveredEndpoint[];
+  findings: TestResult[];
+  summary: ScanSummary;
+}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -260,9 +283,211 @@ function CategoryResultsGroup({ category, results }: { category: string; results
   );
 }
 
+// ── History Tab ───────────────────────────────────────────────────────────────
+
+function HistoryTab({ onRestore }: { onRestore: (scan: FullHistoryScan) => void }) {
+  const [items, setItems]           = useState<HistoryScan[]>([]);
+  const [loading, setLoading]       = useState(true);
+  const [selected, setSelected]     = useState<FullHistoryScan | null>(null);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+  const [deleting, setDeleting]     = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await fetchWithAuth(`${API_BASE}/ai-scanner/history`);
+      if (r.ok) {
+        const d = await r.json();
+        setItems(d.items ?? []);
+      }
+    } catch {}
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const openDetail = async (id: string) => {
+    setLoadingDetail(true);
+    try {
+      const r = await fetchWithAuth(`${API_BASE}/ai-scanner/history/${id}`);
+      if (r.ok) setSelected(await r.json());
+      else toast.error("Failed to load scan details");
+    } catch { toast.error("Failed to load scan details"); }
+    setLoadingDetail(false);
+  };
+
+  const deleteScan = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setDeleting(id);
+    try {
+      const r = await fetchWithAuth(`${API_BASE}/ai-scanner/history/${id}`, { method: "DELETE" });
+      if (r.ok) {
+        setItems(p => p.filter(s => s.id !== id));
+        if (selected?.id === id) setSelected(null);
+        toast.success("Scan deleted");
+      }
+    } catch {}
+    setDeleting(null);
+  };
+
+  if (selected) {
+    const resultsByCategory = selected.findings.reduce<Record<string, TestResult[]>>((acc, r) => {
+      (acc[r.category] ??= []).push(r);
+      return acc;
+    }, {});
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center gap-3">
+          <button onClick={() => setSelected(null)} className="text-xs text-zinc-500 hover:text-zinc-300 flex items-center gap-1">
+            <ChevronRight className="h-3 w-3 rotate-180" /> Back to history
+          </button>
+          <span className="text-zinc-700">·</span>
+          <span className="font-mono text-xs text-blue-400 truncate flex-1">{selected.target}</span>
+          <span className="text-[10px] text-zinc-500">{new Date(selected.completed_at).toLocaleString()}</span>
+          <Button size="sm" variant="outline" className="text-xs gap-1.5 h-7"
+            onClick={() => { onRestore(selected); setSelected(null); }}>
+            <ExternalLink className="h-3 w-3" /> Restore to Scanner
+          </Button>
+        </div>
+
+        {/* Summary */}
+        <div className="grid grid-cols-4 gap-3">
+          {[
+            { label: "Endpoints",  value: selected.summary?.total_discovered ?? 0, color: "text-zinc-100" },
+            { label: "Critical",   value: selected.critical,  color: "text-red-400" },
+            { label: "High",       value: selected.high,      color: "text-orange-400" },
+            { label: "Med/Low",    value: (selected.medium ?? 0) + (selected.low ?? 0), color: "text-yellow-400" },
+          ].map(s => (
+            <Card key={s.label}>
+              <CardContent className="pt-4 pb-3">
+                <p className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">{s.label}</p>
+                <p className={cn("text-2xl font-bold", s.color)}>{s.value}</p>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+
+        {selected.summary?.compliance && <OWASPComplianceBar compliance={selected.summary.compliance} />}
+
+        {/* Results by category */}
+        {Object.entries(resultsByCategory).map(([cat, results]) => (
+          <CategoryResultsGroup key={cat} category={cat} results={results} />
+        ))}
+
+        {/* Endpoints */}
+        {selected.endpoints.length > 0 && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold text-zinc-300 flex items-center gap-2">
+                <Search className="h-4 w-4 text-blue-400" /> Discovered Endpoints ({selected.endpoints.length})
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {selected.endpoints.map((ep, i) => (
+                <div key={i} className="rounded-md border border-zinc-800 bg-zinc-900/50 p-2.5">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-mono text-xs text-blue-400 break-all flex-1">{ep.url}</span>
+                    <Badge variant="outline" className="text-[10px] h-4 py-0 shrink-0">{ep.type}</Badge>
+                    <Badge variant="outline" className="text-[10px] h-4 py-0 shrink-0">HTTP {ep.status_code}</Badge>
+                    {ep.unauthenticated
+                      ? <span className="text-[10px] text-red-400 flex items-center gap-1 shrink-0"><XCircle className="h-3 w-3" /> Open</span>
+                      : <span className="text-[10px] text-emerald-400 flex items-center gap-1 shrink-0"><Shield className="h-3 w-3" /> Auth Required</span>}
+                  </div>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-zinc-500">{items.length} scan{items.length !== 1 ? "s" : ""} on record</p>
+        <button onClick={load} className="text-[10px] text-zinc-500 hover:text-zinc-300 flex items-center gap-1">
+          <Clock className="h-3 w-3" /> Refresh
+        </button>
+      </div>
+
+      {loading && (
+        <div className="flex items-center justify-center py-16">
+          <Loader2 className="h-6 w-6 animate-spin text-zinc-600" />
+        </div>
+      )}
+
+      {!loading && items.length === 0 && (
+        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-zinc-800 py-16 text-center">
+          <History className="h-10 w-10 text-zinc-700 mb-3" />
+          <p className="text-sm font-medium text-zinc-500">No scan history yet</p>
+          <p className="text-xs text-zinc-600 mt-1">Completed scans will appear here automatically.</p>
+        </div>
+      )}
+
+      {!loading && items.length > 0 && (
+        <div className="space-y-2">
+          {items.map(scan => {
+            const failedOwasp = Object.values(scan.compliance).filter(v => v === "fail").length;
+            const hasVulns = scan.total_vulnerable > 0;
+            return (
+              <div
+                key={scan.id}
+                onClick={() => openDetail(scan.id)}
+                className={cn(
+                  "rounded-lg border p-4 cursor-pointer transition-colors hover:border-zinc-600",
+                  hasVulns ? "border-zinc-700 bg-zinc-900/50" : "border-zinc-800 bg-zinc-900/20"
+                )}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex-1 min-w-0 space-y-1.5">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-mono text-xs text-blue-400 truncate">{scan.target}</span>
+                      <Badge variant="outline" className="text-[10px] h-4 py-0 capitalize shrink-0">{scan.intensity}</Badge>
+                      {loadingDetail && <Loader2 className="h-3 w-3 animate-spin text-zinc-500" />}
+                    </div>
+                    <div className="flex items-center gap-3 text-[10px] text-zinc-500">
+                      <span className="flex items-center gap-1">
+                        <Clock className="h-3 w-3" />
+                        {new Date(scan.completed_at).toLocaleString()}
+                      </span>
+                      <span>{scan.total_tests} tests</span>
+                      <span>{scan.total_endpoints} endpoint{scan.total_endpoints !== 1 ? "s" : ""}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {scan.critical > 0 && <span className="text-[10px] bg-red-500/20 text-red-400 border border-red-500/30 rounded px-1.5 py-0.5">{scan.critical} critical</span>}
+                      {scan.high     > 0 && <span className="text-[10px] bg-orange-500/20 text-orange-400 border border-orange-500/30 rounded px-1.5 py-0.5">{scan.high} high</span>}
+                      {scan.medium   > 0 && <span className="text-[10px] bg-yellow-500/20 text-yellow-400 border border-yellow-500/30 rounded px-1.5 py-0.5">{scan.medium} medium</span>}
+                      {scan.total_vulnerable === 0 && <span className="text-[10px] text-emerald-400">✓ No vulnerabilities</span>}
+                      {failedOwasp > 0 && (
+                        <span className="text-[10px] text-zinc-500 ml-1">{failedOwasp} OWASP fail{failedOwasp !== 1 ? "s" : ""}</span>
+                      )}
+                    </div>
+                  </div>
+                  <button
+                    onClick={e => deleteScan(scan.id, e)}
+                    disabled={deleting === scan.id}
+                    className="shrink-0 text-zinc-600 hover:text-red-400 transition-colors p-1"
+                  >
+                    {deleting === scan.id
+                      ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      : <Trash2 className="h-3.5 w-3.5" />}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function AIScannerPage() {
+  const [tab, setTab] = useState<"scan" | "history">("scan");
+
   // Config state
   const [target, setTarget]         = useState("");
   const [intensity, setIntensity]   = useState<Intensity>(() =>
@@ -473,6 +698,12 @@ export default function AIScannerPage() {
     "academic-frame": "Academic Frame", "code-comment": "Code Comment", "language-switch": "Language Switch (FR)",
   };
 
+  const handleRestore = (scan: FullHistoryScan) => {
+    setTarget(scan.target);
+    setTab("scan");
+    toast.success(`Restored: ${scan.target}`);
+  };
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -486,7 +717,32 @@ export default function AIScannerPage() {
         )}
       </PageHeader>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+      {/* Tab switcher */}
+      <div className="flex gap-1 rounded-lg border border-zinc-800 bg-zinc-900/50 p-1 w-fit">
+        {([["scan", Bot, "New Scan"], ["history", History, "History"]] as const).map(([id, Icon, label]) => (
+          <button
+            key={id}
+            onClick={() => setTab(id)}
+            className={cn(
+              "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+              tab === id
+                ? "bg-zinc-700 text-zinc-100"
+                : "text-zinc-500 hover:text-zinc-300"
+            )}
+          >
+            <Icon className="h-3.5 w-3.5" />
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* History tab */}
+      {tab === "history" && (
+        <HistoryTab onRestore={handleRestore} />
+      )}
+
+      {/* Scanner tab */}
+      {tab === "scan" && <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
 
         {/* ── Config Panel ── */}
         <div className="space-y-4">
@@ -915,7 +1171,7 @@ export default function AIScannerPage() {
             </div>
           )}
         </div>
-      </div>
+      </div>}
     </div>
   );
 }
