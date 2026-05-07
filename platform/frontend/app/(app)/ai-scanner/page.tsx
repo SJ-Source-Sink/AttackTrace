@@ -497,9 +497,6 @@ export default function AIScannerPage() {
   const [selectedStrategies, setSelectedStrategies] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem("ai_scanner_strategies") ?? '["none"]'); } catch { return ["none"]; }
   });
-  const [llmGraderKey, setLlmGraderKey] = useState(() => localStorage.getItem("ai_scanner_llm_key") ?? "");
-  const [showLlmKey, setShowLlmKey] = useState(false);
-  const [llmGraderOn, setLlmGraderOn] = useState(false);
 
   // Auth state
   const [authType, setAuthType]           = useState<AuthType>(() => (localStorage.getItem("ai_scanner_auth_type") as AuthType) ?? "none");
@@ -576,7 +573,6 @@ export default function AIScannerPage() {
     // Persist settings
     localStorage.setItem("ai_scanner_intensity",  intensity);
     localStorage.setItem("ai_scanner_strategies", JSON.stringify(selectedStrategies));
-    localStorage.setItem("ai_scanner_llm_key",    llmGraderKey);
     localStorage.setItem("ai_scanner_auth_type",  authType);
     localStorage.setItem("ai_scanner_auth_token", authToken);
     localStorage.setItem("ai_scanner_auth_header", authHeaderName);
@@ -604,7 +600,7 @@ export default function AIScannerPage() {
           strategies: selectedStrategies.length ? selectedStrategies : ["none"],
           intensity,
           timeout: 20,
-          llm_grader_key: (llmGraderOn && llmGraderKey.trim()) ? llmGraderKey.trim() : "",
+          llm_grader_key: "",
           auth_type: authType, auth_token: authToken.trim(),
           auth_header_name: authHeaderName.trim(),
           auth_username: authUsername.trim(), auth_password: authPassword,
@@ -673,7 +669,7 @@ export default function AIScannerPage() {
       }
       setIsScanning(false);
     }
-  }, [target, intensity, selectedPlugins, selectedStrategies, llmGraderKey, llmGraderOn,
+  }, [target, intensity, selectedPlugins, selectedStrategies,
       authType, authToken, authHeaderName, authUsername, authPassword]);
 
   const stopScan = () => {
@@ -876,49 +872,6 @@ export default function AIScannerPage() {
               <p className="text-[10px] text-zinc-600 mt-2">
                 Strategies only apply in <span className="text-zinc-400">full</span> intensity mode.
               </p>
-            </CardContent>
-          </Card>
-
-          {/* LLM Grader */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-semibold text-zinc-300 flex items-center gap-2">
-                <Bot className="h-4 w-4 text-emerald-400" /> LLM Grader
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-zinc-400">Use Claude Haiku as grader</span>
-                <button
-                  type="button"
-                  onClick={() => setLlmGraderOn(v => !v)}
-                  className={cn("relative inline-flex h-5 w-9 items-center rounded-full transition-colors", llmGraderOn ? "bg-emerald-600" : "bg-zinc-700")}
-                >
-                  <span className={cn("inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform", llmGraderOn ? "translate-x-[18px]" : "translate-x-0.5")} />
-                </button>
-              </div>
-              {llmGraderOn && (
-                <div className="space-y-1.5">
-                  <Label className="text-xs text-zinc-400">Anthropic API Key</Label>
-                  <div className="relative">
-                    <Input
-                      type={showLlmKey ? "text" : "password"}
-                      placeholder="sk-ant-..."
-                      value={llmGraderKey}
-                      onChange={e => setLlmGraderKey(e.target.value)}
-                      disabled={isScanning}
-                      className="font-mono text-xs pr-8"
-                    />
-                    <button type="button" onClick={() => setShowLlmKey(v => !v)} className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300">
-                      {showLlmKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                    </button>
-                  </div>
-                  <p className="text-[10px] text-zinc-600">Claude Haiku evaluates each response semantically. Falls back to heuristics without key.</p>
-                </div>
-              )}
-              {!llmGraderOn && (
-                <p className="text-[10px] text-zinc-600">Heuristic (keyword-based) grader is active.</p>
-              )}
             </CardContent>
           </Card>
 
