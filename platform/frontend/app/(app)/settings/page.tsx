@@ -4,7 +4,7 @@ import React, { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Loader2, Building2, Save, Clock } from "lucide-react";
+import { Loader2, Save, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -175,39 +175,6 @@ export default function SettingsPage() {
               Save Changes
             </Button>
           </form>
-        </CardContent>
-      </Card>
-
-      {/* Organization */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base flex items-center gap-2">
-            <Building2 className="h-4 w-4" />
-            Organization
-          </CardTitle>
-          <CardDescription>Manage your organization settings</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="org_name">Organization Name</Label>
-              <Input
-                id="org_name"
-                {...register("organization_name")}
-                placeholder="Acme Corporation"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-4 text-sm">
-              <div className="rounded-lg border border-zinc-800 p-3">
-                <p className="text-zinc-500 text-xs uppercase mb-1">Plan</p>
-                <p className="font-semibold text-zinc-200">Enterprise</p>
-              </div>
-              <div className="rounded-lg border border-zinc-800 p-3">
-                <p className="text-zinc-500 text-xs uppercase mb-1">Your Role</p>
-                <p className="font-semibold text-zinc-200 capitalize">{user?.role}</p>
-              </div>
-            </div>
-          </div>
         </CardContent>
       </Card>
 
