@@ -432,60 +432,43 @@ async def _perform_login(client: httpx.AsyncClient, cfg: LoginConfig,
 
 async def _ai_plan_attack(target: str, tech_stack: list[str],
                           endpoints: list[str], modules: list[str]) -> str:
-    """Use Claude to generate a prioritised attack strategy."""
+    """Use Claude to generate a prioritised attack strategy.
+
+    Raises RuntimeError if API key is not configured.
+    Raises any Anthropic API exception so the caller can emit a proper SSE error event.
+    """
     if not settings.ANTHROPIC_API_KEY:
-        return ""
-    try:
-        import anthropic
-        client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
-        prompt = f"""You are an expert bug bounty hunter analyzing a target for security vulnerabilities.
+        raise RuntimeError("ANTHROPIC_API_KEY is not configured")
 
-Target: {target}
-Detected tech stack: {', '.join(tech_stack) if tech_stack else 'unknown'}
-Discovered endpoints (sample): {json.dumps(endpoints[:20])}
-Modules to run: {', '.join(modules)}
+    import anthropic
+    client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
 
-Based on the tech stack and endpoints, provide a BRIEF prioritised attack strategy (max 200 words):
+    system_prompt = (
+        "You are an expert penetration tester planning a security assessment. "
+        "Be concise, specific, and actionable. Focus only on high-impact findings."
+    )
+
+    user_prompt = f"""Analyse this target and produce a prioritised attack strategy (max 200 words).
+
+TARGET: {target}
+TECH STACK: {', '.join(tech_stack) if tech_stack else 'unknown'}
+SAMPLE ENDPOINTS: {json.dumps(endpoints[:20])}
+MODULES RUNNING: {', '.join(modules)}
+
+Answer these three questions:
 1. Which vulnerability types are most likely given this tech stack?
-2. Which endpoints should be tested first?
-3. Any specific payloads or techniques to prioritise?
+2. Which endpoints should be tested first and why?
+3. Any specific payloads or bypass techniques to prioritise?
 
-Be specific and actionable. Focus on high-severity findings."""
+Be specific. Reference the actual tech stack and endpoints above."""
 
-        msg = await client.messages.create(
-            model=settings.AI_MODEL,
-            max_tokens=300,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return msg.content[0].text
-    except Exception:
-        return ""
-
-
-async def _ai_analyze_response(module: str, test_name: str, url: str,
-                                request_info: str, response_info: str) -> str:
-    """Ask Claude whether a response indicates a real vulnerability."""
-    if not settings.ANTHROPIC_API_KEY:
-        return ""
-    try:
-        import anthropic
-        client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
-        msg = await client.messages.create(
-            model=settings.AI_MODEL,
-            max_tokens=200,
-            messages=[{"role": "user", "content": (
-                f"Security test result — analyze for real vulnerability:\n"
-                f"Module: {module} | Test: {test_name}\n"
-                f"URL: {url}\n"
-                f"Request: {request_info[:300]}\n"
-                f"Response: {response_info[:400]}\n\n"
-                f"Is this a real vulnerability? Severity? What follow-up should I do? "
-                f"Answer in 2-3 sentences max."
-            )}],
-        )
-        return msg.content[0].text
-    except Exception:
-        return ""
+    msg = await client.messages.create(
+        model=settings.AI_MODEL,
+        max_tokens=350,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    return msg.content[0].text.strip()
 
 
 # ── Module: Security Headers ──────────────────────────────────────────────────

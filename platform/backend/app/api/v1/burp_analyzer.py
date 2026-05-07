@@ -56,6 +56,9 @@ from app.api.v1.attack_patterns import (
 
 from fastapi import APIRouter as _APIRouter
 
+from app.core.config import get_settings
+
+_settings = get_settings()
 router = _APIRouter(prefix="/burp", tags=["Burp Analyzer"])
 
 # ─── Limits ───────────────────────────────────────────────────────────────────
@@ -1180,7 +1183,7 @@ async def run_burp_analysis(
             import anthropic  # type: ignore[import]
             client = anthropic.AsyncAnthropic(api_key=anthropic_api_key)
             async with client.messages.stream(
-                model="claude-haiku-4-5-20251001",
+                model=_settings.AI_MODEL,
                 max_tokens=2000,
                 system="You are a senior penetration tester. Be specific, concise, and technical. Always reference exact endpoint paths from the data provided.",
                 messages=[{"role": "user", "content": prompt}],

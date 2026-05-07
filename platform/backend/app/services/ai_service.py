@@ -253,11 +253,19 @@ Respond with ONLY a JSON object."""
             messages=[{"role": "user", "content": user_message}],
         )
         text = response.content[0].text.strip()
+        # Strip markdown fences if Claude wrapped the response
         if text.startswith("```"):
             text = text.split("```")[1]
             if text.startswith("json"):
                 text = text[4:]
         return json.loads(text)
+    except RuntimeError:
+        # API key not configured — re-raise so the endpoint returns 503
+        raise
+    except json.JSONDecodeError:
+        # Claude returned non-JSON or ambiguous query — return empty filter
+        logger.warning(f"NL filter returned non-JSON for query: {query!r}")
+        return {}
     except Exception as e:
         logger.error(f"NL to filter failed: {e}")
         return {}
