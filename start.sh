@@ -321,7 +321,7 @@ if [ -n "${MSRA_DIR:-}" ] && [ -f "$MSRA_DIR/server.py" ]; then
   ok "MSRA started (pid $(cat "$PIDS_DIR/msra.pid")) → logs/msra.log"
   cd "$REPO_ROOT"
 else
-  info "MSRA not found at $MSRA_DIR — mobile scanner will be unavailable"
+  info "MSRA not found — mobile scanner will be unavailable (set MSRA_DIR env var to enable)"
 fi
 
 # ─── 8. Wait for backend to be ready ─────────────────────────────────────────
