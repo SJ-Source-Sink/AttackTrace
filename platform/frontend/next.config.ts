@@ -7,6 +7,17 @@ const nextConfig: NextConfig = {
   // Required for the multi-stage Docker build (runner stage uses .next/standalone/)
   // See: platform/frontend/Dockerfile
   output: "standalone",
+  compress: true,
+  images: {
+    formats: ["image/avif", "image/webp"],
+    remotePatterns: [
+      {
+        protocol: "http",
+        hostname: "localhost",
+        port: "8000",
+      },
+    ],
+  },
   async rewrites() {
     return [
       {

@@ -13,6 +13,7 @@ from sqlalchemy import (
     Enum,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -44,6 +45,18 @@ class Finding(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """Security finding discovered during a scan."""
 
     __tablename__ = "findings"
+
+    # Composite indexes for the most common multi-column query patterns
+    __table_args__ = (
+        # org_id + scan_job_id: every "findings for scan X in org Y" query
+        Index("idx_finding_org_scan", "org_id", "scan_job_id"),
+        # org_id + dedup_hash: cross-scan deduplication lookup
+        Index("idx_finding_org_dedup", "org_id", "dedup_hash"),
+        # org_id + severity: dashboard severity breakdown
+        Index("idx_finding_org_severity", "org_id", "severity"),
+        # org_id + status: open/in-progress filter
+        Index("idx_finding_org_status", "org_id", "status"),
+    )
 
     org_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),

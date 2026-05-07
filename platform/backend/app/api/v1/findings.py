@@ -209,8 +209,8 @@ async def list_findings(
     confidence: Optional[str] = None,
     overdue: bool = False,
     sort_by: str = "created_at",
-    page: int = 1,
-    per_page: int = 50,
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=50, ge=1, le=200),
 ) -> dict:
     query = select(Finding).where(Finding.org_id == org_id)
 
@@ -247,8 +247,16 @@ async def list_findings(
         query = query.where(Finding.category.ilike(f"%{category}%"))
 
     if search:
+        if len(search) > 200:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": {"code": "INVALID_SEARCH", "message": "Search term too long (max 200 chars)"}},
+            )
+        # Escape LIKE wildcards to prevent full-table scan abuse
+        escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         query = query.where(
-            Finding.title.ilike(f"%{search}%") | Finding.description.ilike(f"%{search}%")
+            Finding.title.ilike(f"%{escaped}%", escape="\\")
+            | Finding.description.ilike(f"%{escaped}%", escape="\\")
         )
 
     if asset_id:
@@ -417,7 +425,8 @@ async def export_findings(
     if finding_status:
         query = query.where(Finding.status == FindingStatus(finding_status))
 
-    result = await db.execute(query.order_by(Finding.created_at.desc()))
+    # Hard cap to prevent OOM — export at most 10k findings at once
+    result = await db.execute(query.order_by(Finding.created_at.desc()).limit(10_000))
     findings = result.scalars().all()
 
     if fmt == "csv":

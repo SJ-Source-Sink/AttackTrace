@@ -13,7 +13,9 @@ from sqlalchemy import (
     Enum,
     Float,
     ForeignKey,
+    Index,
     String,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID as PGUUID
@@ -38,6 +40,14 @@ class Asset(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """
 
     __tablename__ = "assets"
+
+    # Prevent duplicate asset values within the same org+type combination
+    # and add composite index for org-scoped value searches
+    __table_args__ = (
+        UniqueConstraint("org_id", "value", "asset_type", name="uq_asset_org_value_type"),
+        Index("idx_asset_org_value", "org_id", "value"),
+        Index("idx_asset_org_type", "org_id", "asset_type"),
+    )
 
     org_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),

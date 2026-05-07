@@ -3,9 +3,20 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
 import type { User, LoginRequest, RegisterRequest, AuthResponse } from "@/types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
+// API_BASE intentionally NOT exported from here — use the one from lib/api.ts
+const _AUTH_API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
 const REFRESH_TOKEN_KEY = "attacktrace_rt";
 const ACCESS_TOKEN_KEY = "attacktrace_at";
+
+// Decode JWT payload without verifying signature (verification is server-side)
+function _decodeJwtExp(token: string): number | null {
+  try {
+    const payload = JSON.parse(atob(token.split(".")[1]));
+    return typeof payload.exp === "number" ? payload.exp : null;
+  } catch {
+    return null;
+  }
+}
 
 // Access token stored in both sessionStorage (primary) and localStorage (fallback).
 // sessionStorage is cleared when the tab closes; localStorage persists but is also
@@ -58,7 +69,7 @@ async function _doRefresh(): Promise<string | null> {
   if (!refreshToken) return null;
 
   try {
-    const response = await fetch(`${API_BASE}/auth/refresh`, {
+    const response = await fetch(`${_AUTH_API_BASE}/auth/refresh`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ refresh_token: refreshToken }),
@@ -129,7 +140,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const fetchCurrentUser = useCallback(async (token: string): Promise<User | null> => {
     try {
-      const response = await fetch(`${API_BASE}/auth/me`, {
+      const response = await fetch(`${_AUTH_API_BASE}/auth/me`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) return null;
@@ -138,6 +149,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return null;
     }
   }, []);
+
+  // Proactive token refresh: set a timer to refresh 60s before the access token expires
+  useEffect(() => {
+    const token = getAccessToken();
+    if (!token || !user) return;
+
+    const exp = _decodeJwtExp(token);
+    if (!exp) return;
+
+    const msUntilExpiry = exp * 1000 - Date.now();
+    const refreshAt = msUntilExpiry - 60_000; // 1 minute before expiry
+
+    if (refreshAt <= 0) {
+      // Already expired or expiring very soon — refresh immediately
+      refreshAccessToken();
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      const newToken = await refreshAccessToken();
+      if (!newToken) {
+        // Refresh failed — log out
+        setAccessToken(null);
+        setRefreshToken(null);
+        setUser(null);
+      }
+    }, refreshAt);
+
+    return () => clearTimeout(timer);
+  }, [user]);
 
   // On mount: restore session — use existing access token if still valid, else refresh
   useEffect(() => {
@@ -173,7 +214,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [fetchCurrentUser]);
 
   const login = useCallback(async (credentials: LoginRequest) => {
-    const response = await fetch(`${API_BASE}/auth/login`, {
+    const response = await fetch(`${_AUTH_API_BASE}/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(credentials),
@@ -192,7 +233,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [fetchCurrentUser]);
 
   const register = useCallback(async (data: RegisterRequest) => {
-    const response = await fetch(`${API_BASE}/auth/register`, {
+    const response = await fetch(`${_AUTH_API_BASE}/auth/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),

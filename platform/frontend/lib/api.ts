@@ -11,6 +11,23 @@ import type {
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
 
+// Default request timeout (30s). SSE/streaming endpoints manage their own timeout.
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+function isRetryable(status: number): boolean {
+  return status === 429 || (status >= 500 && status < 600);
+}
+
+async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -24,6 +41,8 @@ export class ApiError extends Error {
 interface FetchOptions extends RequestInit {
   skipAuth?: boolean;
   params?: Record<string, string | number | boolean | string[] | undefined>;
+  timeoutMs?: number;
+  maxRetries?: number;
 }
 
 function buildUrl(path: string, params?: Record<string, string | number | boolean | string[] | undefined>): string {
@@ -49,7 +68,7 @@ export async function apiFetch<T>(
   path: string,
   options: FetchOptions = {},
 ): Promise<T> {
-  const { skipAuth = false, params, ...fetchOptions } = options;
+  const { skipAuth = false, params, timeoutMs = DEFAULT_TIMEOUT_MS, maxRetries = 2, ...fetchOptions } = options;
 
   const url = buildUrl(path, params);
   const headers = new Headers(fetchOptions.headers);
@@ -65,10 +84,7 @@ export async function apiFetch<T>(
     }
   }
 
-  let response = await fetch(url, {
-    ...fetchOptions,
-    headers,
-  });
+  let response = await fetchWithTimeout(url, { ...fetchOptions, headers }, timeoutMs);
 
   // Handle 401 with token refresh — all concurrent callers share one refresh promise
   if (response.status === 401 && !skipAuth) {
@@ -81,7 +97,7 @@ export async function apiFetch<T>(
 
     if (newToken) {
       headers.set("Authorization", `Bearer ${newToken}`);
-      response = await fetch(url, { ...fetchOptions, headers });
+      response = await fetchWithTimeout(url, { ...fetchOptions, headers }, timeoutMs);
     } else {
       if (typeof window !== "undefined") {
         window.location.href = "/login";
@@ -90,12 +106,27 @@ export async function apiFetch<T>(
     }
   }
 
+  // Exponential backoff retry for transient 5xx / 429
+  if (isRetryable(response.status) && maxRetries > 0) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const delay = Math.min(1000 * Math.pow(2, attempt - 1), 8000);
+      await new Promise((r) => setTimeout(r, delay));
+      response = await fetchWithTimeout(url, { ...fetchOptions, headers }, timeoutMs);
+      if (!isRetryable(response.status)) break;
+    }
+  }
+
   if (!response.ok) {
     let detail = `HTTP ${response.status}`;
     try {
-      const errorData = await response.json();
-      const raw = errorData.detail ?? detail;
-      detail = typeof raw === "string" ? raw : JSON.stringify(raw);
+      const text = await response.clone().text();
+      if (response.headers.get("content-type")?.includes("json")) {
+        const errorData = JSON.parse(text);
+        const raw = errorData.detail ?? detail;
+        detail = typeof raw === "string" ? raw : JSON.stringify(raw);
+      } else if (text.length < 500) {
+        detail = text || detail;
+      }
     } catch {
       // ignore
     }

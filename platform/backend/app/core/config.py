@@ -77,6 +77,13 @@ class Settings(BaseSettings):
     # Rate limiting
     RATE_LIMIT_PER_MINUTE: int = 60
 
+    @field_validator("SECRET_KEY", mode="after")
+    @classmethod
+    def validate_secret_key_length(cls, v: str) -> str:
+        if len(v) < 32:
+            raise ValueError("SECRET_KEY must be at least 32 characters long")
+        return v
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def parse_cors_origins(cls, v):
