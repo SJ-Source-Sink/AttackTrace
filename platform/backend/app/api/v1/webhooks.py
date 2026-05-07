@@ -3,8 +3,6 @@ Webhook System — HMAC-SHA256 signed event delivery
 Supports: scan.completed, finding.created, asset.discovered, sla.breached
 """
 
-from __future__ import annotations
-
 import hashlib
 import hmac
 import json
@@ -14,11 +12,8 @@ from typing import Annotated, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, HttpUrl
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel
 
-from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
 from app.models.db.user import User
 

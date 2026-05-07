@@ -3,13 +3,10 @@ MITRE ATT&CK Technique Mapper
 Maps CVE → CWE → ATT&CK Technique → APT Groups
 """
 
-from __future__ import annotations
-
 from typing import Annotated, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 

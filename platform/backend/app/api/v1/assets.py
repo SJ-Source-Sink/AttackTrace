@@ -7,14 +7,14 @@ from typing import Annotated, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
 from app.models.db.asset import Asset, AssetType
 from app.models.db.user import User
-from app.models.schemas.asset import AssetFilter, AssetResponse, AssetUpdate
+from app.models.schemas.asset import AssetResponse, AssetUpdate
 
 router = APIRouter(prefix="/assets", tags=["Assets"])
 

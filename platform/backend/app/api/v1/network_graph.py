@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
 from app.models.db.asset import Asset, AssetType
-from app.models.db.finding import Finding, FindingSeverity, FindingStatus
+from app.models.db.finding import Finding, FindingStatus
 from app.models.db.scan import ScanJob, ScanStatus
 from app.models.db.user import User
 

@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
-import time
 import uuid
 from datetime import datetime, timezone
 from typing import AsyncGenerator, Optional

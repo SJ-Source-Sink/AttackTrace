@@ -24,7 +24,7 @@ from app.core.security import (
     store_refresh_token,
     verify_password,
 )
-from app.models.db.org import InviteCode, Organization, OrgPlan
+from app.models.db.org import InviteCode, Organization
 from app.models.db.user import OrgMember, MemberRole, User
 from app.models.schemas.auth import (
     LoginRequest,

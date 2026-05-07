@@ -2,22 +2,21 @@
 Scan management API: create, list, get, cancel, and stream scan events via SSE.
 """
 
-import math
 import shutil
 from pathlib import Path
-from typing import Annotated, AsyncGenerator
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
 from app.models.db.scan import ScanJob, ScanStatus
 from app.models.db.user import User
-from app.models.schemas.scan import ScanCreate, ScanListFilter, ScanResponse
+from app.models.schemas.scan import ScanCreate, ScanResponse
 from app.services.scan_service import (
     cancel_scan,
     create_scan,

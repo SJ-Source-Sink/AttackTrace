@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_org_id, get_current_user, require_role
+from app.core.dependencies import get_current_org_id, get_current_user
 from app.core.security import (
     decrypt_credential,
     encrypt_credential,

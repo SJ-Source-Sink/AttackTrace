@@ -124,23 +124,6 @@ export interface CreateScanRequest {
   config: ScanConfig;
 }
 
-export interface ScanModuleStatus {
-  name: ScanModule;
-  status: "pending" | "running" | "completed" | "failed" | "skipped";
-  findings_count: number;
-  assets_count: number;
-  started_at?: string;
-  completed_at?: string;
-  error?: string;
-}
-
-export interface ScanPhase {
-  name: string;
-  description: string;
-  status: "pending" | "running" | "completed" | "failed";
-  modules: ScanModule[];
-}
-
 export interface ScanStats {
   total_assets: number;
   total_findings: number;
@@ -241,11 +224,6 @@ export type AssetType =
   | "webapp"
   | "cloud"
   | "endpoint";
-
-export interface AssetTag {
-  key: string;
-  value: string;
-}
 
 export interface Asset {
   id: string;
