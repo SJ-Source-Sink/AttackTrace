@@ -35,6 +35,11 @@ router = APIRouter(prefix="/mcp-scanner", tags=["MCP Scanner"])
 # MCP endpoint paths to probe
 # ──────────────────────────────────────────────────────────────────────────────
 MCP_ENDPOINTS = [
+    # Standard MCP HTTP transport (most common)
+    "/messages",
+    "/messages/",
+    "/",
+    # Named MCP paths
     "/mcp",
     "/mcp/",
     "/api/mcp",
@@ -46,7 +51,22 @@ MCP_ENDPOINTS = [
     "/tools",
     "/api/tools",
     "/mcp/tools",
+    # RPC-style paths
+    "/rpc",
+    "/jsonrpc",
+    "/api",
+    "/api/v1",
 ]
+
+# When SSE is found at these paths, also probe the corresponding message endpoint
+SSE_TO_MESSAGE_MAP = {
+    "/sse": ["/messages", "/messages/"],
+    "/mcp/sse": ["/mcp/messages", "/mcp/messages/"],
+    "/events": ["/messages", "/messages/"],
+    "/mcp/events": ["/mcp/messages"],
+    "/api/sse": ["/api/messages"],
+    "/stream": ["/messages", "/message"],
+}
 
 MCP_SSE_ENDPOINTS = [
     "/mcp/sse",
@@ -374,7 +394,13 @@ def _parse_mcp_response(resp: httpx.Response) -> tuple[bool, dict]:
     """Parse MCP JSON-RPC response. Returns (is_valid_mcp, body_dict)."""
     try:
         body = resp.json()
-        is_mcp = body.get("jsonrpc") == "2.0"
+        # Valid MCP: jsonrpc 2.0, or has result/error keys, or has tools/resources
+        is_mcp = (
+            body.get("jsonrpc") == "2.0"
+            or ("result" in body and isinstance(body.get("result"), dict))
+            or ("error" in body and "code" in body.get("error", {}))
+            or ("tools" in body and isinstance(body.get("tools"), list))
+        )
         return is_mcp, body
     except Exception:
         return False, {}
@@ -421,9 +447,11 @@ async def _run_mcp_scan(
 
     findings: list[dict] = []
     discovered_endpoints: list[str] = []  # confirmed MCP endpoints
-    all_tools: list[dict] = []  # accumulated from all endpoints
+    all_tools: list[dict] = []            # tools enumerated from server
+    all_raw_responses: list[str] = []     # all response bodies (for secrets scan)
+    # Track already-confirmed endpoint URLs so we don't duplicate
+    confirmed_urls: set[str] = set()
 
-    # ── start ──────────────────────────────────────────────────────────────
     yield _sse("start", {
         "target": target,
         "phases": ["discovery", "enumeration", "attack", "intelligence"],
@@ -445,10 +473,18 @@ async def _run_mcp_scan(
             "mitre": mitre,
             "detail": detail,
             "tool_name": tool_name,
-            "evidence": evidence[:400] if evidence else "",
+            "evidence": evidence[:500] if evidence else "",
         }
         findings.append(f)
         return f
+
+    def _confirm_endpoint(url: str, body: dict, status: int) -> bool:
+        """Add url to discovered_endpoints if not already there. Return True if newly added."""
+        if url in confirmed_urls:
+            return False
+        confirmed_urls.add(url)
+        discovered_endpoints.append(url)
+        return True
 
     async with httpx.AsyncClient(
         timeout=timeout,
@@ -457,60 +493,64 @@ async def _run_mcp_scan(
         headers={"User-Agent": "AttackTrace-MCP-Scanner/1.0"},
     ) as client:
 
-        # ── Phase 1: Discovery ─────────────────────────────────────────────
-        yield _sse("phase_start", {"phase": "discovery", "message": "Probing MCP endpoint paths"})
+        # ── Phase 1: Discovery — probe all known MCP paths ─────────────────
+        yield _sse("phase_start", {"phase": "discovery", "message": f"Probing {len(MCP_ENDPOINTS)} MCP endpoint paths"})
 
+        init_probe = DISCOVERY_PROBES[0]
         for endpoint_path in MCP_ENDPOINTS:
             url = f"{target}{endpoint_path}"
-
-            # Quick initialize probe to confirm MCP
-            init_probe = DISCOVERY_PROBES[0]  # initialize
             try:
                 resp = await client.post(
                     url,
                     json=init_probe["payload"],
                     headers={"Content-Type": "application/json"},
+                    timeout=max(5, timeout // 2),
                 )
                 is_mcp, body = _parse_mcp_response(resp)
+                all_raw_responses.append(resp.text)
 
-                if resp.status_code in (404, 405, 501):
-                    yield _sse("probe", {"url": url, "status": resp.status_code, "result": "not_found"})
+                if resp.status_code in (404, 405, 501, 400):
+                    yield _sse("probe", {"url": url, "status": resp.status_code, "result": "not_mcp"})
                     continue
 
-                if is_mcp or resp.status_code == 200:
-                    discovered_endpoints.append(url)
-                    yield _sse("endpoint_found", {
-                        "url": url,
-                        "status": resp.status_code,
-                        "server_info": body.get("result", {}).get("serverInfo", {}),
-                    })
-                    f = _finding(
-                        vuln_id="unauth_mcp_exposed",
-                        url=url,
-                        severity=init_probe["severity"],
-                        title="Unauthenticated MCP Server Exposed",
-                        description=init_probe["description"],
-                        remediation=init_probe["remediation"],
-                        owasp=init_probe["owasp"],
-                        evidence=json.dumps(body)[:300],
-                    )
-                    yield _sse("finding", f)
+                if is_mcp:
+                    if _confirm_endpoint(url, body, resp.status_code):
+                        server_info = {}
+                        result_obj = body.get("result", {})
+                        if isinstance(result_obj, dict):
+                            server_info = result_obj.get("serverInfo", {})
+                        yield _sse("endpoint_found", {
+                            "url": url,
+                            "status": resp.status_code,
+                            "server_info": server_info,
+                        })
+                        f = _finding(
+                            vuln_id="unauth_mcp_exposed",
+                            url=url,
+                            severity=init_probe["severity"],
+                            title="Unauthenticated MCP Server Exposed",
+                            description=init_probe["description"],
+                            remediation=init_probe["remediation"],
+                            owasp=init_probe["owasp"],
+                            evidence=json.dumps(body),
+                        )
+                        yield _sse("finding", f)
                 else:
-                    yield _sse("probe", {"url": url, "status": resp.status_code, "result": "no_mcp"})
+                    yield _sse("probe", {"url": url, "status": resp.status_code, "result": "not_mcp"})
 
             except httpx.TimeoutException:
                 yield _sse("probe", {"url": url, "result": "timeout"})
             except Exception as e:
                 yield _sse("probe", {"url": url, "result": "error", "error": str(e)[:80]})
 
-        # ── Phase 1b: SSE detection ────────────────────────────────────────
+        # ── Phase 1b: SSE detection + follow-up JSON-RPC on message endpoint ─
         if check_sse:
             yield _sse("phase_start", {"phase": "sse_detection", "message": "Detecting SSE transport endpoints"})
             for sse_path in MCP_SSE_ENDPOINTS:
-                url = f"{target}{sse_path}"
+                sse_url = f"{target}{sse_path}"
                 try:
                     async with client.stream(
-                        "GET", url,
+                        "GET", sse_url,
                         headers={"Accept": "text/event-stream"},
                         timeout=5,
                     ) as stream:
@@ -524,23 +564,59 @@ async def _run_mcp_scan(
                         if is_sse or "data:" in first_chunk:
                             f = _finding(
                                 vuln_id="unauth_sse_transport",
-                                url=url,
+                                url=sse_url,
                                 severity="high",
                                 title="Unauthenticated MCP SSE Transport Exposed",
-                                description="MCP SSE transport endpoint responds without authentication. Attackers can subscribe to real-time tool call results and inject events.",
-                                remediation="Add authentication middleware before the SSE endpoint. Validate Origin headers. Use CORS restrictions.",
+                                description="MCP SSE transport endpoint responds without authentication. Attackers can subscribe to real-time tool call results.",
+                                remediation="Add authentication middleware before the SSE endpoint.",
                                 owasp="A07 - Identification and Authentication Failures",
                                 evidence=first_chunk,
                             )
                             yield _sse("finding", f)
+
+                            # Follow up: probe the corresponding JSON-RPC message endpoint
+                            for msg_path in SSE_TO_MESSAGE_MAP.get(sse_path, []):
+                                msg_url = f"{target}{msg_path}"
+                                try:
+                                    resp2 = await client.post(
+                                        msg_url,
+                                        json=init_probe["payload"],
+                                        headers={"Content-Type": "application/json"},
+                                        timeout=5,
+                                    )
+                                    is_mcp2, body2 = _parse_mcp_response(resp2)
+                                    all_raw_responses.append(resp2.text)
+                                    if is_mcp2 and _confirm_endpoint(msg_url, body2, resp2.status_code):
+                                        yield _sse("endpoint_found", {
+                                            "url": msg_url,
+                                            "status": resp2.status_code,
+                                            "server_info": {},
+                                            "via": f"SSE follow-up from {sse_url}",
+                                        })
+                                        f2 = _finding(
+                                            vuln_id="unauth_mcp_exposed",
+                                            url=msg_url,
+                                            severity="critical",
+                                            title="Unauthenticated MCP JSON-RPC Message Endpoint",
+                                            description="MCP message endpoint (used with SSE transport) is exposed without authentication.",
+                                            remediation="Add authentication to the /messages endpoint. Both SSE and message endpoints must be protected.",
+                                            owasp="A07 - Identification and Authentication Failures",
+                                            evidence=json.dumps(body2),
+                                        )
+                                        yield _sse("finding", f2)
+                                except Exception:
+                                    pass
                 except Exception:
                     pass
 
-        # ── Phase 2: Enumeration (all discovered endpoints) ───────────────
-        yield _sse("phase_start", {"phase": "enumeration", "message": f"Enumerating {len(discovered_endpoints)} MCP endpoint(s)"})
+        # ── Phase 2: Full enumeration on all confirmed endpoints ───────────
+        yield _sse("phase_start", {
+            "phase": "enumeration",
+            "message": f"Enumerating {len(discovered_endpoints)} confirmed endpoint(s)",
+        })
 
-        for base_url in discovered_endpoints:
-            for probe in DISCOVERY_PROBES[1:]:  # skip initialize (already done)
+        for base_url in list(discovered_endpoints):
+            for probe in DISCOVERY_PROBES[1:]:  # skip initialize (done in discovery)
                 try:
                     resp = await client.post(
                         base_url,
@@ -548,28 +624,25 @@ async def _run_mcp_scan(
                         headers={"Content-Type": "application/json"},
                     )
                     is_mcp, body = _parse_mcp_response(resp)
+                    all_raw_responses.append(resp.text)
 
                     if resp.status_code in (404, 405):
                         continue
 
-                    result_obj = body.get("result", {})
-                    has_data = False
-                    tool_count = 0
-                    resource_count = 0
+                    result_obj = body.get("result") or {}
+                    if not isinstance(result_obj, dict):
+                        continue
 
-                    if isinstance(result_obj, dict):
-                        tools = result_obj.get("tools", [])
-                        resources = result_obj.get("resources", [])
-                        prompts = result_obj.get("prompts", [])
-                        tool_count = len(tools)
-                        resource_count = len(resources)
-                        if tools:
-                            has_data = True
-                            all_tools.extend(tools)
-                        if resources or prompts:
-                            has_data = True
+                    tools = result_obj.get("tools") or []
+                    resources = result_obj.get("resources") or []
+                    prompts = result_obj.get("prompts") or []
+                    tool_count = len(tools)
+                    resource_count = len(resources)
 
-                    if is_mcp and has_data:
+                    if tools:
+                        all_tools.extend(tools)
+
+                    if is_mcp and (tools or resources or prompts):
                         f = _finding(
                             vuln_id=f"unauth_{probe['name']}",
                             url=base_url,
@@ -578,11 +651,11 @@ async def _run_mcp_scan(
                             description=probe["description"],
                             remediation=probe["remediation"],
                             owasp=probe["owasp"],
-                            evidence=json.dumps(result_obj)[:400],
+                            evidence=json.dumps(result_obj),
                         )
                         f["tool_count"] = tool_count
                         f["resource_count"] = resource_count
-                        f["exposed_tools"] = [t.get("name") for t in (result_obj.get("tools") or [])[:15]]
+                        f["exposed_tools"] = [t.get("name") for t in tools[:15]]
                         yield _sse("finding", f)
 
                 except httpx.TimeoutException:
@@ -590,111 +663,129 @@ async def _run_mcp_scan(
                 except Exception:
                     pass
 
-        # ── Phase 3: Attack (tool execution attacks) ──────────────────────
-        if run_attacks and discovered_endpoints:
-            yield _sse("phase_start", {
-                "phase": "attack",
-                "message": f"Running {len(TOOL_ATTACKS)} tool execution attacks against {len(discovered_endpoints)} endpoint(s)",
-            })
+        # ── Phase 3: Attack phase ──────────────────────────────────────────
+        # Always run if run_attacks=True; use confirmed endpoints OR probe common paths
+        attack_targets = list(discovered_endpoints)
+        if run_attacks:
+            # Also always try common attack paths even without confirmed discovery
+            blind_paths = ["/messages", "/messages/", "/mcp", "/"]
+            for p in blind_paths:
+                u = f"{target}{p}"
+                if u not in confirmed_urls:
+                    attack_targets.append(u)
 
-            # Get tool schemas to know which param names are valid
-            tool_param_names: set[str] = set()
-            for tool in all_tools:
-                schema = tool.get("inputSchema", {})
-                props = schema.get("properties", {})
-                tool_param_names.update(props.keys())
+            if attack_targets:
+                yield _sse("phase_start", {
+                    "phase": "attack",
+                    "message": f"Running {len(TOOL_ATTACKS)} attack modules against {len(attack_targets)} target(s)",
+                })
 
-            for attack in TOOL_ATTACKS:
-                yield _sse("attack_start", {"attack": attack["name"], "id": attack["id"]})
+                # Fallback tool list if no tools were enumerated
+                fallback_tools = [
+                    {"name": "read_file"},
+                    {"name": "write_file"},
+                    {"name": "file_read"},
+                    {"name": "read"},
+                    {"name": "fetch"},
+                    {"name": "execute"},
+                    {"name": "run"},
+                    {"name": "eval"},
+                    {"name": "format"},
+                    {"name": "query"},
+                    {"name": "search"},
+                ]
+                tools_to_try_base = (all_tools[:8] + fallback_tools) if all_tools else fallback_tools
 
-                for base_url in discovered_endpoints:
-                    hit = False
-                    for payload_params in attack["payloads"]:
-                        # Try each tool found on this server
-                        tools_to_try = all_tools[:5] if all_tools else [{"name": "file_read"}, {"name": "read_file"}, {"name": "fetch"}, {"name": "execute"}]
+                for attack in TOOL_ATTACKS:
+                    yield _sse("attack_start", {"attack": attack["name"], "id": attack["id"]})
 
-                        for tool in tools_to_try:
-                            tool_name = tool.get("name", "unknown")
-
-                            # Only try payload if param name matches tool's schema OR we have no info
-                            tool_schema = tool.get("inputSchema", {})
-                            tool_props = tool_schema.get("properties", {})
+                    for base_url in attack_targets:
+                        for payload_params in attack["payloads"]:
                             payload_key = list(payload_params.keys())[0]
 
-                            if tool_props and payload_key not in tool_props:
-                                continue  # skip mismatched params
+                            # Build tool list: prefer tools whose schema has the param key
+                            schema_matched = [
+                                t for t in tools_to_try_base
+                                if payload_key in (t.get("inputSchema", {}).get("properties", {}) or {})
+                            ]
+                            # Always also try tools with no schema info (blind) and fallback tools
+                            blind_tools = [t for t in tools_to_try_base if not t.get("inputSchema")]
+                            candidates = (schema_matched or blind_tools or tools_to_try_base)[:6]
 
-                            rpc = {
-                                "jsonrpc": "2.0",
-                                "method": "tools/call",
-                                "params": {"name": tool_name, "arguments": payload_params},
-                                "id": 99,
-                            }
-
-                            try:
-                                resp = await client.post(
-                                    base_url,
-                                    json=rpc,
-                                    headers={"Content-Type": "application/json"},
-                                    timeout=8,
-                                )
-                                _, body = _parse_mcp_response(resp)
-                                response_text = json.dumps(body)
-
-                                # Check for success indicators
-                                matched = [ind for ind in attack["success_indicators"] if ind.lower() in response_text.lower()]
-                                if matched:
-                                    f = _finding(
-                                        vuln_id=attack["id"],
-                                        url=base_url,
-                                        severity=attack["severity"],
-                                        title=f"{attack['name']} — Tool '{tool_name}' is Vulnerable",
-                                        description=attack["description"],
-                                        remediation=attack["remediation"],
-                                        owasp=attack["owasp"],
-                                        mitre=attack.get("mitre", ""),
-                                        tool_name=tool_name,
-                                        detail=f"Payload: {json.dumps(payload_params)} | Matched: {matched}",
-                                        evidence=response_text[:400],
+                            for tool in candidates:
+                                tool_name = tool.get("name", "unknown")
+                                rpc = {
+                                    "jsonrpc": "2.0",
+                                    "method": "tools/call",
+                                    "params": {"name": tool_name, "arguments": payload_params},
+                                    "id": 99,
+                                }
+                                try:
+                                    resp = await client.post(
+                                        base_url,
+                                        json=rpc,
+                                        headers={"Content-Type": "application/json"},
+                                        timeout=8,
                                     )
-                                    yield _sse("finding", f)
-                                    hit = True
-                                    break  # one confirmed finding per tool per attack
+                                    _, body = _parse_mcp_response(resp)
+                                    response_text = resp.text
+                                    all_raw_responses.append(response_text)
 
-                            except httpx.TimeoutException:
-                                pass
-                            except Exception:
-                                pass
-
-                        if hit:
-                            break  # move to next endpoint
+                                    matched = [
+                                        ind for ind in attack["success_indicators"]
+                                        if ind.lower() in response_text.lower()
+                                    ]
+                                    if matched:
+                                        f = _finding(
+                                            vuln_id=attack["id"],
+                                            url=base_url,
+                                            severity=attack["severity"],
+                                            title=f"{attack['name']} — '{tool_name}' Vulnerable",
+                                            description=attack["description"],
+                                            remediation=attack["remediation"],
+                                            owasp=attack["owasp"],
+                                            mitre=attack.get("mitre", ""),
+                                            tool_name=tool_name,
+                                            detail=f"Payload: {json.dumps(payload_params)} | Matched: {matched}",
+                                            evidence=response_text,
+                                        )
+                                        yield _sse("finding", f)
+                                        break  # one finding per tool per attack per endpoint
+                                except httpx.TimeoutException:
+                                    pass
+                                except Exception:
+                                    pass
 
         # ── Phase 4: Intelligence analysis ────────────────────────────────
         yield _sse("phase_start", {"phase": "intelligence", "message": "Running intelligence analysis"})
 
         # 4a: Malicious/suspicious tool detection
         if all_tools:
-            tool_flags = _check_tool_names(all_tools)
-            for flag in tool_flags:
-                sev = flag["severity"]
+            seen_tool_issues: set[str] = set()
+            for flag in _check_tool_names(all_tools):
+                key = f"{flag['tool']}:{flag['issue']}"
+                if key in seen_tool_issues:
+                    continue
+                seen_tool_issues.add(key)
+
                 issue = flag["issue"]
                 if issue == "malicious_keywords":
-                    title = f"Malicious Tool Detected: '{flag['tool']}'"
-                    desc = "A tool with known malicious keywords in its name/description was found on the MCP server."
-                    rem = "Remove this tool from the server. Audit the codebase for backdoors."
+                    title = f"Malicious Tool: '{flag['tool']}'"
+                    desc = "Tool name/description contains known malicious keywords."
+                    rem = "Remove this tool and audit the codebase for backdoors."
                 elif issue == "typosquatting":
                     title = f"Typosquatting Tool: '{flag['tool']}'"
-                    desc = "This tool name closely resembles a trusted MCP server, suggesting possible supply chain attack."
-                    rem = "Verify tool provenance. Only install MCP servers from trusted, verified publishers."
+                    desc = "Tool name closely resembles a trusted MCP server — possible supply chain attack."
+                    rem = "Verify tool provenance. Only install MCP servers from trusted publishers."
                 else:
-                    title = f"Suspicious Code Execution Tool: '{flag['tool']}'"
-                    desc = "This tool exposes shell/code execution capabilities that could be abused."
-                    rem = "Restrict tool capabilities. Require per-request authorization for execution tools."
+                    title = f"Suspicious Exec Tool: '{flag['tool']}'"
+                    desc = "Tool exposes shell/code execution capabilities that could be abused."
+                    rem = "Require per-request authorization for execution tools."
 
                 f = _finding(
                     vuln_id=f"tool_{issue}",
                     url=discovered_endpoints[0] if discovered_endpoints else target,
-                    severity=sev,
+                    severity=flag["severity"],
                     title=title,
                     description=desc,
                     remediation=rem,
@@ -705,65 +796,49 @@ async def _run_mcp_scan(
                 )
                 yield _sse("finding", f)
 
-        # 4b: Secrets/PII scan across all accumulated responses
-        secrets_response_cache: list[str] = []
-        for base_url in discovered_endpoints:
-            for probe in DISCOVERY_PROBES:
-                try:
-                    resp = await client.post(
-                        base_url,
-                        json=probe["payload"],
-                        headers={"Content-Type": "application/json"},
-                        timeout=5,
-                    )
-                    secrets_response_cache.append(resp.text)
-                except Exception:
-                    pass
-
-        combined_response = "\n".join(secrets_response_cache)
+        # 4b: Secrets/PII scan across all collected responses
+        combined_response = "\n".join(all_raw_responses)
         if combined_response:
-            secret_hits = _scan_for_secrets(combined_response)
-            for hit in secret_hits:
+            seen_secret_labels: set[str] = set()
+            for hit in _scan_for_secrets(combined_response):
+                if hit["label"] in seen_secret_labels:
+                    continue
+                seen_secret_labels.add(hit["label"])
                 f = _finding(
                     vuln_id="exposed_secret",
                     url=discovered_endpoints[0] if discovered_endpoints else target,
                     severity=hit["severity"],
-                    title=f"Exposed Secret in MCP Response: {hit['label']}",
-                    description=f"The MCP server response contains what appears to be a {hit['label']}. Credentials exposed via MCP endpoints can be harvested without authentication.",
-                    remediation="Remove all hardcoded secrets from MCP tool responses. Use environment variables and secret managers. Rotate any exposed credentials immediately.",
+                    title=f"Exposed Secret: {hit['label']}",
+                    description=f"MCP server response contains a {hit['label']}. Credentials exposed via unauthenticated MCP endpoints can be trivially harvested.",
+                    remediation="Remove hardcoded secrets from tool responses. Use environment variables + secret managers. Rotate any exposed credentials immediately.",
                     owasp="A02 - Cryptographic Failures",
                     mitre="AML.T0057 - LLM Data Leakage",
-                    detail=f"Detected pattern: {hit['label']}, preview: {hit['preview']}",
+                    detail=f"Pattern: {hit['label']}, preview: {hit['preview']}",
                 )
                 yield _sse("finding", f)
 
-        # 4c: Prompt injection in tool responses/descriptions
-        injection_search_text = combined_response
-        for tool in all_tools:
-            injection_search_text += "\n" + json.dumps(tool)
-        if injection_search_text:
-            inj_markers = _scan_for_prompt_injection(injection_search_text)
+        # 4c: Prompt injection scan across responses + tool descriptions
+        inj_corpus = combined_response + "\n" + "\n".join(json.dumps(t) for t in all_tools)
+        if inj_corpus.strip():
+            inj_markers = _scan_for_prompt_injection(inj_corpus)
             if inj_markers:
                 f = _finding(
                     vuln_id="indirect_prompt_injection",
                     url=discovered_endpoints[0] if discovered_endpoints else target,
                     severity="high",
-                    title="Indirect Prompt Injection in MCP Server",
-                    description="Prompt injection markers were found in MCP tool descriptions or responses. An attacker who controls tool output can inject instructions into the LLM context.",
-                    remediation="Sanitize all tool output before returning to the LLM. Implement a content filter layer. Use structured output formats (JSON schemas) to prevent free-form text injection.",
+                    title="Indirect Prompt Injection Markers Detected",
+                    description="Prompt injection markers found in MCP tool descriptions or responses. Attacker-controlled tool output can hijack LLM behavior.",
+                    remediation="Sanitize all tool output before it reaches the LLM. Use content filters and structured output schemas.",
                     owasp="A03 - Injection",
                     mitre="AML.T0054 - Prompt Injection",
-                    detail=f"Markers found: {inj_markers[:5]}",
+                    detail=f"Markers: {inj_markers[:5]}",
                 )
                 yield _sse("finding", f)
 
     # ── Summary ────────────────────────────────────────────────────────────
     sev_counts: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     for f in findings:
-        sev = f.get("severity", "info")
-        sev_counts[sev] = sev_counts.get(sev, 0) + 1
-
-    vuln_ids = list({f["vuln_id"] for f in findings})
+        sev_counts[f.get("severity", "info")] = sev_counts.get(f.get("severity", "info"), 0) + 1
 
     yield _sse("complete", {
         "target": target,
@@ -771,8 +846,8 @@ async def _run_mcp_scan(
         "endpoints_found": len(discovered_endpoints),
         "tools_enumerated": len(all_tools),
         "severity_counts": sev_counts,
-        "vuln_ids": vuln_ids,
-        "summary": f"MCP scan complete — {len(findings)} finding(s) across {len(discovered_endpoints)} endpoint(s)",
+        "vuln_ids": list({f["vuln_id"] for f in findings}),
+        "summary": f"MCP scan complete — {len(findings)} finding(s) across {len(discovered_endpoints)} confirmed endpoint(s)",
     })
 
 
