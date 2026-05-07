@@ -39,6 +39,9 @@ results/
 reports/
 screenshots/
 *.db
+*.db-shm
+*.db-wal
+tools/msra/uploads/
 config/config.yaml
 easd.yaml
 
