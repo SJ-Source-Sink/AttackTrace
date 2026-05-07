@@ -153,6 +153,7 @@ class AttackSuiteRequest(BaseModel):
     login: LoginConfig = LoginConfig()
     account2: Account2Config = Account2Config()
     ai_analysis: bool = True          # Use Claude to plan strategy + analyse responses
+    anthropic_api_key: Optional[str] = None  # Override key from frontend
 
     @field_validator("target")
     @classmethod
@@ -440,43 +441,127 @@ async def _perform_login(client: httpx.AsyncClient, cfg: LoginConfig,
 
 # ── AI Strategy Planner ───────────────────────────────────────────────────────
 
+# Condensed hunt skill techniques used as Claude context
+_HUNT_SKILL_CONTEXT = """
+HUNT SKILL TECHNIQUES (from bug bounty research):
+
+HTTP Request Smuggling:
+- CL.TE: send Content-Length + Transfer-Encoding; backend uses TE, frontend uses CL
+- TE.CL: reverse — frontend TE, backend CL
+- CL.0: backend ignores CL header entirely (common in static file servers & CDNs)
+- Detection: timing oracle — 5s+ delay on poisoned smuggled request confirms desync
+- High-value targets: load balancers, reverse proxies, CDN edges, API gateways
+
+CRLF Injection:
+- Inject %0d%0a in redirect params (redirect=, url=, next=, return=) to split HTTP response
+- XSS via response splitting: inject fake Content-Type + script body
+- Log poisoning: inject in User-Agent, X-Forwarded-For headers
+- Bypasses CSP script-src 'self' — injected content is served from same origin
+
+HTTP Parameter Pollution:
+- Duplicate params: id=legitimate&id=victim — backend may use last, WAF checks first
+- ACL IDOR bypass: /api/transfer?from=victim&from=attacker&amount=1000
+- WAF bypass: ?search=safe&search=<script> — WAF sees first, app processes second
+- PHP uses last value, Node/Express arrays, ASP.NET first value
+
+SAML Attacks:
+- Signature wrapping: move SignedInfo to different subtree, attacker controls assertions
+- XXE in SAMLResponse: <!ENTITY xxe SYSTEM "file:///etc/passwd">
+- Unsigned assertion: remove ds:Signature — some IdPs accept without validation
+- Attribute pollution: inject extra attributes after signed block
+
+WebSocket / CSWSH:
+- Cross-Site WebSocket Hijacking: ws:// endpoint accepts cross-origin connections
+- Test: connect from attacker origin — if handshake succeeds without CSRF token = vulnerable
+- Subprotocol abuse: negotiate different subprotocol to bypass auth checks
+- Common endpoints: /socket.io/, /ws, /websocket, /cable, /hub, /signalr
+
+JWT Attacks:
+- alg:none — set algorithm to "none", strip signature
+- RS256→HS256 confusion: sign with public key using HS256 when server expects RS256
+- Weak secrets: brute-force with jwt-cracker / hashcat
+- kid injection: "kid": "../../dev/null" or SQL in kid claim
+
+Mass Assignment:
+- Send extra fields in PUT/PATCH: {"role":"admin","isAdmin":true}
+- Look for user registration and profile update endpoints
+- Compare fields in GET response vs POST/PUT — undocumented writable fields
+
+IDOR Patterns:
+- REST: /api/users/{id}, /api/orders/{id}, /api/messages/{id}
+- Sequential IDs: try id-1, id+1, id*2
+- UUID prediction: UUIDv1 contains timestamp — predictable
+- Hash IDs: MD5/SHA of email or username — enumerate from user list
+"""
+
+
 async def _ai_plan_attack(target: str, tech_stack: list[str],
-                          endpoints: list[str], modules: list[str]) -> str:
-    """Use Claude to generate a prioritised attack strategy.
+                          endpoints: list[str], modules: list[str],
+                          api_key: str | None = None) -> str:
+    """Use Claude to generate a prioritised attack strategy using hunt skill context.
 
     Raises RuntimeError if API key is not configured.
     Raises any Anthropic API exception so the caller can emit a proper SSE error event.
     """
-    if not settings.ANTHROPIC_API_KEY:
+    effective_key = api_key or settings.ANTHROPIC_API_KEY
+    if not effective_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not configured")
 
     import anthropic
-    client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+    ac = anthropic.AsyncAnthropic(api_key=effective_key)
 
     system_prompt = (
-        "You are an expert penetration tester planning a security assessment. "
-        "Be concise, specific, and actionable. Focus only on high-impact findings."
+        "You are an expert penetration tester and bug bounty hunter. "
+        "You have deep knowledge of advanced web security techniques from real bug bounty reports. "
+        "Be concise, specific, and actionable. Focus only on high-impact, exploitable findings. "
+        "Reference the hunt skill techniques below when relevant.\n\n"
+        + _HUNT_SKILL_CONTEXT
     )
 
-    user_prompt = f"""Analyse this target and produce a prioritised attack strategy (max 200 words).
+    user_prompt = f"""Analyse this target and produce a prioritised attack strategy.
 
 TARGET: {target}
 TECH STACK: {', '.join(tech_stack) if tech_stack else 'unknown'}
-SAMPLE ENDPOINTS: {json.dumps(endpoints[:20])}
+DISCOVERED ENDPOINTS: {json.dumps(endpoints[:30])}
 MODULES RUNNING: {', '.join(modules)}
 
-Answer these three questions:
-1. Which vulnerability types are most likely given this tech stack?
-2. Which endpoints should be tested first and why?
-3. Any specific payloads or bypass techniques to prioritise?
+Provide:
+1. Top 3 most likely high-impact vulnerabilities for this specific tech stack (with reasoning)
+2. Which endpoints to prioritise and why (reference actual endpoints above)
+3. Specific hunt skill techniques most applicable to this target
+4. Any unusual attack angles given the tech stack (e.g., framework-specific quirks)
 
-Be specific. Reference the actual tech stack and endpoints above."""
+Max 250 words. Be specific — reference actual endpoints and tech detected above."""
 
-    msg = await client.messages.create(
-        model=settings.AI_MODEL,
-        max_tokens=350,
+    msg = await ac.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=500,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
+    )
+    return msg.content[0].text.strip()
+
+
+async def _ai_analyze_finding(finding: dict, target: str, api_key: str | None = None) -> str:
+    """Use Claude to deeply analyze a specific finding and suggest exploitation steps."""
+    effective_key = api_key or settings.ANTHROPIC_API_KEY
+    if not effective_key:
+        return ""
+
+    import anthropic
+    ac = anthropic.AsyncAnthropic(api_key=effective_key)
+
+    msg = await ac.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=200,
+        messages=[{"role": "user", "content": (
+            f"Security finding on {target}:\n"
+            f"Title: {finding.get('title')}\n"
+            f"Severity: {finding.get('severity')}\n"
+            f"Evidence: {str(finding.get('evidence', ''))[:300]}\n\n"
+            "In 2-3 sentences: what is the real-world impact and what is the fastest "
+            "exploitation path? Reference any relevant hunt skill technique."
+        )}],
     )
     return msg.content[0].text.strip()
 
@@ -4052,18 +4137,22 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGe
                 yield _sse("progress", {"message": f"Crawler error: {e}", "module": "crawl"})
 
         # ── AI Strategy Planning ───────────────────────────────────────────
-        if req.ai_analysis and crawl_result.tech_stack:
-            yield _sse("progress", {"message": "🤖 AI analyzing target and planning attack strategy...", "module": "ai"})
+        _ai_key = req.anthropic_api_key or settings.ANTHROPIC_API_KEY or None
+        if req.ai_analysis and _ai_key:
+            yield _sse("progress", {"message": "🤖 Claude analyzing target with hunt skill context...", "module": "ai"})
             try:
                 plan = await _ai_plan_attack(
                     req.target, crawl_result.tech_stack,
-                    list(crawl_result.endpoints)[:20], req.modules
+                    list(crawl_result.endpoints)[:30], req.modules,
+                    api_key=_ai_key,
                 )
                 if plan:
                     yield _sse("ai_plan", {"plan": plan, "tech_stack": crawl_result.tech_stack})
-                    yield _sse("progress", {"message": f"🤖 AI Strategy: {plan[:150]}...", "module": "ai"})
+                    yield _sse("progress", {"message": f"🤖 AI Strategy ready ({len(plan)} chars)", "module": "ai"})
             except Exception as e:
                 yield _sse("progress", {"message": f"AI planning skipped: {e}", "module": "ai"})
+        elif req.ai_analysis and not _ai_key:
+            yield _sse("progress", {"message": "⚠️ AI analysis enabled but no ANTHROPIC_API_KEY set — skipping", "module": "ai"})
 
         # ── Run modules ────────────────────────────────────────────────────
         # Collect WAF-specific bypass payloads for relevant modules
@@ -4115,15 +4204,23 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGe
             if mod_id == "crawl" or mod_id not in module_runners:
                 continue
             meta = next((m for m in MODULES_META if m["id"] == mod_id), {"label": mod_id})
-            yield _sse("progress", {"message": f"▶ Running: {meta['label']}...", "module": mod_id})
+            yield _sse("progress", {"message": f"[{mod_id}] ► Running: {meta['label']}...", "module": mod_id})
             try:
                 async for finding in module_runners[mod_id]():
+                    # AI deep-analysis for critical/high findings when key available
+                    if _ai_key and finding.get("is_vulnerable") and finding.get("severity") in ("critical", "high"):
+                        try:
+                            ai_note = await _ai_analyze_finding(finding, req.target, api_key=_ai_key)
+                            if ai_note:
+                                finding["ai_analysis"] = ai_note
+                        except Exception:
+                            pass
                     emit(finding)
                     yield _sse("finding", finding)
                     await asyncio.sleep(0)
             except Exception as e:
                 yield _sse("progress", {"message": f"Module {mod_id} error: {e}", "module": mod_id})
-            yield _sse("progress", {"message": f"✓ {meta['label']} done.", "module": mod_id})
+            yield _sse("progress", {"message": f"[{mod_id}] ✓ {meta['label']} done.", "module": mod_id})
 
         if client2:
             await client2.aclose()

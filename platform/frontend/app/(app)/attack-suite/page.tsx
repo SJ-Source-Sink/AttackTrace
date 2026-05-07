@@ -5,7 +5,7 @@ import {
   Swords, Play, Square, Download, ChevronDown, ChevronRight,
   Shield, AlertTriangle, CheckCircle2, XCircle,
   History, Plus, X, Loader2, Globe, LogIn, Users, BrainCircuit,
-  Network, Search,
+  Network, Search, Eye, EyeOff, Key,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -125,6 +125,7 @@ interface AttackFinding {
   url: string;
   is_vulnerable: boolean;
   remediation: string;
+  ai_analysis?: string;
 }
 
 interface ScanCounts {
@@ -224,6 +225,15 @@ function FindingCard({ finding }: { finding: AttackFinding }) {
               </div>
             </div>
           )}
+          {finding.ai_analysis && (
+            <div className="rounded-md border border-purple-600/30 bg-purple-600/5 p-2.5">
+              <div className="flex items-center gap-1.5 mb-1">
+                <BrainCircuit className="h-3 w-3 text-purple-400" />
+                <p className="text-[10px] text-purple-400 font-medium uppercase tracking-wider">Claude Analysis</p>
+              </div>
+              <p className="text-xs text-zinc-300 leading-relaxed">{finding.ai_analysis}</p>
+            </div>
+          )}
           {finding.remediation && (
             <div>
               <button
@@ -297,6 +307,10 @@ export default function AttackSuitePage() {
   const [followRedirects, setFollowRedirects] = useState(true);
   const [timeout, setTimeoutVal] = useState(15);
   const [aiAnalysis, setAiAnalysis] = useState(false);
+  const [anthropicKey, setAnthropicKey] = useState(() =>
+    typeof window !== "undefined" ? (localStorage.getItem("attack_suite_anthropic_key") ?? "") : ""
+  );
+  const [showApiKey, setShowApiKey] = useState(false);
 
   // Modules
   const [selectedModules, setSelectedModules] = useState<Set<string>>(
@@ -412,6 +426,7 @@ export default function AttackSuitePage() {
       follow_redirects: followRedirects,
       timeout,
       ai_analysis: aiAnalysis,
+      anthropic_api_key: anthropicKey.trim() || undefined,
       crawler: {
         enabled: crawlerEnabled,
         max_depth: crawlerDepth,
@@ -1279,19 +1294,52 @@ export default function AttackSuitePage() {
             </SectionToggle>
 
             {/* AI Analysis */}
-            <div className="rounded-lg border border-zinc-800 px-3 py-2.5 flex items-start gap-3">
-              <BrainCircuit className="h-4 w-4 text-purple-400 mt-0.5 shrink-0" />
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between gap-2">
-                  <div>
-                    <p className="text-xs font-medium text-zinc-300">AI Strategy Planner</p>
-                    <p className="text-[10px] text-zinc-500 mt-0.5 leading-relaxed">
-                      Claude fingerprints the target, plans a prioritised attack strategy, and analyses interesting responses.
-                      Requires <span className="font-mono text-zinc-400">ANTHROPIC_API_KEY</span>.
-                    </p>
+            <div className="rounded-lg border border-zinc-800 px-3 py-2.5 space-y-2.5">
+              <div className="flex items-start gap-3">
+                <BrainCircuit className="h-4 w-4 text-purple-400 mt-0.5 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <p className="text-xs font-medium text-zinc-300">AI Strategy Planner</p>
+                      <p className="text-[10px] text-zinc-500 mt-0.5 leading-relaxed">
+                        Claude analyzes target using hunt skill techniques, plans attack strategy, and deep-analyzes critical findings.
+                      </p>
+                    </div>
+                    <Switch checked={aiAnalysis} onCheckedChange={(v) => {
+                      setAiAnalysis(v);
+                    }} disabled={isScanning} />
                   </div>
-                  <Switch checked={aiAnalysis} onCheckedChange={setAiAnalysis} disabled={isScanning} />
                 </div>
+              </div>
+              {/* API Key input — always visible so users can configure it */}
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-1.5">
+                  <Key className="h-3 w-3 text-zinc-500" />
+                  <span className="text-[10px] text-zinc-500 font-medium">Anthropic API Key</span>
+                  {anthropicKey && <span className="text-[10px] text-emerald-500">● configured</span>}
+                </div>
+                <div className="relative">
+                  <input
+                    type={showApiKey ? "text" : "password"}
+                    placeholder="sk-ant-..."
+                    value={anthropicKey}
+                    onChange={(e) => {
+                      setAnthropicKey(e.target.value);
+                      localStorage.setItem("attack_suite_anthropic_key", e.target.value);
+                      if (e.target.value) setAiAnalysis(true);
+                    }}
+                    disabled={isScanning}
+                    className="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-zinc-300 font-mono placeholder:text-zinc-600 focus:outline-none focus:border-purple-500 pr-8"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowApiKey((v) => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
+                  >
+                    {showApiKey ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                  </button>
+                </div>
+                <p className="text-[10px] text-zinc-600">Saved to localStorage. Used for AI strategy + critical finding analysis.</p>
               </div>
             </div>
           </div>
