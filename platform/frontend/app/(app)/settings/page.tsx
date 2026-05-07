@@ -181,29 +181,6 @@ export default function SettingsPage() {
       {/* SLA Configuration */}
       {user?.org_id && <SlaConfigCard orgId={user.org_id} />}
 
-      {/* Danger Zone */}
-      <Card className="border-red-900/30">
-        <CardHeader>
-          <CardTitle className="text-base text-red-400">Danger Zone</CardTitle>
-          <CardDescription>Irreversible and destructive actions</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-center justify-between py-3 border-b border-zinc-800">
-            <div>
-              <p className="text-sm font-medium text-zinc-200">Delete all scan data</p>
-              <p className="text-xs text-zinc-500">Permanently delete all scans, assets, and findings</p>
-            </div>
-            <Button variant="destructive" size="sm">Delete Data</Button>
-          </div>
-          <div className="flex items-center justify-between pt-3">
-            <div>
-              <p className="text-sm font-medium text-zinc-200">Delete organization</p>
-              <p className="text-xs text-zinc-500">Permanently delete your organization and all data</p>
-            </div>
-            <Button variant="destructive" size="sm">Delete Organization</Button>
-          </div>
-        </CardContent>
-      </Card>
     </div>
   );
 }
