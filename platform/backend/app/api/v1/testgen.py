@@ -3903,38 +3903,50 @@ async def _stream_ai_testcases(payload: AIRequest) -> AsyncGenerator[str, None]:
     _nosql_sample = json.dumps(NOSQL_INJECTION_PAYLOADS[:3])
     _jwt_sample   = json.dumps(JWT_ALG_NONE_VARIANTS[:3] + JWT_WEAK_SECRETS[:3])
 
-    system_prompt = """You are a senior penetration tester generating a customized security test case plan.
-Respond with ONLY a valid JSON array — no markdown fences, no explanation.
-Each item must match this exact schema:
-{"id":"TC-AI-001","title":"string","category":"string","severity":"critical|high|medium|low|info","description":"string","attack_pattern":"string","steps":["step"],"expected_result":"string","cwe":"CWE-XXX or null","owasp":"AXX:2021 or null","tools":{"nuclei_tags":[],"nmap":[],"ffuf_wordlist":""},"applicable_to":["web"],"tags":["tag"]}"""
+    system_prompt = (
+        "You are a senior penetration tester generating a tailored security test plan. "
+        "Output ONLY a valid JSON array — no markdown fences, no prose, no explanation. "
+        "Every item MUST exactly match this schema (all keys required, use null for missing values):\n"
+        '{"id":"TC-AI-001","title":"string","category":"string",'
+        '"severity":"critical|high|medium|low|info","description":"string",'
+        '"attack_pattern":"string","steps":["step1","step2"],"expected_result":"string",'
+        '"cwe":"CWE-XXX or null","owasp":"AXX:2021 or null",'
+        '"tools":{"nuclei_tags":[],"nmap":[],"ffuf_wordlist":""},'
+        '"applicable_to":["web|api|network|mobile"],"tags":["tag"]}'
+    )
 
-    user_message = f"""Generate a comprehensive security test plan for:
+    user_message = f"""Generate a comprehensive, tailored security test plan.
+
 TARGET: {target_desc}
 TARGET TYPES: {types_desc}
 TECHNOLOGY STACK: {stack_desc}
 SCOPE: {scope_desc}{threat_model}
 
-Categories to cover: {', '.join(base_categories)}
+REQUIREMENTS:
+1. Generate 30-40 test cases specific to the tech stack above — not generic boilerplate
+2. For each technology in the stack, include at least one technology-specific test:
+   - Django/Flask → debug mode, SSTI, secret key exposure
+   - React/Next.js → DOM XSS, prototype pollution, exposed sourcemaps
+   - Spring Boot → Actuator endpoints, SpEL injection, Log4Shell
+   - Node.js/Express → prototype pollution, path traversal, deserialization
+   - PostgreSQL/MySQL → SQLi, out-of-band exfil, stacked queries
+   - AWS/GCP/Azure → SSRF to metadata, IAM misconfiguration, exposed buckets
+3. Reference real CVEs or OWASP WSTG test IDs (e.g. WSTG-INPV-01) where applicable
+4. Minimum 4 critical severity tests targeting the most likely impact chains
+5. Cover ALL categories: {', '.join(base_categories)}
+6. nuclei_tags must be real Nuclei template tags: cves, exposures, misconfig, takeovers, default-logins, etc.
+7. Each step must include a concrete command or payload — no vague instructions
+8. Severity distribution: ~10% critical, ~25% high, ~40% medium, ~20% low, ~5% info
 
-Rules:
-1. Generate 30-40 test cases tailored to this specific tech stack
-2. Include technology-specific tests (Django debug mode, React DOM XSS, Spring Actuator, etc.)
-3. Reference real CVEs or OWASP WSTG test IDs where applicable
-4. At least 4 critical severity tests
-5. Cover: auth, authz, injection, config, secrets, business logic, and supply chain
-6. Tool nuclei_tags must match real nuclei template tags (cves, exposures, misconfig, etc.)
-7. Steps must be actionable — include specific commands AND real payloads from the examples below
-8. Include at least one test case each for: XSS, SQLi, SSRF, SSTI, JWT, NoSQL if applicable
-
-Real payload examples to reference in your steps (use these, not made-up values):
-- XSS: {_xss_sample}
-- SQLi error+time: {_sqli_sample}
+REAL PAYLOADS TO USE IN YOUR STEPS (copy these exactly — do not invent payloads):
+- XSS vectors: {_xss_sample}
+- SQLi (error + time-based): {_sqli_sample}
 - SSRF targets: {_ssrf_sample}
 - SSTI probes: {_ssti_sample}
 - NoSQL operators: {_nosql_sample}
 - JWT attacks: {_jwt_sample}
 
-Return ONLY the JSON array."""
+OUTPUT: Return ONLY the JSON array. Do not wrap in an object. Do not add any text before or after the array."""
 
     try:
         full_text = ""
