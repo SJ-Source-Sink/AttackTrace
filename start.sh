@@ -244,6 +244,23 @@ cd "$REPO_ROOT"
 # ─── 7. Kill any existing processes ──────────────────────────────────────────
 header "Starting services"
 
+# Kill process holding a port (handles orphaned processes not tracked by .pids)
+kill_port() {
+  local port="$1"
+  local pids=""
+  if command -v lsof >/dev/null 2>&1; then
+    pids=$(lsof -ti :"$port" 2>/dev/null || true)
+  elif command -v fuser >/dev/null 2>&1; then
+    pids=$(fuser "${port}/tcp" 2>/dev/null | tr ' ' '\n' | grep -v '^$' || true)
+  fi
+  if [ -n "$pids" ]; then
+    echo "$pids" | xargs kill 2>/dev/null || true
+    sleep 1
+    echo "$pids" | xargs kill -9 2>/dev/null || true
+    info "Cleared port $port"
+  fi
+}
+
 kill_if_running() {
   local pidfile="$PIDS_DIR/$1.pid"
   if [ -f "$pidfile" ]; then
@@ -261,6 +278,11 @@ kill_if_running worker
 kill_if_running beat
 kill_if_running frontend
 kill_if_running msra
+
+# Also clear by port in case any process was started outside this script
+kill_port 8000   # backend
+kill_port 3000   # frontend
+kill_port 5001   # msra
 sleep 1
 
 UVICORN="$VENV_DIR/bin/uvicorn"

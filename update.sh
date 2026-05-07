@@ -299,8 +299,26 @@ cd "$REPO_ROOT"
 # ── Gracefully restart affected services ──────────────────────────────────────
 header "Restarting services"
 
+# Kill any process holding a port (handles orphans not tracked by .pids)
+kill_port() {
+  local port="$1"
+  local pids=""
+  if command -v lsof >/dev/null 2>&1; then
+    pids=$(lsof -ti :"$port" 2>/dev/null || true)
+  elif command -v fuser >/dev/null 2>&1; then
+    pids=$(fuser "${port}/tcp" 2>/dev/null | tr ' ' '\n' | grep -v '^$' || true)
+  fi
+  if [ -n "$pids" ]; then
+    echo "$pids" | xargs kill 2>/dev/null || true
+    sleep 1
+    echo "$pids" | xargs kill -9 2>/dev/null || true
+    info "Cleared port $port"
+  fi
+}
+
 restart_service() {
   local name="$1"
+  local port="${2:-}"   # optional port — kills any orphaned process on that port too
   local pidfile="$PIDS_DIR/${name}.pid"
 
   if [ -f "$pidfile" ]; then
@@ -319,6 +337,9 @@ restart_service() {
     fi
     rm -f "$pidfile"
   fi
+
+  # Also free the port in case the process was started outside this script
+  [ -n "$port" ] && kill_port "$port"
 }
 
 if [ "$BACKEND_CHANGED" = true ]; then
@@ -326,7 +347,7 @@ if [ "$BACKEND_CHANGED" = true ]; then
   # A hot-reload (touch) is not enough — it doesn't re-install packages or
   # re-run sys.path manipulation added at module load time.
   info "Restarting backend..."
-  restart_service backend
+  restart_service backend 8000
   cd "$BACKEND_DIR"
   "$UVICORN" app.main:app --host 0.0.0.0 --port 8000 --reload \
     > "$LOGS_DIR/backend.log" 2>&1 &
@@ -357,7 +378,7 @@ fi
 
 if [ "$FRONTEND_CHANGED" = true ]; then
   info "Restarting frontend..."
-  restart_service frontend
+  restart_service frontend 3000
   npm --prefix "$FRONTEND_DIR" run dev \
     > "$LOGS_DIR/frontend.log" 2>&1 &
   echo $! > "$PIDS_DIR/frontend.pid"
