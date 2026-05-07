@@ -13,6 +13,7 @@ import { useCreateFinding } from "@/hooks/use-findings";
 import { toast } from "sonner";
 import type { FindingFilters, FindingSeverity, FindingStatus } from "@/types";
 import { API_BASE } from "@/lib/api";
+import { getAccessToken, fetchWithAuth } from "@/lib/auth";
 
 const SEVERITIES: FindingSeverity[] = ["critical", "high", "medium", "low", "info"];
 const STATUSES: FindingStatus[] = ["open", "in_progress", "remediated", "accepted_risk", "false_positive"];
@@ -430,10 +431,9 @@ export default function FindingsPage() {
     if (selectedIds.size === 0) return;
     setBulkLoading(true);
     try {
-      const token = localStorage.getItem("access_token") || "";
-      const resp = await fetch(`${API_BASE}/findings/bulk-status`, {
+      const resp = await fetchWithAuth(`${API_BASE}/findings/bulk-status`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ finding_ids: Array.from(selectedIds), status }),
       });
       if (!resp.ok) throw new Error("Bulk status update failed");
@@ -449,10 +449,9 @@ export default function FindingsPage() {
   const handleExportSelected = async () => {
     if (selectedIds.size === 0) return;
     try {
-      const token = localStorage.getItem("access_token") || "";
       const ids = Array.from(selectedIds).join(",");
       const url = `${API_BASE}/findings/export?fmt=csv&finding_ids=${encodeURIComponent(ids)}`;
-      const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      const resp = await fetchWithAuth(url);
       if (!resp.ok) { toast.error("Export failed"); return; }
       const blob = await resp.blob();
       const a = document.createElement("a");
@@ -466,10 +465,7 @@ export default function FindingsPage() {
 
   const handleExportAll = async () => {
     try {
-      const token = localStorage.getItem("access_token") || "";
-      const resp = await fetch(`${API_BASE}/findings/export?fmt=csv`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const resp = await fetchWithAuth(`${API_BASE}/findings/export?fmt=csv`);
       if (!resp.ok) { toast.error("Export failed"); return; }
       const blob = await resp.blob();
       const a = document.createElement("a");
