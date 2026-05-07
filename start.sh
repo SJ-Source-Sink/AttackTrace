@@ -299,10 +299,11 @@ npm --prefix "$FRONTEND_DIR" run dev \
 echo $! > "$PIDS_DIR/frontend.pid"
 ok "Frontend started (pid $(cat "$PIDS_DIR/frontend.pid")) → logs/frontend.log"
 
-# MSRA (Mobile Security Review Assistant) — optional sidecar on port 5001
-# Looks for MSRA in common locations; set MSRA_DIR env var to override.
+# MSRA (Mobile Security Review Assistant) — sidecar on port 5001
+# Bundled at tools/msra/server.py; set MSRA_DIR env var to override location.
 if [ -z "${MSRA_DIR:-}" ]; then
   for candidate in \
+    "$REPO_ROOT/tools/msra" \
     "$REPO_ROOT/../MSRA" \
     "$HOME/MSRA" \
     "/opt/msra" \
@@ -314,6 +315,11 @@ if [ -z "${MSRA_DIR:-}" ]; then
   done
 fi
 if [ -n "${MSRA_DIR:-}" ] && [ -f "$MSRA_DIR/server.py" ]; then
+  # Install MSRA dependencies if requirements.txt present
+  if [ -f "$MSRA_DIR/requirements.txt" ]; then
+    info "Installing MSRA dependencies..."
+    pip3 install -q -r "$MSRA_DIR/requirements.txt" 2>/dev/null || true
+  fi
   info "Starting MSRA mobile scanner sidecar..."
   cd "$MSRA_DIR"
   python3 server.py > "$LOGS_DIR/msra.log" 2>&1 &
@@ -321,7 +327,7 @@ if [ -n "${MSRA_DIR:-}" ] && [ -f "$MSRA_DIR/server.py" ]; then
   ok "MSRA started (pid $(cat "$PIDS_DIR/msra.pid")) → logs/msra.log"
   cd "$REPO_ROOT"
 else
-  info "MSRA not found — mobile scanner will be unavailable (set MSRA_DIR env var to enable)"
+  warn "MSRA server.py not found — mobile scanner will be unavailable"
 fi
 
 # ─── 8. Wait for backend to be ready ─────────────────────────────────────────
