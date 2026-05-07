@@ -18,18 +18,78 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import uuid as _uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, Any, AsyncGenerator
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.core.config import get_settings as _get_settings
 from app.core.dependencies import get_current_org_id, get_current_user
 from app.models.db.user import User
 
 router = APIRouter(prefix="/mcp-scanner", tags=["MCP Scanner"])
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Scan history storage (filesystem JSON)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _history_dir(org_id: str) -> Path:
+    d = Path(_get_settings().ATTACKTRACE_WORKSPACE_DIR) / "mcp_scanner" / org_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _save_scan_result(org_id: str, record: dict) -> None:
+    try:
+        path = _history_dir(org_id) / f"{record['id']}.json"
+        path.write_text(json.dumps(record, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def _load_history(org_id: str, limit: int = 50) -> list[dict]:
+    try:
+        files = sorted(
+            _history_dir(org_id).glob("*.json"),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )[:limit]
+        records = []
+        for f in files:
+            try:
+                records.append(json.loads(f.read_text()))
+            except Exception:
+                pass
+        return records
+    except Exception:
+        return []
+
+
+def _load_scan(org_id: str, scan_id: str) -> dict | None:
+    try:
+        path = _history_dir(org_id) / f"{scan_id}.json"
+        if path.exists():
+            return json.loads(path.read_text())
+    except Exception:
+        pass
+    return None
+
+
+def _delete_scan_record(org_id: str, scan_id: str) -> bool:
+    try:
+        path = _history_dir(org_id) / f"{scan_id}.json"
+        if path.exists():
+            path.unlink()
+            return True
+    except Exception:
+        pass
+    return False
 
 # ──────────────────────────────────────────────────────────────────────────────
 # MCP endpoint paths to probe
@@ -442,8 +502,13 @@ async def _run_mcp_scan(
     timeout: int,
     check_sse: bool,
     run_attacks: bool,
+    scan_id: str = "",
+    org_id: str = "",
 ) -> AsyncGenerator[str, None]:
     target = target_url.rstrip("/")
+    if not scan_id:
+        scan_id = str(_uuid.uuid4())
+    started_at = datetime.now(timezone.utc).isoformat()
 
     findings: list[dict] = []
     discovered_endpoints: list[str] = []  # confirmed MCP endpoints
@@ -453,6 +518,7 @@ async def _run_mcp_scan(
     confirmed_urls: set[str] = set()
 
     yield _sse("start", {
+        "scan_id": scan_id,
         "target": target,
         "phases": ["discovery", "enumeration", "attack", "intelligence"],
         "checks": len(DISCOVERY_PROBES) * len(MCP_ENDPOINTS) + len(MCP_SSE_ENDPOINTS),
@@ -840,7 +906,8 @@ async def _run_mcp_scan(
     for f in findings:
         sev_counts[f.get("severity", "info")] = sev_counts.get(f.get("severity", "info"), 0) + 1
 
-    yield _sse("complete", {
+    complete_payload = {
+        "scan_id": scan_id,
         "target": target,
         "total_findings": len(findings),
         "endpoints_found": len(discovered_endpoints),
@@ -848,7 +915,22 @@ async def _run_mcp_scan(
         "severity_counts": sev_counts,
         "vuln_ids": list({f["vuln_id"] for f in findings}),
         "summary": f"MCP scan complete — {len(findings)} finding(s) across {len(discovered_endpoints)} confirmed endpoint(s)",
-    })
+    }
+    yield _sse("complete", complete_payload)
+
+    # Persist to history
+    if org_id:
+        _save_scan_result(org_id, {
+            "id": scan_id,
+            "target": target,
+            "started_at": started_at,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "endpoints_found": len(discovered_endpoints),
+            "tools_enumerated": len(all_tools),
+            "findings": findings,
+            "severity_counts": sev_counts,
+            "vuln_ids": list({f["vuln_id"] for f in findings}),
+        })
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -876,16 +958,67 @@ async def scan_mcp_server(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="target or target_url is required",
         )
+    scan_id = str(_uuid.uuid4())
     return StreamingResponse(
         _run_mcp_scan(
             payload.resolved_target,
             payload.timeout,
             payload.check_sse,
             payload.run_attacks,
+            scan_id=scan_id,
+            org_id=str(org_id),
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/history", summary="List previous MCP scanner scans")
+async def list_history(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> dict:
+    records = _load_history(str(org_id), limit=limit)
+    # Return lightweight summaries (no full findings list)
+    summaries = []
+    for r in records:
+        summaries.append({
+            "id": r.get("id"),
+            "target": r.get("target"),
+            "started_at": r.get("started_at"),
+            "completed_at": r.get("completed_at"),
+            "endpoints_found": r.get("endpoints_found", 0),
+            "tools_enumerated": r.get("tools_enumerated", 0),
+            "total_findings": len(r.get("findings", [])),
+            "severity_counts": r.get("severity_counts", {}),
+            "vuln_ids": r.get("vuln_ids", []),
+        })
+    return {"items": summaries, "total": len(summaries)}
+
+
+@router.get("/history/{scan_id}", summary="Get full details of a previous MCP scan")
+async def get_history_scan(
+    scan_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+) -> dict:
+    record = _load_scan(str(org_id), scan_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return record
+
+
+@router.delete("/history/{scan_id}", summary="Delete a previous MCP scan record")
+async def delete_history_scan(
+    scan_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+) -> dict:
+    deleted = _delete_scan_record(str(org_id), scan_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return {"deleted": True, "scan_id": scan_id}
 
 
 @router.get(

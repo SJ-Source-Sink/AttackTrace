@@ -21,6 +21,11 @@ import {
   Globe,
   Database,
   Key,
+  History,
+  Trash2,
+  ArrowLeft,
+  Clock,
+  RotateCcw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -70,6 +75,22 @@ interface ScanComplete {
   severity_counts: Record<Severity, number>;
   vuln_ids: string[];
   summary: string;
+}
+
+interface HistoryScan {
+  id: string;
+  target: string;
+  started_at: string;
+  completed_at: string;
+  endpoints_found: number;
+  tools_enumerated: number;
+  total_findings: number;
+  severity_counts: Record<Severity, number>;
+  vuln_ids: string[];
+}
+
+interface FullHistoryScan extends HistoryScan {
+  findings: MCPFinding[];
 }
 
 interface VulnCheck {
@@ -225,7 +246,193 @@ function FindingCard({ finding, index }: { finding: MCPFinding; index: number })
   );
 }
 
+// ── History Tab ───────────────────────────────────────────────────────────────
+
+function HistoryTab({ onRestore }: { onRestore: (target: string) => void }) {
+  const [scans, setScans] = useState<HistoryScan[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<FullHistoryScan | null>(null);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+
+  useEffect(() => {
+    fetchWithAuth(`${API_BASE}/mcp-scanner/history`)
+      .then((r) => r.ok ? r.json() : { items: [] })
+      .then((d) => setScans(d.items ?? []))
+      .catch(() => setScans([]))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const deleteScan = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    await fetchWithAuth(`${API_BASE}/mcp-scanner/history/${id}`, { method: "DELETE" });
+    setScans((prev) => prev.filter((s) => s.id !== id));
+    if (selected?.id === id) setSelected(null);
+    toast.success("Scan deleted");
+  };
+
+  const openDetail = async (scan: HistoryScan) => {
+    setLoadingDetail(true);
+    try {
+      const r = await fetchWithAuth(`${API_BASE}/mcp-scanner/history/${scan.id}`);
+      if (r.ok) setSelected(await r.json());
+    } finally {
+      setLoadingDetail(false);
+    }
+  };
+
+  if (selected) {
+    const sorted = [...(selected.findings ?? [])].sort(
+      (a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity)
+    );
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" onClick={() => setSelected(null)} className="gap-1.5 text-zinc-400">
+            <ArrowLeft className="h-4 w-4" /> Back to history
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="gap-1.5 ml-auto"
+            onClick={() => { onRestore(selected.target); toast.info("Target restored"); }}
+          >
+            <RotateCcw className="h-3.5 w-3.5" /> Restore to Scanner
+          </Button>
+        </div>
+
+        <Card>
+          <CardContent className="pt-4 space-y-3">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-mono text-blue-400 break-all">{selected.target}</p>
+                <p className="text-[10px] text-zinc-500 mt-0.5">
+                  {new Date(selected.started_at).toLocaleString()}
+                </p>
+              </div>
+              <div className="flex gap-2 shrink-0">
+                {(["critical", "high", "medium"] as Severity[]).map((s) =>
+                  (selected.severity_counts?.[s] ?? 0) > 0 ? (
+                    <Badge key={s} className={cn("text-[10px] border", SEVERITY_STYLES[s])}>
+                      {selected.severity_counts[s]} {s}
+                    </Badge>
+                  ) : null
+                )}
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <div className="rounded bg-zinc-800/50 p-2 text-center">
+                <p className="text-lg font-bold text-zinc-100">{selected.total_findings}</p>
+                <p className="text-[10px] text-zinc-500">Findings</p>
+              </div>
+              <div className="rounded bg-zinc-800/50 p-2 text-center">
+                <p className="text-lg font-bold text-zinc-100">{selected.endpoints_found}</p>
+                <p className="text-[10px] text-zinc-500">Endpoints</p>
+              </div>
+              <div className="rounded bg-zinc-800/50 p-2 text-center">
+                <p className="text-lg font-bold text-zinc-100">{selected.tools_enumerated}</p>
+                <p className="text-[10px] text-zinc-500">Tools</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {sorted.length > 0 ? (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-semibold text-zinc-300 flex items-center gap-2">
+                <ShieldAlert className="h-4 w-4 text-orange-400" />
+                Findings ({sorted.length})
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {sorted.map((f, i) => <FindingCard key={i} finding={f} index={i} />)}
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="flex flex-col items-center py-12 text-center">
+            <CheckCircle2 className="h-8 w-8 text-emerald-500 mb-2" />
+            <p className="text-sm text-emerald-400">No findings recorded for this scan</p>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-16">
+        <div className="h-2 w-2 rounded-full bg-blue-400 animate-pulse mr-2" />
+        <span className="text-xs text-zinc-500">Loading history...</span>
+      </div>
+    );
+  }
+
+  if (scans.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-zinc-800 py-16 text-center">
+        <History className="h-10 w-10 text-zinc-700 mb-3" />
+        <p className="text-sm font-medium text-zinc-500">No scan history yet</p>
+        <p className="text-xs text-zinc-600 mt-1">Run your first MCP scan to see results here</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {scans.map((scan) => {
+        const crit = scan.severity_counts?.critical ?? 0;
+        const high = scan.severity_counts?.high ?? 0;
+        return (
+          <Card
+            key={scan.id}
+            className="cursor-pointer hover:border-zinc-600 transition-colors"
+            onClick={() => openDetail(scan)}
+          >
+            <CardContent className="pt-3 pb-3">
+              <div className="flex items-start gap-3">
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-mono text-blue-400 truncate">{scan.target}</p>
+                  <div className="flex items-center gap-2 mt-1 flex-wrap">
+                    <span className="flex items-center gap-1 text-[10px] text-zinc-500">
+                      <Clock className="h-3 w-3" />
+                      {new Date(scan.started_at).toLocaleString()}
+                    </span>
+                    <span className="text-[10px] text-zinc-600">•</span>
+                    <span className="text-[10px] text-zinc-500">{scan.endpoints_found} endpoint(s)</span>
+                    <span className="text-[10px] text-zinc-600">•</span>
+                    <span className="text-[10px] text-zinc-500">{scan.tools_enumerated} tool(s)</span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {crit > 0 && (
+                    <Badge className={cn("text-[10px] border", SEVERITY_STYLES.critical)}>{crit} critical</Badge>
+                  )}
+                  {high > 0 && (
+                    <Badge className={cn("text-[10px] border", SEVERITY_STYLES.high)}>{high} high</Badge>
+                  )}
+                  {crit === 0 && high === 0 && (
+                    <Badge className="text-[10px] border border-zinc-700 text-zinc-500">
+                      {scan.total_findings} finding(s)
+                    </Badge>
+                  )}
+                  <button
+                    onClick={(e) => deleteScan(scan.id, e)}
+                    className="p-1 rounded hover:bg-red-900/30 text-zinc-600 hover:text-red-400 transition-colors"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function MCPScannerPage() {
+  const [activeTab, setActiveTab] = useState<"scan" | "history">("scan");
   const [target, setTarget] = useState("");
   const [checkSse, setCheckSse] = useState(true);
   const [runAttacks, setRunAttacks] = useState(true);
@@ -414,7 +621,42 @@ export default function MCPScannerPage() {
         )}
       </PageHeader>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+      {/* Tab switcher */}
+      <div className="flex gap-1 rounded-lg bg-zinc-900 border border-zinc-800 p-1 w-fit">
+        <button
+          onClick={() => setActiveTab("scan")}
+          className={cn(
+            "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors",
+            activeTab === "scan"
+              ? "bg-zinc-700 text-zinc-100"
+              : "text-zinc-500 hover:text-zinc-300"
+          )}
+        >
+          <Shield className="h-3.5 w-3.5" /> Scan
+        </button>
+        <button
+          onClick={() => setActiveTab("history")}
+          className={cn(
+            "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors",
+            activeTab === "history"
+              ? "bg-zinc-700 text-zinc-100"
+              : "text-zinc-500 hover:text-zinc-300"
+          )}
+        >
+          <History className="h-3.5 w-3.5" /> History
+        </button>
+      </div>
+
+      {activeTab === "history" && (
+        <HistoryTab
+          onRestore={(tgt) => {
+            setTarget(tgt);
+            setActiveTab("scan");
+          }}
+        />
+      )}
+
+      {activeTab !== "history" && <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         {/* ── Config panel ──────────────────────────────────────────────── */}
         <div className="space-y-4">
           <Card>
@@ -694,7 +936,7 @@ export default function MCPScannerPage() {
             </div>
           )}
         </div>
-      </div>
+      </div>}
     </div>
   );
 }
