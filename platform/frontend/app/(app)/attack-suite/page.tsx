@@ -53,31 +53,38 @@ const MODULES = [
   { id: "file_upload",    label: "File Upload Bypass",     category: "Injection",  description: "Extension bypass, null-byte, size limit, type restriction bypass" },
   { id: "info_disclosure", label: "Info Disclosure",       category: "Recon",      description: "Backup files, .env, Git exposure, FTP directory, log files" },
   { id: "deserialization", label: "Deserialization",       category: "Injection",  description: "Prototype pollution, zip bomb, XML billion laughs" },
+  // Hunt-skill modules
+  { id: "smuggling",       label: "HTTP Smuggling",         category: "Injection",  description: "CL.TE/TE.CL/CL.0 desync — high-value reverse proxy target ($30k–$46k)" },
+  { id: "crlf",            label: "CRLF Injection",         category: "Injection",  description: "Response splitting → XSS past CSP script-src 'self', log poisoning" },
+  { id: "hpp",             label: "HTTP Param Pollution",   category: "Access",     description: "ACL IDOR bypass via duplicate params, WAF evasion ($13.5k confirmed)" },
+  { id: "saml",            label: "SAML Attacks",           category: "Auth",       description: "Signature wrapping, XXE in SAMLResponse, attribute pollution → admin ATO" },
+  { id: "websocket",       label: "WebSocket / CSWSH",      category: "Access",     description: "Cross-Site WebSocket Hijacking — no CORS protection, Origin not checked" },
 ];
 
 const PRESETS: Record<string, { label: string; description: string; modules: string[] }> = {
   quick: {
     label: "Quick",
     description: "Fast surface scan (~2 min)",
-    modules: ["crawl", "headers", "cors", "xss", "sqli", "idor", "auth_bypass", "info_disclosure"],
+    modules: ["crawl", "headers", "cors", "xss", "sqli", "idor", "auth_bypass", "info_disclosure", "crlf"],
   },
   standard: {
     label: "Standard",
-    description: "Comprehensive scan (~8 min)",
+    description: "Comprehensive scan (~10 min)",
     modules: ["crawl", "headers", "cors", "csrf", "xss", "sqli", "nosql", "ssrf", "idor",
               "privilege", "account", "broken_auth", "rate_limit", "session", "jwt",
-              "auth_bypass", "http_method", "redirect", "graphql", "file_upload", "info_disclosure"],
+              "auth_bypass", "http_method", "redirect", "graphql", "file_upload", "info_disclosure",
+              "crlf", "hpp", "websocket"],
   },
   auth_focus: {
     label: "Auth Deep-Dive",
     description: "All auth & access modules",
     modules: ["crawl", "cors", "csrf", "idor", "privilege", "account", "broken_auth",
               "rate_limit", "session", "2fa_bypass", "oauth", "jwt", "auth_bypass",
-              "http_method", "redirect"],
+              "http_method", "redirect", "saml", "hpp"],
   },
   full: {
     label: "Full Scan",
-    description: "All 29 modules (~15 min)",
+    description: "All 34 modules (~20 min)",
     modules: MODULES.map((m) => m.id),
   },
 };

