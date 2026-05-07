@@ -136,6 +136,13 @@ export interface ScanStats {
   duration_seconds?: number;
 }
 
+export interface ScanModuleStatus {
+  module: string;
+  status: "pending" | "running" | "completed" | "failed" | "skipped";
+  findings_count?: number;
+  error?: string;
+}
+
 export interface Scan {
   id: string;
   org_id: string;

@@ -24,24 +24,63 @@ import { toast } from "sonner";
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
 
 const MODULES = [
-  { id: "crawl",      label: "Web Crawler",          description: "BFS crawl: discovers all endpoints, forms, params, and IDs before testing" },
-  { id: "headers",    label: "Security Headers",      description: "Missing/misconfigured HTTP security headers (CSP, HSTS, CORS, X-Frame-Options)" },
-  { id: "cors",       label: "CORS Misconfiguration", description: "Reflected origin, null origin, subdomain bypass — #2 in dataset (1050 reports)" },
-  { id: "csrf",       label: "CSRF Bypass",           description: "SameSite bypass, missing tokens, login CSRF — #3 in dataset (660 reports)" },
-  { id: "xss",        label: "XSS Scanner",           description: "Reflected & stored XSS in discovered forms and URL params (611 stored XSS reports)" },
-  { id: "sqli",       label: "SQL Injection",         description: "Time-based blind and error-based SQLi across all discovered parameters" },
-  { id: "ssrf",       label: "SSRF Prober",           description: "Cloud metadata, internal services — 79 SSRF + 18 blind SSRF reports" },
-  { id: "idor",       label: "IDOR Scanner",          description: "Cross-account access on crawled endpoints — #1 in dataset (1854 reports)" },
-  { id: "privilege",  label: "Privilege Escalation",  description: "Mass assignment, role tampering, admin paths — 276 reports" },
-  { id: "account",    label: "Account Takeover",      description: "Password reset host injection, email change, OAuth flow — 167 reports" },
-  { id: "cache",      label: "Cache Poisoning",       description: "Unkeyed header injection (X-Forwarded-Host, X-Host) — 104 reports" },
-  { id: "race",       label: "Race Conditions",       description: "Parallel request attacks on state-changing endpoints — 39 reports" },
-  { id: "business",   label: "Business Logic",        description: "Negative price, quantity overflow, coupon stacking — 51 reports" },
-  { id: "graphql",    label: "GraphQL Inspector",     description: "Introspection, batch abuse, auth bypass — 175 reports" },
-  { id: "jwt",        label: "JWT Analyzer",          description: "alg:none, weak secrets, kid injection, claims exposure — 60 reports" },
-  { id: "redirect",   label: "Open Redirect",         description: "OAuth redirect_uri, redirect param bypass — 168 reports, chains to ATO" },
-  { id: "auth_bypass", label: "Auth Bypass",          description: "Admin paths, X-Forwarded-For, method override, sensitive file exposure" },
+  { id: "crawl",          label: "Web Crawler",           category: "Recon",      description: "BFS crawl: discovers all endpoints, forms, params, and IDs before testing" },
+  { id: "headers",        label: "Security Headers",       category: "Hardening",  description: "Missing/misconfigured HTTP security headers (CSP, HSTS, CORS, X-Frame-Options)" },
+  { id: "cors",           label: "CORS Misconfiguration",  category: "Access",     description: "Reflected origin, null origin, subdomain bypass — #2 in dataset (1050 reports)" },
+  { id: "csrf",           label: "CSRF Bypass",            category: "Access",     description: "SameSite bypass, missing tokens, login CSRF — #3 in dataset (660 reports)" },
+  { id: "xss",            label: "XSS Scanner",            category: "Injection",  description: "Reflected & stored XSS in discovered forms and URL params (611 stored XSS reports)" },
+  { id: "sqli",           label: "SQL Injection",          category: "Injection",  description: "Time-based blind and error-based SQLi across all discovered parameters" },
+  { id: "nosql",          label: "NoSQL Injection",        category: "Injection",  description: "MongoDB operator injection, auth bypass — 43 reports" },
+  { id: "ssti",           label: "SSTI Detection",         category: "Injection",  description: "Server-side template injection in Jinja2, Freemarker, Twig, SpEL, ERB" },
+  { id: "xxe",            label: "XXE Injection",          category: "Injection",  description: "XML External Entity attacks on XML-accepting endpoints and file uploads" },
+  { id: "ssrf",           label: "SSRF Prober",            category: "Injection",  description: "Cloud metadata, internal services — 79 SSRF + 18 blind SSRF reports" },
+  { id: "idor",           label: "IDOR Scanner",           category: "Access",     description: "Cross-account access on crawled endpoints — #1 in dataset (1854 reports)" },
+  { id: "privilege",      label: "Privilege Escalation",   category: "Access",     description: "Mass assignment, role tampering, admin paths — 276 reports" },
+  { id: "account",        label: "Account Takeover",       category: "Auth",       description: "Password reset host injection, email change, OAuth flow — 167 reports" },
+  { id: "broken_auth",    label: "Broken Authentication",  category: "Auth",       description: "Weak/default credentials, password strength, brute-force protection" },
+  { id: "rate_limit",     label: "Rate Limit / Lockout",   category: "Auth",       description: "Brute-force protection, account lockout, OTP rate limiting, X-Forwarded-For bypass" },
+  { id: "session",        label: "Session Management",     category: "Auth",       description: "Session fixation, cookie flags (HttpOnly/Secure/SameSite), logout invalidation" },
+  { id: "2fa_bypass",     label: "2FA/MFA Bypass",         category: "Auth",       description: "OTP null code, brute force, step skip — common in auth-heavy apps" },
+  { id: "oauth",          label: "OAuth Misconfiguration", category: "Auth",       description: "Open redirect in callback, missing state parameter, PKCE bypass, token leakage" },
+  { id: "jwt",            label: "JWT Analyzer",           category: "Auth",       description: "alg:none, weak secrets, kid injection, RS256→HS256 confusion, expired acceptance" },
+  { id: "auth_bypass",    label: "Auth Bypass",            category: "Auth",       description: "Admin paths, X-Forwarded-For, X-Original-URL, method override, path traversal" },
+  { id: "http_method",    label: "HTTP Method Tampering",  category: "Access",     description: "PUT/DELETE/PATCH on GET-only endpoints, X-HTTP-Method-Override, TRACE" },
+  { id: "cache",          label: "Cache Poisoning",        category: "Injection",  description: "Unkeyed header injection (X-Forwarded-Host, X-Host) — 104 reports" },
+  { id: "redirect",       label: "Open Redirect",          category: "Access",     description: "OAuth redirect_uri, redirect param bypass — 168 reports, chains to ATO" },
+  { id: "graphql",        label: "GraphQL Inspector",      category: "API",        description: "Introspection, batch abuse, auth bypass — 175 reports" },
+  { id: "race",           label: "Race Conditions",        category: "Logic",      description: "Parallel request attacks on state-changing endpoints — 39 reports" },
+  { id: "business",       label: "Business Logic",         category: "Logic",      description: "Negative price, quantity overflow, coupon stacking — 51 reports" },
+  { id: "file_upload",    label: "File Upload Bypass",     category: "Injection",  description: "Extension bypass, null-byte, size limit, type restriction bypass" },
+  { id: "info_disclosure", label: "Info Disclosure",       category: "Recon",      description: "Backup files, .env, Git exposure, FTP directory, log files" },
+  { id: "deserialization", label: "Deserialization",       category: "Injection",  description: "Prototype pollution, zip bomb, XML billion laughs" },
 ];
+
+const PRESETS: Record<string, { label: string; description: string; modules: string[] }> = {
+  quick: {
+    label: "Quick",
+    description: "Fast surface scan (~2 min)",
+    modules: ["crawl", "headers", "cors", "xss", "sqli", "idor", "auth_bypass", "info_disclosure"],
+  },
+  standard: {
+    label: "Standard",
+    description: "Comprehensive scan (~8 min)",
+    modules: ["crawl", "headers", "cors", "csrf", "xss", "sqli", "nosql", "ssrf", "idor",
+              "privilege", "account", "broken_auth", "rate_limit", "session", "jwt",
+              "auth_bypass", "http_method", "redirect", "graphql", "file_upload", "info_disclosure"],
+  },
+  auth_focus: {
+    label: "Auth Deep-Dive",
+    description: "All auth & access modules",
+    modules: ["crawl", "cors", "csrf", "idor", "privilege", "account", "broken_auth",
+              "rate_limit", "session", "2fa_bypass", "oauth", "jwt", "auth_bypass",
+              "http_method", "redirect"],
+  },
+  full: {
+    label: "Full Scan",
+    description: "All 29 modules (~15 min)",
+    modules: MODULES.map((m) => m.id),
+  },
+};
 
 const SEV_COLORS: Record<string, string> = {
   critical: "bg-red-600/10 text-red-400 border-red-600/30",
@@ -301,6 +340,16 @@ export default function AttackSuitePage() {
   const [scanId, setScanId] = useState<string | null>(null);
   const [wafInfo, setWafInfo] = useState<WafInfo | null>(null);
 
+  // Test auth state
+  const [testAuthResult, setTestAuthResult] = useState<{
+    reachable?: boolean;
+    auth_success?: boolean;
+    auth_type?: string;
+    tech_stack?: string[];
+    error?: string;
+  } | null>(null);
+  const [testingAuth, setTestingAuth] = useState(false);
+
   // History
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [showHistory, setShowHistory] = useState(false);
@@ -496,6 +545,48 @@ export default function AttackSuitePage() {
     toast.info("Scan stopped");
   };
 
+  const testAuth = useCallback(async () => {
+    if (!target.trim()) { toast.error("Enter a target URL first"); return; }
+    setTestingAuth(true);
+    setTestAuthResult(null);
+    const body = {
+      target: target.trim(),
+      modules: [],
+      auth_headers: Object.fromEntries(authHeaders.filter(h => h.key).map(h => [h.key, h.value])),
+      follow_redirects: followRedirects,
+      timeout,
+      login: {
+        enabled: loginEnabled, login_url: loginUrl, login_type: loginType,
+        username: loginUsername, password: loginPassword,
+        username_field: loginUsernameField, password_field: loginPasswordField,
+        bearer_token: loginBearerToken, cookie: loginCookie, token_path: loginTokenPath,
+      },
+      account2: { enabled: false },
+    };
+    try {
+      const r = await fetchWithAuth(`${API_BASE}/attack-suite/test-auth`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (r.ok) {
+        const data = await r.json();
+        setTestAuthResult(data);
+        if (data.reachable && (!loginEnabled || data.auth_success)) {
+          toast.success(loginEnabled ? `Auth successful (${data.auth_type})` : "Target is reachable");
+        } else if (data.error) {
+          toast.error(`Test failed: ${data.error}`);
+        }
+      }
+    } catch (e) {
+      toast.error("Test connection failed");
+    } finally {
+      setTestingAuth(false);
+    }
+  }, [target, authHeaders, followRedirects, timeout, loginEnabled, loginUrl, loginType,
+      loginUsername, loginPassword, loginUsernameField, loginPasswordField,
+      loginBearerToken, loginCookie, loginTokenPath]);
+
   const exportJSON = () => {
     const blob = new Blob([JSON.stringify({ scan_id: scanId, target, findings }, null, 2)], {
       type: "application/json",
@@ -615,6 +706,26 @@ export default function AttackSuitePage() {
                     >None</button>
                   </div>
                 </div>
+
+                {/* Presets */}
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-zinc-400">Presets</Label>
+                  <div className="grid grid-cols-2 gap-1">
+                    {Object.entries(PRESETS).map(([key, preset]) => (
+                      <button
+                        key={key}
+                        type="button"
+                        disabled={isScanning}
+                        onClick={() => setSelectedModules(new Set(preset.modules))}
+                        className="rounded border border-zinc-700 px-2 py-1.5 text-left transition-colors hover:border-blue-500/50 hover:bg-blue-600/5 disabled:opacity-50"
+                      >
+                        <p className="text-[11px] font-medium text-zinc-300">{preset.label}</p>
+                        <p className="text-[10px] text-zinc-600">{preset.description}</p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
                 <div className="grid grid-cols-1 gap-1">
                   {MODULES.map((mod) => (
                     <div
@@ -633,8 +744,11 @@ export default function AttackSuitePage() {
                         onCheckedChange={() => !isScanning && toggleModule(mod.id)}
                         className="mt-0.5"
                       />
-                      <div className="min-w-0">
-                        <p className="text-xs font-medium text-zinc-300">{mod.label}</p>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-xs font-medium text-zinc-300">{mod.label}</p>
+                          <span className="text-[9px] text-zinc-600 border border-zinc-700 rounded px-1">{mod.category}</span>
+                        </div>
                         <p className="text-[10px] text-zinc-500 leading-tight mt-0.5">{mod.description}</p>
                       </div>
                     </div>
@@ -994,6 +1108,53 @@ export default function AttackSuitePage() {
                       </p>
                     </div>
                   </>
+                )}
+
+                {/* Test Connection & Auth */}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="w-full gap-1.5 text-xs"
+                  disabled={isScanning || testingAuth || !target}
+                  onClick={testAuth}
+                >
+                  {testingAuth ? <Loader2 className="h-3 w-3 animate-spin" /> : <Globe className="h-3 w-3" />}
+                  {testingAuth ? "Testing..." : "Test Connection & Auth"}
+                </Button>
+
+                {testAuthResult && (
+                  <div className={cn(
+                    "rounded-md border p-2 text-xs space-y-1",
+                    testAuthResult.reachable ? "border-emerald-600/30 bg-emerald-600/5" : "border-red-600/30 bg-red-600/5"
+                  )}>
+                    <div className="flex items-center gap-1.5">
+                      {testAuthResult.reachable
+                        ? <CheckCircle2 className="h-3 w-3 text-emerald-400" />
+                        : <XCircle className="h-3 w-3 text-red-400" />}
+                      <span className={testAuthResult.reachable ? "text-emerald-400" : "text-red-400"}>
+                        {testAuthResult.reachable ? "Target reachable" : "Target unreachable"}
+                      </span>
+                    </div>
+                    {loginEnabled && (
+                      <div className="flex items-center gap-1.5">
+                        {testAuthResult.auth_success
+                          ? <CheckCircle2 className="h-3 w-3 text-emerald-400" />
+                          : <XCircle className="h-3 w-3 text-red-400" />}
+                        <span className={testAuthResult.auth_success ? "text-emerald-400" : "text-red-400"}>
+                          {testAuthResult.auth_success
+                            ? `Auth OK (${testAuthResult.auth_type})`
+                            : "Auth failed"}
+                        </span>
+                      </div>
+                    )}
+                    {testAuthResult.tech_stack && testAuthResult.tech_stack.length > 0 && (
+                      <p className="text-zinc-500 text-[10px]">Tech: {testAuthResult.tech_stack.join(", ")}</p>
+                    )}
+                    {testAuthResult.error && (
+                      <p className="text-red-400 text-[10px]">{testAuthResult.error}</p>
+                    )}
+                  </div>
                 )}
               </div>
             </SectionToggle>

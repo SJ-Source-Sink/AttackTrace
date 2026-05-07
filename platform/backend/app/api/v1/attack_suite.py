@@ -97,6 +97,11 @@ MODULES_META = [
     {"id": "broken_auth",   "label": "Broken Authentication",  "description": "Weak/default credentials, password strength, brute-force protection"},
     {"id": "info_disclosure","label": "Information Disclosure", "description": "FTP directory, forgotten backups, .env files, Git exposure, log files"},
     {"id": "deserialization","label": "Insecure Deserialization","description": "Prototype pollution, zip bomb, XML billion laughs"},
+    {"id": "rate_limit",  "label": "Rate Limit / Lockout",  "description": "Brute-force protection, account lockout, OTP rate limiting, password reset throttling"},
+    {"id": "session",     "label": "Session Management",     "description": "Session fixation, concurrent sessions, cookie security flags (Secure/HttpOnly/SameSite), logout invalidation"},
+    {"id": "http_method", "label": "HTTP Method Tampering",  "description": "PUT/DELETE/PATCH on GET-only endpoints, X-HTTP-Method-Override, verb tunneling through POST"},
+    {"id": "2fa_bypass",  "label": "2FA/MFA Bypass",         "description": "OTP code reuse, null/empty code acceptance, response manipulation, backup code exposure"},
+    {"id": "oauth",       "label": "OAuth Misconfiguration", "description": "Open redirect in callback, missing state parameter, implicit flow, PKCE bypass, token leakage"},
 ]
 
 # ── Models ────────────────────────────────────────────────────────────────────
@@ -411,8 +416,7 @@ async def _perform_login(client: httpx.AsyncClient, cfg: LoginConfig,
 
             cookies = dict(lr.cookies)
             if cookies:
-                cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items())
-                return {"Cookie": cookie_str}
+                return {"__cookies__": cookies}
 
             # Check for JWT in response JSON
             try:
@@ -1754,6 +1758,59 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
                     except httpx.HTTPError:
                         pass
 
+    # RS256 → HS256 algorithm confusion
+    if alg == "RS256":
+        # If the server verifies RS256 tokens, we can try switching to HS256
+        # and signing with the server's public key as the HMAC secret
+        # (requires having the public key — we probe JWKS endpoint)
+        jwks_paths = ["/.well-known/jwks.json", "/api/.well-known/jwks.json",
+                      "/oauth/jwks", "/jwks.json"]
+        for jwks_path in jwks_paths:
+            try:
+                r_jwks = await client.get(target + jwks_path, timeout=6)
+                if r_jwks.status_code == 200:
+                    try:
+                        jwks = r_jwks.json()
+                        keys = jwks.get("keys", [])
+                        if keys:
+                            yield _finding("jwt", "jwks_public_endpoint", "medium",
+                                "JWKS Public Key Endpoint Exposed",
+                                f"Server exposes public keys at {jwks_path}. "
+                                f"Combined with RS256→HS256 confusion attacks, this can lead to signature bypass. "
+                                f"Verify the token library rejects algorithm switching.",
+                                f"JWKS URL: {target + jwks_path}\nKeys: {len(keys)}\n"
+                                f"Key types: {[k.get('kty') for k in keys[:3]]}",
+                                target + jwks_path, False,
+                                "Explicitly pin the allowed algorithm in JWT verification. "
+                                "Never allow the client-supplied 'alg' header to determine verification logic.",
+                                confidence="medium")
+                    except Exception:
+                        pass
+                    break
+            except httpx.HTTPError:
+                continue
+            await asyncio.sleep(0)
+
+    # Test expired token acceptance
+    if exp and exp < time.time():
+        for path in ["/api/me", "/api/user", "/api/v1/auth/me"]:
+            try:
+                r_exp = await client.get(target + path,
+                    headers={"Authorization": f"Bearer {token}"}, timeout=8)
+                if r_exp.status_code == 200 and len(r_exp.text) > 30:
+                    yield _finding("jwt", "expired_token_accepted", "critical",
+                        "Expired JWT Token Accepted — No Expiry Enforcement",
+                        f"Server at {path} accepted an expired JWT (exp: {datetime.fromtimestamp(exp).isoformat()}). "
+                        f"Authentication tokens never expire — revocation is impossible.",
+                        f"Token exp: {exp} (past)\nEndpoint: {target + path}\nStatus: 200",
+                        target + path, True,
+                        "Enforce JWT expiry (`exp` claim) on every request. "
+                        "Implement token refresh flows with short-lived access tokens.",
+                        confidence="high")
+                    break
+            except httpx.HTTPError:
+                pass
+
     # Test alg:none attack — forge JWT with algorithm set to none
     auth_header = client.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
@@ -1949,6 +2006,71 @@ async def _module_auth_bypass(target: str, client: httpx.AsyncClient,
                         "Never use X-Forwarded-For for access control. "
                         "Use authentication tokens and server-side session validation.",
                         confidence="high")
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    # ── X-Original-URL / X-Rewrite-URL bypass ────────────────────────────────
+    # Some reverse proxies (nginx, Apache) route requests based on
+    # X-Original-URL/X-Rewrite-URL before auth middleware runs.
+    for bypass_header in ["X-Original-URL", "X-Rewrite-URL", "X-Custom-IP-Authorization"]:
+        for path in ["/admin", "/api/admin", "/admin/users"]:
+            url = target + "/"  # request goes to / but header routes to /admin
+            try:
+                r_plain = await client.get(target + path, timeout=5)
+                if r_plain.status_code not in (403, 401):
+                    continue
+                r_bypass = await client.get(url, headers={bypass_header: path}, timeout=6)
+                if r_bypass.status_code == 200 and not _is_spa_fallback(r_bypass, spa_fallback_size):
+                    body = r_bypass.text.lower()
+                    if any(ind in body for ind in ["admin", "users", "dashboard", "management"]):
+                        yield _finding("auth_bypass", f"header_bypass_{bypass_header.lower().replace('-', '_')}", "high",
+                            f"Auth Bypass via {bypass_header} Header",
+                            f"Direct request to {path} returns {r_plain.status_code}, but "
+                            f"requesting / with `{bypass_header}: {path}` returns 200 with admin content.",
+                            f"URL: {target}/\n{bypass_header}: {path}\nStatus: 200",
+                            url, True,
+                            f"Strip {bypass_header} headers at the edge before routing to application servers. "
+                            f"Do not use URL headers for access control decisions.",
+                            confidence="medium")
+                        break
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+    # ── Path traversal / case variation bypass ────────────────────────────────
+    path_variations = [
+        ("/ADMIN", "uppercase"),
+        ("/admin/", "trailing slash"),
+        ("/admin/..", "dot-dot"),
+        ("/%61dmin", "URL encoded 'a'"),
+        ("/admin%20", "URL encoded space"),
+        ("/;/admin", "semicolon bypass"),
+        ("//admin", "double slash"),
+    ]
+    for variation, technique in path_variations:
+        url = target + variation
+        try:
+            r_plain = await client.get(target + "/admin", timeout=5)
+            if r_plain.status_code not in (401, 403):
+                continue
+            r_var = await client.get(url, timeout=6)
+            if (r_var.status_code == 200 and
+                    not _is_spa_fallback(r_var, spa_fallback_size) and
+                    len(r_var.text) > 100):
+                body_lower = r_var.text.lower()
+                if any(ind in body_lower for ind in ["admin", "dashboard", "users", "management"]):
+                    yield _finding("auth_bypass", f"path_bypass_{technique.replace(' ', '_')}", "high",
+                        f"Admin Path Auth Bypass via {technique}",
+                        f"/admin returns {r_plain.status_code}, but `{variation}` ({technique}) "
+                        f"returns 200 with admin content — path normalization bypass.",
+                        f"Blocked: {target}/admin → {r_plain.status_code}\n"
+                        f"Bypassed: {url} → {r_var.status_code}",
+                        url, True,
+                        "Normalize URL paths before applying access controls. "
+                        "Apply auth middleware after path normalization, not before.",
+                        confidence="medium")
+                    break
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
@@ -2739,6 +2861,518 @@ async def _module_deserialization(target: str, client: httpx.AsyncClient,
         pass
 
 
+# ── Module: Rate Limiting / Brute Force Protection ────────────────────────────
+
+async def _module_rate_limit(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    """Test brute-force protection on login, password reset, and OTP endpoints."""
+
+    # Discover login endpoint
+    login_candidates = [
+        ("/rest/user/login", "email", "password"),
+        ("/api/auth/login", "email", "password"),
+        ("/api/login", "username", "password"),
+        ("/api/v1/auth/login", "email", "password"),
+        ("/login", "username", "password"),
+    ]
+    login_url = None
+    user_field = "email"
+    pass_field = "password"
+
+    for path, uf, pf in login_candidates:
+        url = target + path
+        try:
+            r = await client.post(url, json={uf: "probe@test.com", pf: "wrongpass"}, timeout=5)
+            if r.status_code not in (404, 405):
+                login_url = url
+                user_field = uf
+                pass_field = pf
+                break
+        except httpx.HTTPError:
+            continue
+
+    if login_url:
+        # ── Test 1: Login brute force — 10 rapid attempts ────────────────────
+        blocked = False
+        last_status = 0
+        for i in range(10):
+            try:
+                r = await client.post(login_url,
+                    json={user_field: "admin@example.com", pass_field: f"wrongpass{i}"},
+                    timeout=5)
+                last_status = r.status_code
+                if r.status_code in (429, 423, 403) or "rate" in r.text.lower() or "locked" in r.text.lower():
+                    blocked = True
+                    break
+            except httpx.HTTPError:
+                break
+            await asyncio.sleep(0.05)
+
+        if not blocked:
+            yield _finding("rate_limit", "no_login_lockout", "high",
+                "No Brute Force Protection on Login",
+                f"10 consecutive failed login attempts to {login_url} were not rate-limited "
+                f"(last status: {last_status}). Passwords can be brute-forced without restriction.",
+                f"Endpoint: {login_url}\n10 attempts — no 429/423/403 response",
+                login_url, True,
+                "Implement account lockout after 5-10 failed attempts. "
+                "Add exponential backoff or CAPTCHA. Use IP-based rate limiting.",
+                confidence="high")
+        else:
+            yield _finding("rate_limit", "login_lockout_active", "info",
+                "Brute Force Protection Active on Login",
+                f"Login endpoint rate-limits after {i+1} attempt(s) (status: {last_status}).",
+                f"Endpoint: {login_url}\nBlocked after {i+1} attempts",
+                login_url, False,
+                "Rate limiting is working. Verify the threshold and ensure it applies per-IP and per-account.",
+                confidence="high")
+
+        # ── Test 2: Check if X-Forwarded-For bypasses rate limiting ─────────
+        # Reset by spoofing IP — some apps rate-limit by IP but trust X-Forwarded-For
+        spoofed_blocked = False
+        for i in range(6):
+            try:
+                r = await client.post(login_url,
+                    json={user_field: "admin@example.com", pass_field: f"wrongpass{i}"},
+                    headers={"X-Forwarded-For": f"1.2.3.{i}", "X-Real-IP": f"1.2.3.{i}"},
+                    timeout=5)
+                if r.status_code in (429, 423):
+                    spoofed_blocked = True
+                    break
+            except httpx.HTTPError:
+                break
+            await asyncio.sleep(0.05)
+
+        if not spoofed_blocked and blocked:
+            yield _finding("rate_limit", "xff_rate_limit_bypass", "high",
+                "Rate Limiting Bypassed via X-Forwarded-For Header",
+                "Login rate limiting can be bypassed by rotating the X-Forwarded-For header. "
+                "Attacker can send unlimited login attempts by changing the spoofed IP.",
+                f"Endpoint: {login_url}\nX-Forwarded-For rotation bypasses lockout",
+                login_url, True,
+                "Never use X-Forwarded-For for rate limiting decisions unless behind a trusted proxy. "
+                "Rate limit by both account identity AND real connection IP.",
+                confidence="medium")
+
+    # ── Test 3: Password reset throttling ────────────────────────────────────
+    reset_candidates = ["/api/forgot-password", "/rest/user/reset-password", "/forgot-password", "/api/auth/forgot-password"]
+    for path in reset_candidates:
+        url = target + path
+        try:
+            responses = []
+            for i in range(5):
+                r = await client.post(url, json={"email": f"test{i}@test.com"}, timeout=5)
+                responses.append(r.status_code)
+                await asyncio.sleep(0.1)
+            if all(s not in (429, 423) for s in responses) and any(s in (200, 201, 204) for s in responses):
+                yield _finding("rate_limit", "reset_no_throttle", "medium",
+                    "Password Reset Not Throttled",
+                    f"5 password reset requests to {url} were not rate-limited. "
+                    f"Attacker can flood users with reset emails or enumerate valid accounts.",
+                    f"Endpoint: {url}\nAll 5 requests returned: {responses}",
+                    url, True,
+                    "Rate-limit password reset requests per email address and per IP. "
+                    "Return identical responses for valid/invalid emails (prevent enumeration).",
+                    confidence="medium")
+                break
+        except httpx.HTTPError:
+            continue
+        await asyncio.sleep(0)
+
+
+# ── Module: Session Management ────────────────────────────────────────────────
+
+async def _module_session(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    """Test session security: fixation, cookie flags, concurrent sessions, logout."""
+
+    try:
+        r = await client.get(target, timeout=8)
+    except httpx.HTTPError:
+        return
+
+    # ── Test 1: Cookie security flags ────────────────────────────────────────
+    cookie_headers = []
+    # httpx stores set-cookie as a single header per cookie
+    for header_name, header_val in r.headers.multi_items():
+        if header_name.lower() == "set-cookie":
+            cookie_headers.append(header_val)
+
+    for cookie_str in cookie_headers:
+        cookie_lower = cookie_str.lower()
+        name = cookie_str.split("=")[0].strip()
+
+        # Only check session-like cookies
+        if not any(kw in name.lower() for kw in ["session", "token", "auth", "jwt", "sid", "user"]):
+            continue
+
+        if "httponly" not in cookie_lower:
+            yield _finding("session", "cookie_no_httponly", "medium",
+                f"Session Cookie '{name}' Missing HttpOnly Flag",
+                f"Cookie `{name}` is accessible via JavaScript (no HttpOnly). "
+                f"XSS attacks can steal this cookie.",
+                f"Set-Cookie: {cookie_str[:200]}",
+                target, True,
+                "Add HttpOnly flag to all session cookies: Set-Cookie: name=value; HttpOnly",
+                confidence="high")
+
+        if "secure" not in cookie_lower:
+            yield _finding("session", "cookie_no_secure", "medium",
+                f"Session Cookie '{name}' Missing Secure Flag",
+                f"Cookie `{name}` is transmitted over HTTP (no Secure flag). "
+                f"Network attackers can capture this cookie.",
+                f"Set-Cookie: {cookie_str[:200]}",
+                target, True,
+                "Add Secure flag to all session cookies: Set-Cookie: name=value; Secure",
+                confidence="high")
+
+        if "samesite" not in cookie_lower:
+            yield _finding("session", "cookie_no_samesite", "low",
+                f"Session Cookie '{name}' Missing SameSite Attribute",
+                f"Cookie `{name}` has no SameSite attribute. "
+                f"Default varies by browser — CSRF attacks may be possible.",
+                f"Set-Cookie: {cookie_str[:200]}",
+                target, True,
+                "Set SameSite=Lax or SameSite=Strict on all session cookies.",
+                confidence="medium")
+
+    # ── Test 2: Session fixation ──────────────────────────────────────────────
+    # Capture session ID before login — if it stays the same after login, fixation is possible
+    pre_login_session = None
+    for cookie_name, cookie_val in r.cookies.items():
+        if any(kw in cookie_name.lower() for kw in ["session", "sid"]):
+            pre_login_session = (cookie_name, cookie_val)
+            break
+
+    if pre_login_session:
+        # Attempt login with the pre-existing session
+        login_paths = ["/api/login", "/rest/user/login", "/api/auth/login"]
+        for path in login_paths:
+            try:
+                lr = await client.post(target + path,
+                    json={"email": "test@test.com", "password": "test"},
+                    timeout=6)
+                if lr.status_code < 400:
+                    post_session = lr.cookies.get(pre_login_session[0])
+                    if post_session and post_session == pre_login_session[1]:
+                        yield _finding("session", "session_fixation", "high",
+                            "Session Fixation — Session ID Not Regenerated After Login",
+                            f"Session ID `{pre_login_session[0]}` is the same before and after login. "
+                            f"Attacker can fix a session ID and wait for victim to authenticate.",
+                            f"Pre-login: {pre_login_session[1][:20]}...\nPost-login: {post_session[:20]}...",
+                            target + path, True,
+                            "Always generate a new session ID after successful authentication. "
+                            "Invalidate the old session immediately.",
+                            confidence="medium")
+                    break
+            except httpx.HTTPError:
+                continue
+
+    # ── Test 3: Logout endpoint — verify session invalidation ─────────────────
+    logout_paths = ["/api/logout", "/rest/user/logout", "/logout", "/api/auth/logout"]
+    for path in logout_paths:
+        url = target + path
+        try:
+            r_out = await client.post(url, timeout=6)
+            if r_out.status_code in (200, 204):
+                # Check if the old session still works after logout
+                r_check = await client.get(target + "/api/me", timeout=6)
+                if r_check.status_code == 200 and len(r_check.text) > 30:
+                    yield _finding("session", "session_not_invalidated", "high",
+                        "Session Not Invalidated After Logout",
+                        f"After calling {path} (status {r_out.status_code}), the session cookie "
+                        f"still returns data from /api/me. Server is not invalidating sessions.",
+                        f"Logout: {url}\n/api/me after logout: {r_check.status_code}",
+                        url, True,
+                        "Invalidate the server-side session token on logout. "
+                        "Do not rely on client-side cookie deletion.",
+                        confidence="medium")
+                break
+        except httpx.HTTPError:
+            continue
+        await asyncio.sleep(0)
+
+
+# ── Module: HTTP Method Tampering ─────────────────────────────────────────────
+
+async def _module_http_method(target: str, client: httpx.AsyncClient,
+                               endpoints: set[str],
+                               spa_fallback_size: int = 0) -> AsyncGenerator[dict, None]:
+    """Test HTTP method tampering: verb tunneling, method override, unexpected methods."""
+
+    test_paths = list(endpoints)[:15] + [
+        target + "/api/users/1",
+        target + "/api/me",
+        target + "/api/admin",
+        target + "/api/config",
+    ]
+
+    for url in test_paths[:12]:
+        # ── Test 1: GET endpoint accessible via DELETE/PUT ────────────────────
+        try:
+            r_get = await client.get(url, timeout=6)
+            if _is_spa_fallback(r_get, spa_fallback_size) or r_get.status_code == 404:
+                continue
+
+            for method in ["DELETE", "PUT", "PATCH"]:
+                try:
+                    r_method = await client.request(method, url,
+                        json={"test": "attacktrace"}, timeout=6)
+                    if r_method.status_code in (200, 201, 204):
+                        yield _finding("http_method", f"unintended_{method.lower()}", "high",
+                            f"HTTP {method} Accepted on {url.replace(target, '')}",
+                            f"Endpoint {url} accepted {method} request (status {r_method.status_code}) "
+                            f"when only GET is expected. Unintended state modification may be possible.",
+                            f"GET: {r_get.status_code} | {method}: {r_method.status_code}\nURL: {url}",
+                            url, True,
+                            f"Restrict HTTP methods per endpoint. Return 405 Method Not Allowed "
+                            f"for unexpected methods. Use explicit method routing.",
+                            confidence="medium")
+                        break
+                except httpx.HTTPError:
+                    pass
+        except httpx.HTTPError:
+            continue
+        await asyncio.sleep(0)
+
+    # ── Test 2: X-HTTP-Method-Override to tunnel DELETE through POST ──────────
+    method_override_endpoints = [target + "/api/users/1", target + "/api/me", target + "/api/admin/users/1"]
+    for url in method_override_endpoints:
+        try:
+            r_direct = await client.delete(url, timeout=6)
+            # If direct DELETE is blocked (405/403/401), try override
+            if r_direct.status_code in (405, 403, 401):
+                for override_header in ["X-HTTP-Method-Override", "X-Method-Override", "X-HTTP-Method"]:
+                    r_override = await client.post(url,
+                        headers={override_header: "DELETE"},
+                        json={}, timeout=6)
+                    if r_override.status_code in (200, 201, 204) and r_override.status_code != r_direct.status_code:
+                        yield _finding("http_method", "method_override_bypass", "high",
+                            f"HTTP Method Override Bypasses Access Control ({override_header})",
+                            f"Direct DELETE on {url} returns {r_direct.status_code}, but POST with "
+                            f"`{override_header}: DELETE` returns {r_override.status_code}. "
+                            f"Method restrictions are bypassable via override header.",
+                            f"URL: {url}\nDirect DELETE: {r_direct.status_code}\n"
+                            f"{override_header}: DELETE via POST: {r_override.status_code}",
+                            url, True,
+                            "Ignore X-HTTP-Method-Override headers if not explicitly needed. "
+                            "If used, validate override is allowed for the endpoint.",
+                            confidence="high")
+                        break
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    # ── Test 3: TRACE method detection ────────────────────────────────────────
+    try:
+        r_trace = await client.request("TRACE", target, timeout=6)
+        if r_trace.status_code == 200 and "TRACE" in r_trace.text.upper():
+            yield _finding("http_method", "trace_enabled", "low",
+                "HTTP TRACE Method Enabled",
+                "TRACE method is enabled. Can be combined with XSS for Cross-Site Tracing (XST) "
+                "to steal HttpOnly cookies in older browsers.",
+                f"TRACE / → {r_trace.status_code}\nBody: {r_trace.text[:200]}",
+                target, True,
+                "Disable TRACE method in web server configuration.",
+                confidence="high")
+    except httpx.HTTPError:
+        pass
+
+
+# ── Module: 2FA / MFA Bypass ──────────────────────────────────────────────────
+
+async def _module_2fa_bypass(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    """Test 2FA/MFA bypass techniques: null code, code reuse, response manipulation."""
+
+    otp_paths = [
+        "/api/2fa/verify", "/api/mfa/verify", "/api/otp/verify",
+        "/api/auth/2fa", "/api/auth/otp", "/2fa/verify", "/verify-otp",
+        "/api/v1/2fa/verify", "/api/totp/verify",
+    ]
+
+    active_otp_url = None
+    for path in otp_paths:
+        url = target + path
+        try:
+            r = await client.post(url, json={"otp": "123456"}, timeout=5)
+            if r.status_code not in (404, 405):
+                active_otp_url = url
+                break
+        except httpx.HTTPError:
+            continue
+
+    if not active_otp_url:
+        return
+
+    # ── Test 1: Null/empty OTP ────────────────────────────────────────────────
+    for null_code in ["", "null", "0", "000000", None]:
+        try:
+            r = await client.post(active_otp_url, json={"otp": null_code}, timeout=6)
+            if r.status_code in (200, 201):
+                try:
+                    data = r.json()
+                    if any(k in str(data) for k in ["token", "authenticated", "success", "verified"]):
+                        yield _finding("2fa_bypass", "null_otp_accepted", "critical",
+                            f"2FA Bypass — Null/Empty OTP Code Accepted",
+                            f"POST {active_otp_url} with OTP=`{null_code}` returned authentication "
+                            f"success. 2FA is trivially bypassable.",
+                            f"Endpoint: {active_otp_url}\nOTP: {null_code}\nResponse: {str(data)[:200]}",
+                            active_otp_url, True,
+                            "Validate OTP values server-side — reject empty, null, or zero values. "
+                            "Implement a TOTP library with proper validation.",
+                            confidence="high")
+                        break
+                except Exception:
+                    pass
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    # ── Test 2: 2FA rate limiting (OTP brute force) ───────────────────────────
+    blocked = False
+    for i in range(8):
+        otp = f"{i:06d}"
+        try:
+            r = await client.post(active_otp_url, json={"otp": otp}, timeout=5)
+            if r.status_code in (429, 423, 403) or "rate" in r.text.lower() or "locked" in r.text.lower():
+                blocked = True
+                break
+        except httpx.HTTPError:
+            break
+        await asyncio.sleep(0.05)
+
+    if not blocked:
+        yield _finding("2fa_bypass", "otp_no_rate_limit", "high",
+            "2FA OTP Not Rate-Limited — Brute Force Possible",
+            f"8 consecutive OTP submissions to {active_otp_url} were not blocked. "
+            f"6-digit TOTP has 1,000,000 combinations — brute-forceable without rate limiting.",
+            f"Endpoint: {active_otp_url}\n8 attempts — no 429 response",
+            active_otp_url, True,
+            "Rate limit OTP verification to 3-5 attempts before locking the session. "
+            "Implement a time window (e.g. 1 OTP attempt per 30 seconds).",
+            confidence="high")
+
+    # ── Test 3: OTP step skipping ─────────────────────────────────────────────
+    # Try to access authenticated resources without completing 2FA step
+    protected_paths = ["/api/me", "/api/user", "/api/dashboard", "/api/profile"]
+    for path in protected_paths[:2]:
+        try:
+            r = await client.get(target + path, timeout=6)
+            if r.status_code == 200 and len(r.text) > 50:
+                try:
+                    data = r.json()
+                    if any(k in data for k in ["email", "id", "username", "role"]):
+                        yield _finding("2fa_bypass", "otp_step_skip", "critical",
+                            "2FA Step Bypass — Authenticated Resource Accessible Without OTP",
+                            f"GET {target + path} returns user data without completing the 2FA challenge. "
+                            f"The 2FA check is enforced only at login, not at resource access.",
+                            f"Endpoint: {target + path}\nStatus: 200\nData keys: {list(data.keys())[:5]}",
+                            target + path, True,
+                            "Enforce 2FA completion at the session level, not just the login step. "
+                            "Mark sessions as 'pending_mfa' and reject requests until OTP is verified.",
+                            confidence="medium")
+                        break
+                except Exception:
+                    pass
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+
+# ── Module: OAuth Misconfiguration ────────────────────────────────────────────
+
+async def _module_oauth(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    """Test OAuth 2.0 misconfigurations: open redirect, missing state, PKCE bypass."""
+
+    # Discover OAuth endpoints
+    oauth_paths = [
+        "/oauth/authorize", "/api/oauth/authorize", "/auth/oauth/authorize",
+        "/connect/authorize", "/api/connect/authorize",
+        "/oauth2/authorize", "/.well-known/openid-configuration",
+    ]
+
+    oauth_base = None
+    for path in oauth_paths:
+        try:
+            r = await client.get(target + path, timeout=6, follow_redirects=False)
+            if r.status_code in (200, 302, 400):  # 400 = exists but missing params
+                oauth_base = target + path
+                break
+        except httpx.HTTPError:
+            continue
+
+    if oauth_base:
+        # ── Test 1: Open redirect in redirect_uri ─────────────────────────────
+        evil_redirect = "https://evil.example.com/callback"
+        try:
+            r = await client.get(oauth_base,
+                params={
+                    "response_type": "code",
+                    "client_id": "test",
+                    "redirect_uri": evil_redirect,
+                    "state": "teststate",
+                },
+                follow_redirects=False, timeout=8)
+            loc = r.headers.get("location", "")
+            if "evil.example.com" in loc:
+                yield _finding("oauth", "oauth_open_redirect", "critical",
+                    "OAuth Open Redirect — Attacker-Controlled redirect_uri Accepted",
+                    f"OAuth authorize endpoint accepted `redirect_uri={evil_redirect}`. "
+                    f"Attacker can steal authorization codes by redirecting victims to their server.",
+                    f"URL: {oauth_base}\nredirect_uri: {evil_redirect}\nLocation: {loc}",
+                    oauth_base, True,
+                    "Enforce a strict allowlist of registered redirect URIs. "
+                    "Reject any redirect_uri not exactly matching a pre-registered value.",
+                    confidence="high")
+        except httpx.HTTPError:
+            pass
+
+        # ── Test 2: Missing state parameter validation ─────────────────────────
+        try:
+            r_no_state = await client.get(oauth_base,
+                params={"response_type": "code", "client_id": "test", "redirect_uri": target + "/callback"},
+                follow_redirects=False, timeout=8)
+            if r_no_state.status_code in (200, 302) and "error" not in r_no_state.headers.get("location", "").lower():
+                yield _finding("oauth", "oauth_missing_state", "medium",
+                    "OAuth Authorization Without State Parameter Accepted",
+                    "OAuth authorize request without `state` parameter was accepted. "
+                    "Missing state enables CSRF attacks against the OAuth flow.",
+                    f"URL: {oauth_base}\nNo state parameter — status: {r_no_state.status_code}",
+                    oauth_base, True,
+                    "Require the `state` parameter. Verify state value matches the stored value before "
+                    "exchanging the authorization code.",
+                    confidence="medium")
+        except httpx.HTTPError:
+            pass
+
+    # ── Test 3: Token endpoint security ──────────────────────────────────────
+    token_paths = ["/oauth/token", "/api/oauth/token", "/connect/token", "/oauth2/token"]
+    for path in token_paths:
+        url = target + path
+        try:
+            # Try client credentials without authentication
+            r = await client.post(url,
+                data={"grant_type": "client_credentials", "client_id": "test", "client_secret": "test"},
+                timeout=6)
+            if r.status_code in (200, 201):
+                try:
+                    data = r.json()
+                    if "access_token" in data:
+                        yield _finding("oauth", "oauth_weak_client_auth", "high",
+                            "OAuth Token Issued with Test Credentials",
+                            f"POST {url} with client_id=test/client_secret=test returned an access token. "
+                            f"OAuth server may not be validating client credentials.",
+                            f"Response: {str(data)[:200]}",
+                            url, True,
+                            "Validate client credentials against a secure registry. "
+                            "Never accept test or default client IDs in production.",
+                            confidence="medium")
+                        break
+                except Exception:
+                    pass
+        except httpx.HTTPError:
+            continue
+        await asyncio.sleep(0)
+
+
 # ── Main Stream ───────────────────────────────────────────────────────────────
 
 async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGenerator[str, None]:
@@ -2781,7 +3415,16 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGe
             yield _sse("progress", {"message": "🔐 Performing login...", "module": "login"})
             try:
                 auth_headers = await _perform_login(client, req.login, req.target)
-                if auth_headers:
+                if "__cookies__" in auth_headers:
+                    for ck_name, ck_val in auth_headers.pop("__cookies__").items():
+                        client.cookies.set(ck_name, ck_val)
+                    if auth_headers:
+                        client.headers.update(auth_headers)
+                    yield _sse("progress", {
+                        "message": "✅ Login successful. Auth type: cookie",
+                        "module": "login"
+                    })
+                elif auth_headers:
                     client.headers.update(auth_headers)
                     yield _sse("progress", {
                         "message": f"✅ Login successful. Auth type: {list(auth_headers.keys())[0]}",
@@ -2953,6 +3596,11 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGe
             "broken_auth":  lambda: _module_broken_auth(req.target, client),
             "info_disclosure": lambda: _module_info_disclosure(req.target, client, spa_fallback_size),
             "deserialization": lambda: _module_deserialization(req.target, client, crawl_result.forms),
+            "rate_limit":  lambda: _module_rate_limit(req.target, client),
+            "session":     lambda: _module_session(req.target, client),
+            "http_method": lambda: _module_http_method(req.target, client, crawl_result.endpoints, spa_fallback_size),
+            "2fa_bypass":  lambda: _module_2fa_bypass(req.target, client),
+            "oauth":       lambda: _module_oauth(req.target, client),
         }
 
         for mod_id in req.modules:
@@ -2988,6 +3636,48 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGe
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@router.post("/test-auth")
+async def test_auth_connection(
+    payload: AttackSuiteRequest,
+    current_user: Annotated[User, Depends(require_tool("attack_suite"))],
+) -> dict:
+    """Test target connectivity and authentication without running any attack modules."""
+    result: dict = {"reachable": False, "auth_success": False, "auth_type": None,
+                    "tech_stack": [], "status_code": None, "error": None}
+    headers = dict(payload.auth_headers)
+    headers.setdefault("User-Agent", "AttackTrace-Security-Scanner/2.0")
+    _timeout = httpx.Timeout(connect=4.0, read=10.0, write=10.0, pool=5.0)
+    try:
+        async with httpx.AsyncClient(headers=headers, timeout=_timeout,
+                                      follow_redirects=True, verify=False) as client:
+            r = await client.head(payload.target, timeout=httpx.Timeout(connect=4.0, read=5.0, write=5.0, pool=5.0))
+            result["reachable"] = True
+            result["status_code"] = r.status_code
+            # Fingerprint
+            cr = CrawlResult()
+            _fingerprint(r, cr)
+            result["tech_stack"] = cr.tech_stack
+            # Test auth
+            if payload.login.enabled:
+                auth_headers = await _perform_login(client, payload.login, payload.target)
+                cookies_to_set = {}
+                if "__cookies__" in auth_headers:
+                    cookies_to_set = auth_headers.pop("__cookies__")
+                if auth_headers or cookies_to_set:
+                    result["auth_success"] = True
+                    result["auth_type"] = list(auth_headers.keys())[0] if auth_headers else "cookie"
+                else:
+                    result["auth_success"] = False
+                    result["error"] = "Login attempt returned no auth credentials"
+    except httpx.ConnectError as e:
+        result["error"] = f"Connection refused: {e}"
+    except httpx.ConnectTimeout:
+        result["error"] = "Connection timed out"
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
 
 @router.post("/scan")
 async def run_attack_suite(
