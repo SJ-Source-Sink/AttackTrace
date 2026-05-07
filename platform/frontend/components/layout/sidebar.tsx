@@ -12,7 +12,6 @@ import {
   FileText,
   Settings,
   Users,
-  Key,
   ChevronRight,
   Zap,
   Plug,
@@ -210,11 +209,6 @@ const settingsItems: NavItem[] = [
     label: "Team Members",
     href: "/settings/members",
     icon: Users,
-  },
-  {
-    label: "API Keys",
-    href: "/settings/api-keys",
-    icon: Key,
   },
   {
     label: "Audit Log",
