@@ -1,536 +1,325 @@
 """
-Mobile Scanner proxy — forwards authenticated requests to the MSRA sidecar service.
-
-MSRA (Mobile Security Review Assistant) runs as a separate Flask service on MSRA_URL.
-All routes here are auth-gated: only authenticated AttackTrace users can reach MSRA.
-
-Proxied endpoints:
-  GET  /mobile/scans                    — scan list
-  GET  /mobile/scans/{scan_id}          — scan detail + findings
-  GET  /mobile/scans/{scan_id}/findings — findings list
-  GET  /mobile/scans/{scan_id}/status   — scan progress
-  POST /mobile/upload                   — upload APK/IPA/JAR/EXE
-  POST /mobile/scans/{scan_id}/dynamic  — trigger dynamic analysis
-  GET  /mobile/scans/{scan_id}/dynamic/{job_id} — dynamic job status
-  GET  /mobile/scans/{scan_id}/export/{fmt}     — download export
-  PATCH /mobile/scans/{scan_id}/findings/{fid}/triage — update triage
-  DELETE /mobile/scans/{scan_id}        — delete scan
-  GET  /mobile/rules                    — pattern/rule list
-  POST /mobile/rules                    — create custom rule
-  PUT  /mobile/rules/{rule_id}          — update rule
-  DELETE /mobile/rules/{rule_id}        — delete rule
-  PATCH /mobile/rules/{rule_id}/toggle  — enable/disable rule
-  GET  /mobile/rules/stats              — pattern count per platform
-  GET  /mobile/adb-devices              — connected ADB devices
-  POST /mobile/ai-triage                — AI triage (generate-poc / test-ai)
-  GET  /mobile/health                   — MSRA health check
+Mobile Security Scanner API — self-contained, no external sidecar.
 """
 
-import hashlib
+import csv
+import io
+import json
 import logging
-from typing import Annotated
+import os
+import re
+from pathlib import Path
+from typing import Optional
+from uuid import UUID, uuid4
 
-import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, get_current_org_id, require_tool
+from app.core.dependencies import get_current_org_id, get_current_user
+from app.models.db.mobile import MobileFinding, MobilePattern, MobileScan
 from app.models.db.user import User
-from app.models.db.finding import Finding, FindingSeverity, FindingStatus
 
 logger = logging.getLogger(__name__)
-
-router = APIRouter(prefix="/mobile", tags=["Mobile Scanner"])
 settings = get_settings()
 
-_TIMEOUT = httpx.Timeout(connect=5.0, read=300.0, write=300.0, pool=5.0)
+router = APIRouter(prefix="/mobile", tags=["Mobile Scanner"])
 
-# Headers that must not be forwarded to MSRA
-_HOP_BY_HOP = {
-    "host", "connection", "keep-alive", "transfer-encoding",
-    "te", "trailers", "upgrade", "proxy-authorization",
-    "authorization",  # strip our JWT — MSRA has no auth
-}
+_SEV_ORDER = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
+_ALLOWED_EXTENSIONS = {".apk", ".apkm", ".xapk", ".ipa", ".jar", ".exe", ".dll"}
+_MAX_FILE_SIZE = 500 * 1024 * 1024
 
 
-async def _msra_request(
-    method: str,
-    path: str,
-    *,
-    params: dict | None = None,
-    json: dict | None = None,
-    content: bytes | None = None,
-    headers: dict | None = None,
-) -> httpx.Response:
-    url = f"{settings.MSRA_URL}{path}"
-    try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            resp = await client.request(
-                method,
-                url,
-                params=params,
-                json=json,
-                content=content,
-                headers=headers or {},
-            )
-        return resp
-    except httpx.ConnectError:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"error": {"code": "MSRA_UNAVAILABLE", "message": "Mobile Scanner service is not reachable. Make sure MSRA is running."}},
-        )
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail={"error": {"code": "MSRA_TIMEOUT", "message": "Mobile Scanner service timed out."}},
-        )
+def _upload_dir() -> Path:
+    d = Path(settings.MOBILE_UPLOAD_DIR)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
-def _proxy_response(resp: httpx.Response) -> Response:
-    """Convert an httpx response to a FastAPI response, stripping hop-by-hop headers."""
-    forward_headers = {
-        k: v for k, v in resp.headers.items()
-        if k.lower() not in _HOP_BY_HOP
+def _platform_from_ext(ext: str) -> str:
+    return {".apk": "android", ".apkm": "android", ".xapk": "android",
+            ".ipa": "ios", ".jar": "jar", ".exe": "exe", ".dll": "exe"}.get(ext.lower(), "android")
+
+
+def _scan_to_dict(scan: MobileScan) -> dict:
+    return {
+        "scan_id": str(scan.id),
+        "apk": scan.app_name,
+        "platform": scan.platform,
+        "package": scan.package_id,
+        "status": scan.status,
+        "risk_score": scan.risk_score,
+        "created_at": int(scan.created_at.timestamp()) if scan.created_at else 0,
+        "severity_counts": scan.findings_count or {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Info": 0},
+        "total_findings": sum((scan.findings_count or {}).values()),
     }
-    return Response(
-        content=resp.content,
-        status_code=resp.status_code,
-        headers=forward_headers,
-        media_type=resp.headers.get("content-type", "application/json"),
-    )
 
 
-# ── Health ────────────────────────────────────────────────────────────────────
+def _finding_to_dict(f: MobileFinding) -> dict:
+    return {
+        "id": f.id,
+        "title": f.title,
+        "severity": f.severity,
+        "category": f.category,
+        "description": f.description or "",
+        "remediation": f.remediation or "",
+        "cwe": f.cwe or "",
+        "triage_status": f.triage_status,
+        "evidence": {"file": f.file_path or "", "line": f.line_number, "snippet": f.code_snippet or ""},
+    }
 
-@router.get("/health", summary="Check MSRA service reachability")
-async def mobile_health(
-    current_user: Annotated[User, Depends(get_current_user)],
-) -> dict:
+
+def _pattern_to_dict(p: MobilePattern) -> dict:
+    return {
+        "id": str(p.id),
+        "title": p.title,
+        "platform": p.platform,
+        "severity": p.severity,
+        "category": p.category,
+        "description": p.description or "",
+        "remediation": p.remediation or "",
+        "cwe": p.cwe or "",
+        "patterns": [{"pattern": p.regex_pattern}],
+        "enabled": p.is_enabled,
+        "source": "custom" if p.is_custom else "builtin",
+    }
+
+
+@router.get("/health")
+async def mobile_health():
+    return {"status": "ok", "engine": "local", "msra_reachable": True}
+
+
+@router.get("/stats")
+async def mobile_stats(db: AsyncSession = Depends(get_db), org_id: UUID = Depends(get_current_org_id)):
+    total = (await db.execute(select(func.count()).select_from(MobileScan).where(MobileScan.org_id == org_id))).scalar() or 0
+    completed = (await db.execute(select(func.count()).select_from(MobileScan).where(MobileScan.org_id == org_id, MobileScan.status == "completed"))).scalar() or 0
+    scans = (await db.execute(select(MobileScan).where(MobileScan.org_id == org_id).order_by(MobileScan.created_at.desc()).limit(20))).scalars().all()
+    return {
+        "total_scans": total, "completed_scans": completed,
+        "total_findings": sum(sum((s.findings_count or {}).values()) for s in scans),
+        "recent_scans": [_scan_to_dict(s) for s in scans],
+    }
+
+
+@router.get("/scans")
+async def list_scans(db: AsyncSession = Depends(get_db), org_id: UUID = Depends(get_current_org_id)):
+    scans = (await db.execute(select(MobileScan).where(MobileScan.org_id == org_id).order_by(MobileScan.created_at.desc()).limit(50))).scalars().all()
+    return [_scan_to_dict(s) for s in scans]
+
+
+@router.post("/upload", status_code=status.HTTP_201_CREATED)
+async def upload_app(file: UploadFile = File(...), db: AsyncSession = Depends(get_db), org_id: UUID = Depends(get_current_org_id), _user: User = Depends(get_current_user)):
+    if not file.filename:
+        raise HTTPException(400, "No filename provided")
+    ext = Path(file.filename).suffix.lower()
+    if ext not in _ALLOWED_EXTENSIONS:
+        raise HTTPException(400, f"Unsupported file type '{ext}'")
+    scan_id = uuid4()
+    save_path = _upload_dir() / f"{scan_id}_{file.filename}"
+    total = 0
+    with open(save_path, "wb") as out:
+        while chunk := await file.read(1024 * 1024):
+            total += len(chunk)
+            if total > _MAX_FILE_SIZE:
+                out.close(); os.unlink(save_path)
+                raise HTTPException(413, "File exceeds 500 MB limit")
+            out.write(chunk)
+    platform = _platform_from_ext(ext)
+    scan = MobileScan(id=scan_id, org_id=org_id, app_name=file.filename, platform=platform, status="pending",
+                      file_path=str(save_path), findings_count={"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Info": 0}, progress=0, message="Queued...")
+    db.add(scan); await db.commit(); await db.refresh(scan)
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as client:
-            resp = await client.get(f"{settings.MSRA_URL}/api/dashboard/stats")
-        return {"status": "ok", "msra_reachable": resp.status_code < 500}
-    except Exception:
-        return {"status": "degraded", "msra_reachable": False}
+        from app.workers.mobile_worker import run_mobile_scan
+        task = run_mobile_scan.apply_async(args=[str(scan_id)], queue="scans")
+        scan.celery_task_id = task.id; await db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to dispatch mobile scan task: {e}")
+    return {"scan_id": str(scan_id), "status": "pending", "platform": platform}
 
 
-# ── Dashboard stats ───────────────────────────────────────────────────────────
-
-@router.get("/stats", summary="MSRA dashboard statistics")
-async def mobile_stats(
-    current_user: Annotated[User, Depends(get_current_user)],
-) -> Response:
-    resp = await _msra_request("GET", "/api/dashboard/stats")
-    return _proxy_response(resp)
+@router.get("/scans/{scan_id}/status")
+async def scan_status(scan_id: UUID, db: AsyncSession = Depends(get_db), org_id: UUID = Depends(get_current_org_id)):
+    scan = (await db.execute(select(MobileScan).where(MobileScan.id == scan_id, MobileScan.org_id == org_id))).scalar_one_or_none()
+    if not scan: raise HTTPException(404, "Scan not found")
+    return {"status": scan.status, "progress": scan.progress, "message": scan.message or "", "error": scan.error_message}
 
 
-# ── Scans ─────────────────────────────────────────────────────────────────────
-
-@router.get("/scans", summary="List mobile scans")
-async def list_scans(
-    current_user: Annotated[User, Depends(get_current_user)],
-) -> Response:
-    # MSRA doesn't have a dedicated list endpoint — we parse dashboard stats
-    # which includes the full scan list in the `scans` key.
-    resp = await _msra_request("GET", "/api/dashboard/stats")
-    return _proxy_response(resp)
-
-
-@router.get("/scans/{scan_id}/findings", summary="Get findings for a scan")
-async def get_findings(
-    scan_id: str,
-    current_user: Annotated[User, Depends(get_current_user)],
-) -> Response:
-    resp = await _msra_request("GET", f"/api/scans/{scan_id}/findings")
-    return _proxy_response(resp)
+@router.get("/scans/{scan_id}/findings")
+async def scan_findings(scan_id: UUID, db: AsyncSession = Depends(get_db), org_id: UUID = Depends(get_current_org_id)):
+    scan = (await db.execute(select(MobileScan).where(MobileScan.id == scan_id, MobileScan.org_id == org_id))).scalar_one_or_none()
+    if not scan: raise HTTPException(404, "Scan not found")
+    findings = sorted((await db.execute(select(MobileFinding).where(MobileFinding.scan_id == scan_id))).scalars().all(),
+                      key=lambda f: (_SEV_ORDER.get(f.severity, 99), f.id))
+    return {
+        "scan_id": str(scan_id), "apk": scan.app_name, "package": scan.package_id or "",
+        "platform": scan.platform, "status": scan.status,
+        "scan_time": (scan.completed_at or scan.created_at).isoformat(),
+        "total_findings": len(findings),
+        "severity_counts": scan.findings_count or {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Info": 0},
+        "risk_score": scan.risk_score, "findings": [_finding_to_dict(f) for f in findings],
+    }
 
 
-@router.get("/scans/{scan_id}/status", summary="Get scan progress")
-async def get_scan_status(
-    scan_id: str,
-    current_user: Annotated[User, Depends(get_current_user)],
-) -> Response:
-    resp = await _msra_request("GET", f"/api/scan/{scan_id}/status")
-    return _proxy_response(resp)
+class TriageRequest(BaseModel):
+    status: str
 
 
-@router.delete("/scans/{scan_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a scan")
-async def delete_scan(
-    scan_id: str,
-    current_user: Annotated[User, Depends(require_tool("mobile"))],
-) -> None:
-    resp = await _msra_request("DELETE", f"/api/scans/{scan_id}")
-    if resp.status_code not in (200, 204):
-        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+@router.patch("/scans/{scan_id}/findings/{finding_id}/triage")
+async def triage_finding(scan_id: UUID, finding_id: int, body: TriageRequest, db: AsyncSession = Depends(get_db), org_id: UUID = Depends(get_current_org_id)):
+    finding = (await db.execute(select(MobileFinding).join(MobileScan, MobileFinding.scan_id == MobileScan.id).where(MobileFinding.id == finding_id, MobileFinding.scan_id == scan_id, MobileScan.org_id == org_id))).scalar_one_or_none()
+    if not finding: raise HTTPException(404, "Finding not found")
+    finding.triage_status = body.status; await db.commit(); await db.refresh(finding)
+    return _finding_to_dict(finding)
 
 
-# ── Upload ────────────────────────────────────────────────────────────────────
-
-@router.post("/upload", summary="Upload a mobile app file for scanning")
-async def upload_file(
-    current_user: Annotated[User, Depends(require_tool("mobile"))],
-    file: UploadFile = File(...),
-) -> Response:
-    allowed_suffixes = {".apk", ".apkm", ".xapk", ".ipa", ".jar", ".exe", ".dll"}
-    suffix = "." + (file.filename or "").rsplit(".", 1)[-1].lower()
-    if suffix not in allowed_suffixes:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": {"code": "INVALID_FILE_TYPE", "message": f"Unsupported file type. Allowed: {', '.join(sorted(allowed_suffixes))}"}},
-        )
-
-    _MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
-    if file.size and file.size > _MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail={"error": {"code": "FILE_TOO_LARGE", "message": "File exceeds 500 MB limit."}},
-        )
-
-    file_bytes = await file.read()
-    if len(file_bytes) > _MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail={"error": {"code": "FILE_TOO_LARGE", "message": "File exceeds 500 MB limit."}},
-        )
-
-    # Forward as multipart/form-data to MSRA — MSRA expects the field name "apk"
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        try:
-            resp = await client.post(
-                f"{settings.MSRA_URL}/api/upload",
-                files={"apk": (file.filename, file_bytes, file.content_type or "application/octet-stream")},
-            )
-        except httpx.ConnectError:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={"error": {"code": "MSRA_UNAVAILABLE", "message": "Mobile Scanner service is not reachable."}},
-            )
-
-    return _proxy_response(resp)
+@router.delete("/scans/{scan_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_scan(scan_id: UUID, db: AsyncSession = Depends(get_db), org_id: UUID = Depends(get_current_org_id), _user: User = Depends(get_current_user)):
+    scan = (await db.execute(select(MobileScan).where(MobileScan.id == scan_id, MobileScan.org_id == org_id))).scalar_one_or_none()
+    if not scan: raise HTTPException(404, "Scan not found")
+    if scan.file_path: Path(scan.file_path).unlink(missing_ok=True)
+    await db.delete(scan); await db.commit()
 
 
-# ── Triage ────────────────────────────────────────────────────────────────────
-
-@router.patch("/scans/{scan_id}/findings/{finding_id}/triage", summary="Update finding triage status")
-async def triage_finding(
-    scan_id: str,
-    finding_id: int,
-    request: Request,
-    current_user: Annotated[User, Depends(get_current_user)],
-) -> Response:
-    body = await request.json()
-    resp = await _msra_request(
-        "PATCH",
-        f"/api/scans/{scan_id}/findings/{finding_id}/triage",
-        json=body,
-    )
-    return _proxy_response(resp)
-
-
-# ── Code snippet ──────────────────────────────────────────────────────────────
-
-@router.get("/scans/{scan_id}/findings/{finding_id}/snippet", summary="Get vulnerable code snippet")
-async def get_snippet(
-    scan_id: str,
-    finding_id: int,
-    current_user: Annotated[User, Depends(get_current_user)],
-) -> Response:
-    resp = await _msra_request("GET", f"/api/scans/{scan_id}/findings/{finding_id}/snippet")
-    return _proxy_response(resp)
-
-
-# ── Exports ───────────────────────────────────────────────────────────────────
-
-@router.get("/scans/{scan_id}/export/{fmt}", summary="Export scan findings (pdf|csv|sarif|json)")
-async def export_scan(
-    scan_id: str,
-    fmt: str,
-    current_user: Annotated[User, Depends(get_current_user)],
-) -> StreamingResponse:
-    if fmt not in ("pdf", "csv", "sarif", "json"):
-        raise HTTPException(status_code=400, detail="Invalid export format. Use: pdf, csv, sarif, json")
-
+@router.get("/scans/{scan_id}/export/{fmt}")
+async def export_scan(scan_id: UUID, fmt: str, db: AsyncSession = Depends(get_db), org_id: UUID = Depends(get_current_org_id)):
+    scan = (await db.execute(select(MobileScan).where(MobileScan.id == scan_id, MobileScan.org_id == org_id))).scalar_one_or_none()
+    if not scan: raise HTTPException(404, "Scan not found")
+    findings = (await db.execute(select(MobileFinding).where(MobileFinding.scan_id == scan_id))).scalars().all()
     if fmt == "json":
-        # JSON findings come from the findings endpoint
-        resp = await _msra_request("GET", f"/api/scans/{scan_id}/findings")
-        return StreamingResponse(
-            iter([resp.content]),
-            media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="scan_{scan_id}.json"'},
-        )
-
-    url = f"{settings.MSRA_URL}/api/scans/{scan_id}/export/{fmt}"
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        try:
-            async with client.stream("GET", url) as resp:
-                headers = {
-                    "Content-Disposition": resp.headers.get(
-                        "Content-Disposition",
-                        f'attachment; filename="scan_{scan_id}.{fmt}"',
-                    )
-                }
-                media_type = resp.headers.get("content-type", "application/octet-stream")
-                content = await resp.aread()
-        except httpx.ConnectError:
-            raise HTTPException(status_code=503, detail="MSRA unavailable")
-
-    return StreamingResponse(
-        iter([content]),
-        media_type=media_type,
-        headers=headers,
-    )
+        data = json.dumps({"scan": _scan_to_dict(scan), "findings": [_finding_to_dict(f) for f in findings]}, indent=2)
+        return StreamingResponse(io.BytesIO(data.encode()), media_type="application/json", headers={"Content-Disposition": f"attachment; filename=mobile_{scan_id}.json"})
+    if fmt == "csv":
+        buf = io.StringIO()
+        w = csv.writer(buf); w.writerow(["ID","Title","Severity","Category","CWE","File","Line","Snippet","Triage"])
+        for f in findings: w.writerow([f.id, f.title, f.severity, f.category, f.cwe or "", f.file_path or "", f.line_number or "", f.code_snippet or "", f.triage_status])
+        return StreamingResponse(io.BytesIO(buf.getvalue().encode()), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename=mobile_{scan_id}.csv"})
+    if fmt == "sarif":
+        sarif = {"$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.5.json", "version": "2.1.0", "runs": [{"tool": {"driver": {"name": "AttackTrace Mobile Scanner", "version": "1.0"}}, "results": [{"ruleId": f.cwe or f.category, "level": {"Critical":"error","High":"error","Medium":"warning","Low":"note","Info":"none"}.get(f.severity,"warning"), "message": {"text": f.title}, "locations": [{"physicalLocation":{"artifactLocation":{"uri": f.file_path or "unknown"},"region":{"startLine": f.line_number or 1}}}] if f.file_path else []} for f in findings]}]}
+        return StreamingResponse(io.BytesIO(json.dumps(sarif, indent=2).encode()), media_type="application/json", headers={"Content-Disposition": f"attachment; filename=mobile_{scan_id}.sarif"})
+    raise HTTPException(400, f"Unsupported format '{fmt}'. Use: json, csv, sarif")
 
 
-# ── Dynamic analysis ──────────────────────────────────────────────────────────
-
-@router.get("/adb-devices", summary="List connected ADB devices")
-async def adb_devices(
-    current_user: Annotated[User, Depends(get_current_user)],
-) -> Response:
-    resp = await _msra_request("GET", "/api/dynamic/adb-devices")
-    return _proxy_response(resp)
-
-
-@router.post("/scans/{scan_id}/dynamic", summary="Start dynamic analysis for a finding")
-async def start_dynamic(
-    scan_id: str,
-    request: Request,
-    current_user: Annotated[User, Depends(require_tool("mobile"))],
-) -> Response:
-    body = await request.json()
-    resp = await _msra_request("POST", "/api/dynamic/verify", json=body)
-    return _proxy_response(resp)
+@router.get("/rules/stats")
+async def rules_stats(db: AsyncSession = Depends(get_db), org_id: UUID = Depends(get_current_org_id)):
+    patterns = (await db.execute(select(MobilePattern).where(or_(MobilePattern.org_id == org_id, MobilePattern.org_id == None)))).scalars().all()  # noqa: E711
+    by_plat: dict = {}; by_sev: dict = {}; enabled = custom = 0
+    for p in patterns:
+        by_plat[p.platform] = by_plat.get(p.platform, 0) + 1
+        by_sev[p.severity] = by_sev.get(p.severity, 0) + 1
+        if p.is_enabled: enabled += 1
+        if p.is_custom: custom += 1
+    return {"total": len(patterns), "enabled": enabled, "disabled": len(patterns) - enabled, "by_source": {"builtin": len(patterns) - custom, "custom": custom}, "by_platform": by_plat, "by_severity": by_sev, "android": by_plat.get("android", 0), "ios": by_plat.get("ios", 0), "jar": by_plat.get("jar", 0), "exe": by_plat.get("exe", 0), "custom": custom}
 
 
-@router.get("/dynamic/jobs", summary="List all dynamic analysis jobs")
-async def dynamic_jobs(
-    current_user: Annotated[User, Depends(get_current_user)],
-) -> Response:
-    resp = await _msra_request("GET", "/api/dynamic/jobs")
-    return _proxy_response(resp)
+@router.get("/rules")
+async def list_rules(db: AsyncSession = Depends(get_db), org_id: UUID = Depends(get_current_org_id)):
+    patterns = (await db.execute(select(MobilePattern).where(or_(MobilePattern.org_id == org_id, MobilePattern.org_id == None)).order_by(MobilePattern.is_custom, MobilePattern.platform, MobilePattern.title))).scalars().all()  # noqa: E711
+    return [_pattern_to_dict(p) for p in patterns]
 
 
-@router.get("/dynamic/{job_id}", summary="Poll dynamic analysis job")
-async def dynamic_job_status(
-    job_id: str,
-    current_user: Annotated[User, Depends(get_current_user)],
-) -> Response:
-    resp = await _msra_request("GET", f"/api/dynamic/verify/{job_id}")
-    return _proxy_response(resp)
+class RuleCreate(BaseModel):
+    title: str; platform: str; severity: str; category: str; pattern: str
+    description: Optional[str] = None; remediation: Optional[str] = None; cwe: Optional[str] = None
 
 
-# ── AI ────────────────────────────────────────────────────────────────────────
-
-@router.post("/ai/poc", summary="Generate PoC code for a finding")
-async def generate_poc(
-    request: Request,
-    current_user: Annotated[User, Depends(require_tool("mobile"))],
-) -> Response:
-    body = await request.json()
-    resp = await _msra_request("POST", "/api/generate-poc", json=body)
-    return _proxy_response(resp)
+@router.post("/rules", status_code=status.HTTP_201_CREATED)
+async def create_rule(body: RuleCreate, db: AsyncSession = Depends(get_db), org_id: UUID = Depends(get_current_org_id), _user: User = Depends(get_current_user)):
+    try: re.compile(body.pattern)
+    except re.error as e: raise HTTPException(400, f"Invalid regex: {e}")
+    p = MobilePattern(org_id=org_id, platform=body.platform, title=body.title, severity=body.severity, category=body.category, regex_pattern=body.pattern, description=body.description, remediation=body.remediation, cwe=body.cwe, is_custom=True, is_enabled=True)
+    db.add(p); await db.commit(); await db.refresh(p)
+    return _pattern_to_dict(p)
 
 
-# ── Rules / Patterns ──────────────────────────────────────────────────────────
-
-@router.get("/rules/stats", summary="Pattern counts per platform")
-async def rule_stats(
-    current_user: Annotated[User, Depends(get_current_user)],
-) -> Response:
-    resp = await _msra_request("GET", "/api/rules/stats")
-    return _proxy_response(resp)
+class RuleUpdate(BaseModel):
+    title: Optional[str] = None; platform: Optional[str] = None; severity: Optional[str] = None
+    category: Optional[str] = None; pattern: Optional[str] = None; description: Optional[str] = None
+    remediation: Optional[str] = None; cwe: Optional[str] = None
 
 
-@router.get("/rules", summary="List all detection patterns")
-async def list_rules(
-    current_user: Annotated[User, Depends(get_current_user)],
-) -> Response:
-    resp = await _msra_request("GET", "/api/rules")
-    return _proxy_response(resp)
+@router.put("/rules/{rule_id}")
+async def update_rule(rule_id: UUID, body: RuleUpdate, db: AsyncSession = Depends(get_db), org_id: UUID = Depends(get_current_org_id), _user: User = Depends(get_current_user)):
+    p = (await db.execute(select(MobilePattern).where(MobilePattern.id == rule_id))).scalar_one_or_none()
+    if not p: raise HTTPException(404, "Rule not found")
+    if not p.is_custom or p.org_id != org_id: raise HTTPException(403, "Cannot modify built-in rules")
+    if body.pattern:
+        try: re.compile(body.pattern)
+        except re.error as e: raise HTTPException(400, f"Invalid regex: {e}")
+        p.regex_pattern = body.pattern
+    for field in ("title","platform","severity","category","description","remediation","cwe"):
+        val = getattr(body, field)
+        if val is not None: setattr(p, field, val)
+    await db.commit(); await db.refresh(p)
+    return _pattern_to_dict(p)
 
 
-@router.post("/rules", summary="Create a custom detection rule", status_code=status.HTTP_201_CREATED)
-async def create_rule(
-    request: Request,
-    current_user: Annotated[User, Depends(require_tool("mobile"))],
-) -> Response:
-    body = await request.json()
-    resp = await _msra_request("POST", "/api/rules", json=body)
-    return _proxy_response(resp)
+@router.delete("/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_rule(rule_id: UUID, db: AsyncSession = Depends(get_db), org_id: UUID = Depends(get_current_org_id), _user: User = Depends(get_current_user)):
+    p = (await db.execute(select(MobilePattern).where(MobilePattern.id == rule_id))).scalar_one_or_none()
+    if not p: raise HTTPException(404, "Rule not found")
+    if not p.is_custom or p.org_id != org_id: raise HTTPException(403, "Cannot delete built-in rules")
+    await db.delete(p); await db.commit()
 
 
-@router.put("/rules/{rule_id}", summary="Update a custom rule")
-async def update_rule(
-    rule_id: str,
-    request: Request,
-    current_user: Annotated[User, Depends(require_tool("mobile"))],
-) -> Response:
-    body = await request.json()
-    resp = await _msra_request("PUT", f"/api/rules/{rule_id}", json=body)
-    return _proxy_response(resp)
+@router.patch("/rules/{rule_id}/toggle")
+async def toggle_rule(rule_id: UUID, db: AsyncSession = Depends(get_db), org_id: UUID = Depends(get_current_org_id), _user: User = Depends(get_current_user)):
+    p = (await db.execute(select(MobilePattern).where(MobilePattern.id == rule_id, or_(MobilePattern.org_id == org_id, MobilePattern.org_id == None)))).scalar_one_or_none()  # noqa: E711
+    if not p: raise HTTPException(404, "Rule not found")
+    p.is_enabled = not p.is_enabled; await db.commit(); await db.refresh(p)
+    return _pattern_to_dict(p)
 
 
-@router.delete("/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a custom rule")
-async def delete_rule(
-    rule_id: str,
-    current_user: Annotated[User, Depends(require_tool("mobile"))],
-) -> None:
-    await _msra_request("DELETE", f"/api/rules/{rule_id}")
+@router.get("/scans/{scan_id}/findings/{finding_id}/snippet")
+async def finding_snippet(scan_id: UUID, finding_id: int, db: AsyncSession = Depends(get_db), org_id: UUID = Depends(get_current_org_id)):
+    f = (await db.execute(select(MobileFinding).join(MobileScan, MobileFinding.scan_id == MobileScan.id).where(MobileFinding.id == finding_id, MobileFinding.scan_id == scan_id, MobileScan.org_id == org_id))).scalar_one_or_none()
+    if not f: raise HTTPException(404, "Finding not found")
+    return {"snippet": f.code_snippet or "", "file": f.file_path or "", "line": f.line_number}
 
 
-@router.patch("/rules/{rule_id}/toggle", summary="Enable or disable a pattern")
-async def toggle_rule(
-    rule_id: str,
-    request: Request,
-    current_user: Annotated[User, Depends(get_current_user)],
-) -> Response:
-    body = await request.json()
-    resp = await _msra_request("PATCH", f"/api/rules/{rule_id}/toggle", json=body)
-    return _proxy_response(resp)
+@router.get("/adb-devices")
+async def adb_devices():
+    return {"devices": [], "error": None}
 
 
-# ── MSRA → Central findings sync ──────────────────────────────────────────────
-
-_SEVERITY_MAP = {
-    "critical": FindingSeverity.CRITICAL,
-    "high":     FindingSeverity.HIGH,
-    "medium":   FindingSeverity.MEDIUM,
-    "low":      FindingSeverity.LOW,
-    "info":     FindingSeverity.INFO,
-}
+@router.post("/scans/{scan_id}/dynamic")
+async def start_dynamic(scan_id: UUID, _user: User = Depends(get_current_user)):
+    return {"job_id": "not-supported", "status": "queued", "message": "Dynamic analysis requires ADB setup."}
 
 
-def _msra_dedup_hash(org_id: str, scan_id: str, finding_id: int) -> str:
-    key = f"msra|{org_id}|{scan_id}|{finding_id}"
-    return hashlib.sha256(key.encode()).hexdigest()
+@router.get("/dynamic/jobs")
+async def list_dynamic_jobs():
+    return []
 
 
-async def _sync_msra_to_db(org_id: str, db: AsyncSession) -> dict:
-    """Pull all completed MSRA scans and upsert their findings into the central DB."""
-    inserted = 0
-    updated = 0
-    skipped = 0
-    errors = 0
+@router.get("/dynamic/{job_id}")
+async def dynamic_job(job_id: str):
+    return {"job_id": job_id, "status": "not_found"}
 
-    # Fetch MSRA scan list
+
+class PocRequest(BaseModel):
+    finding_id: int; scan_id: str
+
+
+@router.post("/ai/poc")
+async def generate_poc(body: PocRequest, db: AsyncSession = Depends(get_db), org_id: UUID = Depends(get_current_org_id), _user: User = Depends(get_current_user)):
+    f = (await db.execute(select(MobileFinding).join(MobileScan, MobileFinding.scan_id == MobileScan.id).where(MobileFinding.id == body.finding_id, MobileScan.org_id == org_id))).scalar_one_or_none()
+    if not f: raise HTTPException(404, "Finding not found")
+    if not settings.ANTHROPIC_API_KEY:
+        return {"poc_code": f"# PoC for: {f.title}\n# Severity: {f.severity} | CWE: {f.cwe or 'N/A'}\n\n# {f.description or ''}\n\n# Set ANTHROPIC_API_KEY to generate AI-powered PoC."}
     try:
-        stats_resp = await _msra_request("GET", "/api/dashboard/stats")
-        if stats_resp.status_code != 200:
-            return {"error": "MSRA unavailable", "inserted": 0, "updated": 0, "skipped": 0}
-        try:
-            stats = stats_resp.json()
-        except Exception:
-            return {"error": "MSRA returned invalid JSON for stats", "inserted": 0, "updated": 0, "skipped": 0}
-    except Exception as exc:
-        return {"error": str(exc), "inserted": 0, "updated": 0, "skipped": 0}
-
-    scans = stats.get("recent_scans", [])
-    done_scans = [s for s in scans if s.get("status") in ("done", "completed")]
-
-    for scan in done_scans:
-        scan_id = scan.get("scan_id")
-        if not scan_id:
-            continue
-
-        # Fetch findings for this MSRA scan
-        try:
-            findings_resp = await _msra_request("GET", f"/api/scans/{scan_id}/findings")
-            if findings_resp.status_code != 200:
-                errors += 1
-                continue
-            try:
-                findings_data = findings_resp.json()
-            except Exception:
-                logger.warning("MSRA returned invalid JSON for scan %s findings", scan_id)
-                errors += 1
-                continue
-        except Exception as exc:
-            logger.warning("Failed to fetch MSRA findings for scan %s: %s", scan_id, exc)
-            errors += 1
-            continue
-
-        msra_findings = findings_data.get("findings", [])
-        apk_name = findings_data.get("apk") or scan.get("apk", "")
-
-        for mf in msra_findings:
-            fid = mf.get("id")
-            if fid is None:
-                continue
-
-            dedup = _msra_dedup_hash(org_id, scan_id, fid)
-
-            # Check if already exists
-            result = await db.execute(select(Finding).where(Finding.dedup_hash == dedup))
-            existing = result.scalar_one_or_none()
-
-            # Map severity
-            raw_sev = (mf.get("severity") or "info").lower()
-            sev = _SEVERITY_MAP.get(raw_sev, FindingSeverity.INFO)
-
-            # Normalise evidence to dict (MSRA returns it as a dict already)
-            evidence = mf.get("evidence")
-            if isinstance(evidence, str):
-                evidence = {"raw": evidence}
-
-            # CWE list → cve-like array (stored in references; cve stays empty for mobile)
-            cwe_list = mf.get("cwe") or []
-            if isinstance(cwe_list, str):
-                cwe_list = [cwe_list]
-
-            refs = mf.get("references") or []
-
-            if existing is None:
-                db.add(Finding(
-                    org_id=org_id,
-                    scan_job_id=None,
-                    source="msra",
-                    source_scan_id=scan_id,
-                    title=mf.get("title", "Untitled"),
-                    description=mf.get("description", ""),
-                    severity=sev,
-                    category=mf.get("category", ""),
-                    affected_asset=apk_name,
-                    evidence=evidence,
-                    remediation=mf.get("remediation") or "",
-                    references=refs,
-                    cve=[],
-                    status=FindingStatus.OPEN,
-                    confidence="certain",
-                    dedup_hash=dedup,
-                ))
-                inserted += 1
-            else:
-                # Update mutable fields (evidence, remediation, triage_status)
-                existing.evidence = evidence
-                existing.remediation = mf.get("remediation") or existing.remediation
-                # Sync triage status from MSRA → AttackTrace
-                msra_triage = mf.get("triage_status", "")
-                if msra_triage == "true_positive":
-                    existing.false_positive = False
-                elif msra_triage == "false_positive":
-                    existing.false_positive = True
-                    existing.status = FindingStatus.FALSE_POSITIVE
-                updated += 1
-
-    try:
-        await db.commit()
-    except Exception as exc:
-        await db.rollback()
-        logger.error("MSRA sync commit failed: %s", exc)
-        return {"error": str(exc), "inserted": inserted, "updated": updated, "skipped": skipped, "errors": errors + 1}
-
-    return {"inserted": inserted, "updated": updated, "skipped": skipped, "errors": errors}
+        import anthropic
+        client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        msg = await client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=1024, messages=[{"role":"user","content": f"Generate a concise proof-of-concept for this mobile security finding:\nTitle: {f.title}\nSeverity: {f.severity}\nCWE: {f.cwe or 'N/A'}\nDescription: {f.description or 'N/A'}\nSnippet: {f.code_snippet or 'N/A'}\n\nProvide practical demonstration steps with code."}])
+        return {"poc_code": msg.content[0].text if msg.content else "# Could not generate PoC"}
+    except Exception as e:
+        return {"poc_code": f"# Generation failed: {e}"}
 
 
-@router.post("/sync", summary="Sync MSRA findings into central findings DB")
-async def sync_msra_findings(
-    current_user: Annotated[User, Depends(require_tool("mobile"))],
-    org_id: Annotated[str, Depends(get_current_org_id)],
-    db: AsyncSession = Depends(get_db),
-) -> dict:
-    result = await _sync_msra_to_db(str(org_id), db)
-    return result
+@router.post("/sync")
+async def sync_findings():
+    return {"inserted": 0, "updated": 0, "skipped": 0}

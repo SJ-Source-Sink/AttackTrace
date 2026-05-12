@@ -17,7 +17,7 @@ celery_app = Celery(
     "attacktrace_platform",
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND,
-    include=["app.workers.scan_worker", "app.workers.schedule_worker"],
+    include=["app.workers.scan_worker", "app.workers.schedule_worker", "app.workers.mobile_worker"],
 )
 
 celery_app.conf.update(
@@ -38,6 +38,7 @@ celery_app.conf.update(
         "app.workers.scan_worker.recover_stuck_scans": {"queue": "default"},
         "app.workers.scan_worker.triage_scan_findings": {"queue": "ai"},
         "app.workers.schedule_worker.check_scheduled_scans": {"queue": "default"},
+        "app.workers.mobile_worker.run_mobile_scan": {"queue": "scans"},
     },
     task_default_queue="default",
     broker_connection_retry_on_startup=True,
