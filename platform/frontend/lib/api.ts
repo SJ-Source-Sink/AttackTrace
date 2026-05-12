@@ -210,6 +210,7 @@ export const findingsApi = {
     api.post(`/findings/${id}/comments`, { body: content }),
   timeline: (params: Record<string, string | number | undefined>) =>
     api.get("/findings/timeline", params),
+  assignees: () => api.get<{ items: { id: string; name: string; email: string; role: string }[] }>("/findings/assignees"),
 };
 
 export const reportsApi = {

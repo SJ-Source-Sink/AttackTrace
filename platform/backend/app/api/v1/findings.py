@@ -23,7 +23,7 @@ from app.models.db.finding import (
     FindingSuppression,
 )
 from app.models.db.suppression_rule import ScanSuppressionRule
-from app.models.db.user import User
+from app.models.db.user import OrgMember, User
 from app.models.schemas.finding import (
     FindingCommentCreate,
     FindingCommentResponse,
@@ -32,6 +32,8 @@ from app.models.schemas.finding import (
     FindingResponse,
     FindingUpdate,
 )
+from app.services.risk_scoring_service import compute_risk_score
+from app.services.sla_service import apply_compliance_tags, compute_sla_deadline
 
 router = APIRouter(prefix="/findings", tags=["Findings"])
 
@@ -71,6 +73,27 @@ async def create_finding(
             detail={"error": {"code": "INVALID_STATUS", "message": f"Invalid status: {payload.status}"}},
         )
 
+    # Auto-compute SLA deadline, risk score, and compliance tags
+    sla_deadline = compute_sla_deadline(payload.severity, None)
+    risk_score, risk_explanation = compute_risk_score(
+        payload.severity,
+        payload.cvss_score,
+        None,
+        False,
+        None,
+    )
+    compliance_tags = apply_compliance_tags(
+        payload.title, payload.category, payload.description
+    )
+
+    # Resolve assigned_to UUID
+    assigned_to_uuid: Optional[UUID] = None
+    if payload.assigned_to:
+        try:
+            assigned_to_uuid = UUID(payload.assigned_to)
+        except ValueError:
+            pass
+
     finding = Finding(
         org_id=org_id,
         source="manual",
@@ -86,6 +109,11 @@ async def create_finding(
         cvss_score=payload.cvss_score,
         status=status_enum,
         ticket_ref=payload.ticket_ref,
+        sla_deadline=sla_deadline,
+        risk_score=risk_score,
+        risk_explanation=risk_explanation,
+        compliance_tags=compliance_tags,
+        assigned_to=assigned_to_uuid,
     )
     db.add(finding)
     await db.flush()
@@ -592,6 +620,25 @@ async def update_finding(
     if payload.remediation is not None:
         finding.remediation = payload.remediation
 
+    if payload.assigned_to is not None:
+        try:
+            finding.assigned_to = UUID(payload.assigned_to) if payload.assigned_to else None
+        except ValueError:
+            pass
+
+    # Recompute risk score if severity changed
+    if payload.severity is not None:
+        new_score, new_explanation = compute_risk_score(
+            finding.severity.value,
+            finding.cvss_score,
+            finding.epss_score,
+            finding.kev_status,
+            finding.priority_score,
+        )
+        finding.risk_score = new_score
+        finding.risk_explanation = new_explanation
+        finding.sla_deadline = compute_sla_deadline(finding.severity.value, None)
+
     db.add(finding)
 
     after_state = {
@@ -714,6 +761,31 @@ async def list_comments(
         "page": page,
         "per_page": per_page,
         "pages": pages,
+    }
+
+
+@router.get(
+    "/assignees",
+    summary="List users who can be assigned to findings",
+)
+async def list_assignees(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return org members (id, name, email, role) for the assignment dropdown."""
+    result = await db.execute(
+        select(User.id, User.full_name, User.email, OrgMember.role)
+        .join(OrgMember, OrgMember.user_id == User.id)
+        .where(OrgMember.org_id == org_id, User.is_active == True)
+        .order_by(User.full_name)
+    )
+    rows = result.all()
+    return {
+        "items": [
+            {"id": str(r[0]), "name": r[1], "email": r[2], "role": r[3]}
+            for r in rows
+        ]
     }
 
 

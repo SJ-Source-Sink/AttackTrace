@@ -10,6 +10,7 @@ import { StatsCards } from "@/components/dashboard/stats-cards";
 import { FindingsDashboard } from "@/components/dashboard/findings-dashboard";
 import { RecentFindings } from "@/components/dashboard/recent-findings";
 import { ScanActivity } from "@/components/dashboard/scan-activity";
+import { ExecutiveKPIs } from "@/components/dashboard/executive-kpis";
 import { dashboardApi, scansApi, findingsApi } from "@/lib/api";
 import type { DashboardStats, ScanListResponse, FindingListResponse } from "@/types";
 
@@ -56,6 +57,9 @@ export default function DashboardPage() {
 
       {/* Findings Dashboard */}
       <FindingsDashboard />
+
+      {/* Executive KPIs */}
+      <ExecutiveKPIs />
 
       {/* Two column grid: findings + scans */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">

@@ -141,6 +141,13 @@ class Finding(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Ticketing integration
     ticket_ref: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
 
+    # Assignment
+    assigned_to: Mapped[Optional[UUID]] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     # Relationships
     scan_job: Mapped[Optional["ScanJob"]] = relationship(  # type: ignore[name-defined]
         "ScanJob", back_populates="findings"

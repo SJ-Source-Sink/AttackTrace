@@ -10,6 +10,9 @@ import {
   Loader2,
   Save,
   ExternalLink,
+  GitBranch,
+  Copy,
+  Check,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -358,6 +361,117 @@ export default function IntegrationsPage() {
           ))}
         </div>
       )}
+
+      {/* CI/CD Integration */}
+      <CICDIntegration />
+    </div>
+  );
+}
+
+function CICDIntegration() {
+  const [copied, setCopied] = useState<string | null>(null);
+
+  const copy = (key: string, text: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(key);
+      setTimeout(() => setCopied(null), 2000);
+    });
+  };
+
+  const ghActionsSnippet = `- name: AttackTrace Security Scan
+  uses: actions/github-script@v7
+  env:
+    ATTACKTRACE_API_URL: \${{ secrets.ATTACKTRACE_API_URL }}
+    ATTACKTRACE_TOKEN: \${{ secrets.ATTACKTRACE_TOKEN }}
+  with:
+    script: |
+      const res = await fetch(\`\${process.env.ATTACKTRACE_API_URL}/api/v1/scans\`, {
+        method: 'POST',
+        headers: {
+          'Authorization': \`Bearer \${process.env.ATTACKTRACE_TOKEN}\`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          target_domains: ['\${{ vars.TARGET_DOMAIN }}'],
+          intensity: 'quick',
+        }),
+      });
+      if (!res.ok) core.setFailed('AttackTrace scan failed: ' + res.status);
+      const scan = await res.json();
+      core.info(\`Scan started: \${scan.id}\`);`;
+
+  const curlSnippet = `# Trigger a scan via REST API
+curl -X POST https://your-attacktrace.com/api/v1/scans \\
+  -H "Authorization: Bearer YOUR_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"target_domains": ["example.com"], "intensity": "quick"}'`;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <GitBranch className="h-4 w-4 text-zinc-400" />
+        <h2 className="text-sm font-semibold text-zinc-300">CI/CD Integration</h2>
+        <Badge variant="outline" className="text-[10px] border-zinc-700 text-zinc-500">REST API</Badge>
+      </div>
+      <p className="text-xs text-zinc-500">
+        Trigger scans from your pipeline on every deployment to catch new vulnerabilities early.
+        Use the API directly or embed the snippet below in your GitHub Actions workflow.
+      </p>
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        {/* GitHub Actions */}
+        <Card className="border-zinc-800 bg-zinc-900">
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm text-zinc-200">GitHub Actions</CardTitle>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 px-2 text-xs gap-1 text-zinc-500 hover:text-zinc-200"
+                onClick={() => copy("gh", ghActionsSnippet)}
+              >
+                {copied === "gh" ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                {copied === "gh" ? "Copied" : "Copy"}
+              </Button>
+            </div>
+            <CardDescription className="text-xs">Add to .github/workflows/security.yml</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <pre className="text-[10px] font-mono text-zinc-400 bg-zinc-950 rounded-md p-3 overflow-x-auto whitespace-pre-wrap leading-relaxed">
+              {ghActionsSnippet}
+            </pre>
+          </CardContent>
+        </Card>
+
+        {/* REST API / curl */}
+        <Card className="border-zinc-800 bg-zinc-900">
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm text-zinc-200">REST API (curl)</CardTitle>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 px-2 text-xs gap-1 text-zinc-500 hover:text-zinc-200"
+                onClick={() => copy("curl", curlSnippet)}
+              >
+                {copied === "curl" ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                {copied === "curl" ? "Copied" : "Copy"}
+              </Button>
+            </div>
+            <CardDescription className="text-xs">Call from any script or CI runner</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <pre className="text-[10px] font-mono text-zinc-400 bg-zinc-950 rounded-md p-3 overflow-x-auto whitespace-pre-wrap leading-relaxed">
+              {curlSnippet}
+            </pre>
+          </CardContent>
+        </Card>
+      </div>
+
+      <p className="text-xs text-zinc-600">
+        Store your API token in GitHub Secrets as <code className="text-zinc-400">ATTACKTRACE_TOKEN</code>.
+        Generate tokens from Settings → Team Members → API Keys.
+      </p>
     </div>
   );
 }

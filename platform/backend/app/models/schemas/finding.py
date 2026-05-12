@@ -165,7 +165,7 @@ class FindingResponse(BaseModel):
             last_seen=finding.updated_at.isoformat(),
             age_days=age_days,
             tags=[],
-            assigned_to=None,
+            assigned_to=str(finding.assigned_to) if getattr(finding, "assigned_to", None) else None,
             accept_risk_info=None,
             comments=[],
         )
@@ -184,6 +184,7 @@ class FindingCreate(BaseModel):
     cvss_score: Optional[float] = Field(None, ge=0.0, le=10.0)
     status: str = "open"
     ticket_ref: Optional[str] = None
+    assigned_to: Optional[str] = None  # user UUID string
 
 
 class FindingUpdate(BaseModel):
@@ -195,6 +196,7 @@ class FindingUpdate(BaseModel):
     suppressed_until: Optional[datetime] = None
     ticket_ref: Optional[str] = None
     remediation: Optional[str] = None
+    assigned_to: Optional[str] = None  # user UUID string or empty string to unassign
 
     def validate_status(self) -> Optional[str]:
         valid = {"open", "in_progress", "remediated", "accepted_risk", "false_positive"}

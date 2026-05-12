@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import Link from "next/link";
 import {
   X,
@@ -11,6 +11,8 @@ import {
   FileText,
   BookOpen,
   ChevronRight,
+  UserCircle,
+  ChevronDown,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -22,15 +24,88 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { SeverityBadge } from "@/components/findings/severity-badge";
 import { StatusWorkflow } from "@/components/findings/status-workflow";
 import { FindingComments } from "@/components/findings/finding-comments";
 import { severityBgColor, formatDate, capitalize } from "@/lib/utils";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { findingsApi } from "@/lib/api";
+import { toast } from "sonner";
 import type { Finding, FindingSeverity } from "@/types";
 
 interface FindingDetailProps {
   finding: Finding;
   onClose: () => void;
+}
+
+function AssigneeSelector({ finding }: { finding: Finding }) {
+  const qc = useQueryClient();
+
+  const { data: assigneesData } = useQuery({
+    queryKey: ["findings", "assignees"],
+    queryFn: () => findingsApi.assignees(),
+    staleTime: 5 * 60_000,
+  });
+
+  const assignMutation = useMutation({
+    mutationFn: (userId: string | null) =>
+      findingsApi.update(finding.id, { assigned_to: userId ?? "" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["findings"] });
+      toast.success(userId ? "Finding assigned" : "Assignee removed");
+    },
+    onError: () => toast.error("Failed to update assignee"),
+  });
+
+  // We need userId in scope for the success toast — capture from closure
+  let userId: string | null = null;
+
+  const assignees = assigneesData?.items ?? [];
+  const currentAssignee = assignees.find((a) => a.id === finding.assigned_to);
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="sm" className="h-7 px-2 text-xs gap-1.5 text-zinc-400 hover:text-zinc-200">
+          <UserCircle className="h-3.5 w-3.5" />
+          {currentAssignee ? currentAssignee.name : "Unassigned"}
+          <ChevronDown className="h-3 w-3" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-52">
+        {assignees.map((a) => (
+          <DropdownMenuItem
+            key={a.id}
+            onClick={() => { userId = a.id; assignMutation.mutate(a.id); }}
+            className={finding.assigned_to === a.id ? "bg-zinc-800" : ""}
+          >
+            <div className="flex flex-col gap-0.5">
+              <span className="text-sm">{a.name}</span>
+              <span className="text-xs text-zinc-500">{a.email}</span>
+            </div>
+          </DropdownMenuItem>
+        ))}
+        {finding.assigned_to && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={() => { userId = null; assignMutation.mutate(null); }}
+              className="text-zinc-500"
+            >
+              Remove assignee
+            </DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
 }
 
 export function FindingDetail({ finding, onClose }: FindingDetailProps) {
@@ -76,6 +151,7 @@ export function FindingDetail({ finding, onClose }: FindingDetailProps) {
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          <AssigneeSelector finding={finding} />
           <StatusWorkflow finding={finding} />
           <Button variant="ghost" size="icon" onClick={onClose} className="h-8 w-8">
             <X className="h-4 w-4" />
