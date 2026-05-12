@@ -14,9 +14,12 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import select
+
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
+from app.models.db.scan_job import ScanJob
 from app.models.db.user import User
 from app.services.report_service import generate_report, generate_pdf_report
 
@@ -123,6 +126,16 @@ async def download_report(
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> FileResponse:
+    # Verify scan belongs to this org (prevents IDOR)
+    result = await db.execute(
+        select(ScanJob).where(ScanJob.id == scan_job_id, ScanJob.org_id == org_id)
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"code": "NOT_FOUND", "message": "Scan not found"}},
+        )
+
     # Check if a report already exists for this scan to avoid redundant regeneration
     report_dir = Path(settings.ATTACKTRACE_WORKSPACE_DIR) / "reports" / str(org_id)
     existing_reports = sorted(
@@ -174,6 +187,16 @@ async def download_pdf_report(
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> FileResponse:
+    # Verify scan belongs to this org (prevents IDOR)
+    result = await db.execute(
+        select(ScanJob).where(ScanJob.id == scan_job_id, ScanJob.org_id == org_id)
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"code": "NOT_FOUND", "message": "Scan not found"}},
+        )
+
     try:
         pdf_path = await generate_pdf_report(
             db=db,

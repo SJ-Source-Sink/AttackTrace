@@ -300,7 +300,9 @@ function HistoryTab({ onRestore }: { onRestore: (scan: FullHistoryScan) => void 
         const d = await r.json();
         setItems(d.items ?? []);
       }
-    } catch {}
+    } catch (err) {
+      console.warn("[AI Scanner] Failed to load history:", err);
+    }
     setLoading(false);
   }, []);
 
@@ -326,7 +328,10 @@ function HistoryTab({ onRestore }: { onRestore: (scan: FullHistoryScan) => void 
         if (selected?.id === id) setSelected(null);
         toast.success("Scan deleted");
       }
-    } catch {}
+    } catch (err) {
+      console.error("[AI Scanner] Failed to delete scan:", err);
+      toast.error("Failed to delete scan");
+    }
     setDeleting(null);
   };
 

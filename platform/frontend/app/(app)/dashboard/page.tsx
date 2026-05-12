@@ -22,7 +22,7 @@ export default function DashboardPage() {
 
   const { data: scansData, isLoading: scansLoading } = useQuery({
     queryKey: ["scans", "list", { per_page: 8 }],
-    queryFn: () => scansApi.list({ per_page: "8" }) as Promise<ScanListResponse>,
+    queryFn: () => scansApi.list({ per_page: 8 }) as Promise<ScanListResponse>,
     staleTime: 30_000,
   });
 

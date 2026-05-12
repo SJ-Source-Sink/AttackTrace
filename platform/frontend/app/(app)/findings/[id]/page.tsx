@@ -12,7 +12,7 @@ import { useRouter } from "next/navigation";
 
 export default function FindingDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const { data: finding, isLoading } = useFinding(id);
+  const { data: finding, isLoading, error } = useFinding(id);
   const router = useRouter();
 
   if (isLoading) {
@@ -25,10 +25,16 @@ export default function FindingDetailPage() {
     );
   }
 
-  if (!finding) {
+  if (error || !finding) {
+    const is404 = error && "status" in error && (error as { status: number }).status === 404;
     return (
-      <div className="flex flex-col items-center justify-center py-20">
-        <p className="text-zinc-400 mb-4">Finding not found.</p>
+      <div className="flex flex-col items-center justify-center py-20 gap-4 text-center">
+        <p className="text-zinc-300 font-medium">
+          {is404 ? "Finding not found" : "Failed to load finding"}
+        </p>
+        {error && !is404 && (
+          <p className="text-sm text-zinc-500">{(error as Error).message}</p>
+        )}
         <Button asChild variant="outline">
           <Link href="/findings">Back to findings</Link>
         </Button>

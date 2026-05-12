@@ -312,7 +312,9 @@ export default function NetworkMapPage() {
       if (!res.ok) return;
       const data = await res.json();
       setTimeline(data.snapshots || []);
-    } catch {}
+    } catch (err) {
+      console.warn("[NetworkMap] Timeline failed to load:", err);
+    }
   };
 
   useEffect(() => {
