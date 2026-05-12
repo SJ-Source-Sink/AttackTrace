@@ -23,11 +23,14 @@ engine = create_async_engine(
     max_overflow=settings.DATABASE_MAX_OVERFLOW,
     pool_timeout=settings.DATABASE_POOL_TIMEOUT,
     pool_pre_ping=True,
+    pool_recycle=3600,  # recycle connections older than 1 hour (prevents stale conn errors)
     echo=settings.DEBUG,
     connect_args={
+        "command_timeout": 10,  # fail fast if DB unreachable (asyncpg-specific)
         "server_settings": {
             "statement_timeout": str(settings.DATABASE_STATEMENT_TIMEOUT_MS),
-        }
+            "idle_in_transaction_session_timeout": "60000",  # kill idle txns after 60s
+        },
     },
 )
 

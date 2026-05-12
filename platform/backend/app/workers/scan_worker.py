@@ -74,9 +74,15 @@ def _get_sync_engine():
         _sync_engine = create_engine(
             db_url,
             pool_pre_ping=True,
-            pool_size=3,
-            max_overflow=5,
-            pool_recycle=1800,  # recycle connections every 30 min
+            # Size for concurrent scan workers: 1 conn per worker + headroom
+            pool_size=int(os.getenv("CELERYD_CONCURRENCY", "4")) + 2,
+            max_overflow=4,
+            pool_recycle=1800,     # recycle connections every 30 min
+            pool_timeout=30,       # raise after 30s waiting for a connection
+            connect_args={
+                "connect_timeout": 10,                  # fail fast if DB unreachable
+                "options": f"-c statement_timeout={settings.DATABASE_STATEMENT_TIMEOUT_MS}",
+            },
         )
     return _sync_engine
 
@@ -568,17 +574,12 @@ def _persist_module_results_partial(
         # Persist domains
         for domain in getattr(module_result, "domains", []):
             try:
-                db_session.add(Asset(
-                    org_id=org_id,
-                    scan_job_id=scan_job_uuid,
-                    asset_type=AssetType.DOMAIN,
-                    value=domain.fqdn,
-                    metadata_={
-                        "registrar": getattr(domain, "registrar", ""),
-                        "source": getattr(domain, "source", module_name),
-                        "module": module_name,
-                    },
-                ))
+                _upsert_asset(db_session,
+                    org_id=org_id, scan_job_id=scan_job_uuid,
+                    asset_type=AssetType.DOMAIN, value=domain.fqdn,
+                    metadata_={"registrar": getattr(domain, "registrar", ""),
+                               "source": getattr(domain, "source", module_name), "module": module_name},
+                )
             except Exception as e:
                 logger.debug(f"Partial persist domain skipped [{module_name}]: {e}")
 
@@ -645,6 +646,20 @@ def _persist_module_results_partial(
         )
     except Exception as e:
         logger.warning(f"Partial persist failed for module {module_name}: {e}")
+        try:
+            db_session.rollback()
+        except Exception:
+            pass
+
+
+def _upsert_asset(db_session, **kwargs):
+    """Insert an asset, silently skipping if (org_id, value, asset_type) already exists."""
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from app.models.db.asset import Asset
+    stmt = pg_insert(Asset).values(**kwargs).on_conflict_do_nothing(
+        index_elements=["org_id", "value", "asset_type"]
+    )
+    db_session.execute(stmt)
 
 
 def _persist_session_results(db_session, scan_job, attacktrace_session, org_id: UUID, org_sla_config: Optional[dict] = None) -> tuple:
@@ -660,52 +675,32 @@ def _persist_session_results(db_session, scan_job, attacktrace_session, org_id: 
     suppression_rules = _load_suppression_rules(db_session, org_id)
 
     for domain in attacktrace_session.domains:
-        db_session.add(Asset(
-            org_id=org_id,
-            scan_job_id=scan_job.id,
-            asset_type=AssetType.DOMAIN,
-            value=domain.fqdn,
-            metadata_={
-                "registrar": domain.registrar,
-                "registrant_org": domain.registrant_org,
-                "name_servers": domain.name_servers,
-                "tags": domain.tags,
-                "source": domain.source,
-            },
-        ))
+        _upsert_asset(db_session,
+            org_id=org_id, scan_job_id=scan_job.id,
+            asset_type=AssetType.DOMAIN, value=domain.fqdn,
+            metadata_={"registrar": domain.registrar, "registrant_org": domain.registrant_org,
+                       "name_servers": domain.name_servers, "tags": domain.tags, "source": domain.source},
+        )
         assets_created += 1
 
     for subdomain in attacktrace_session.subdomains:
-        db_session.add(Asset(
-            org_id=org_id,
-            scan_job_id=scan_job.id,
-            asset_type=AssetType.SUBDOMAIN,
-            value=subdomain.fqdn,
-            metadata_={
-                "parent_domain": subdomain.parent_domain,
-                "resolved_ips": subdomain.resolved_ips,
-                "is_alive": subdomain.is_alive,
-                "http_status": subdomain.http_status,
-                "source": subdomain.source,
-            },
-        ))
+        _upsert_asset(db_session,
+            org_id=org_id, scan_job_id=scan_job.id,
+            asset_type=AssetType.SUBDOMAIN, value=subdomain.fqdn,
+            metadata_={"parent_domain": subdomain.parent_domain, "resolved_ips": subdomain.resolved_ips,
+                       "is_alive": subdomain.is_alive, "http_status": subdomain.http_status, "source": subdomain.source},
+        )
         assets_created += 1
 
     for ip in attacktrace_session.ip_addresses:
-        db_session.add(Asset(
-            org_id=org_id,
-            scan_job_id=scan_job.id,
-            asset_type=AssetType.IP,
-            value=ip.address,
-            metadata_={
-                "asn": ip.asn,
-                "asn_org": ip.asn_org,
-                "cloud_provider": ip.cloud_provider.value if ip.cloud_provider else None,
-                "geolocation": ip.geolocation.model_dump() if ip.geolocation else {},
-                "reverse_dns": ip.reverse_dns,
-                "source": ip.source,
-            },
-        ))
+        _upsert_asset(db_session,
+            org_id=org_id, scan_job_id=scan_job.id,
+            asset_type=AssetType.IP, value=ip.address,
+            metadata_={"asn": ip.asn, "asn_org": ip.asn_org,
+                       "cloud_provider": ip.cloud_provider.value if ip.cloud_provider else None,
+                       "geolocation": ip.geolocation.model_dump() if ip.geolocation else {},
+                       "reverse_dns": ip.reverse_dns, "source": ip.source},
+        )
         assets_created += 1
 
     _workspace = Path(settings.ATTACKTRACE_WORKSPACE_DIR)
@@ -717,35 +712,23 @@ def _persist_session_results(db_session, scan_job, attacktrace_session, org_id: 
                 screenshot_url = f"/static/screenshots/{rel}"
             except ValueError:
                 pass
-        db_session.add(Asset(
-            org_id=org_id,
-            scan_job_id=scan_job.id,
-            asset_type=AssetType.WEBAPP,
-            value=webapp.url,
+        _upsert_asset(db_session,
+            org_id=org_id, scan_job_id=scan_job.id,
+            asset_type=AssetType.WEBAPP, value=webapp.url,
             screenshot_url=screenshot_url,
-            metadata_={
-                "title": webapp.title,
-                "status_code": webapp.status_code,
-                "is_alive": webapp.is_alive,
-                "source": webapp.source,
-            },
-        ))
+            metadata_={"title": webapp.title, "status_code": webapp.status_code,
+                       "is_alive": webapp.is_alive, "source": webapp.source},
+        )
         assets_created += 1
 
     for cloud in attacktrace_session.cloud_assets:
-        db_session.add(Asset(
-            org_id=org_id,
-            scan_job_id=scan_job.id,
-            asset_type=AssetType.CLOUD,
-            value=cloud.url or cloud.name,
-            metadata_={
-                "provider": cloud.provider.value if cloud.provider else None,
-                "asset_type": cloud.asset_type.value if cloud.asset_type else None,
-                "name": cloud.name,
-                "is_public": cloud.is_public,
-                "source": cloud.source,
-            },
-        ))
+        _upsert_asset(db_session,
+            org_id=org_id, scan_job_id=scan_job.id,
+            asset_type=AssetType.CLOUD, value=cloud.url or cloud.name,
+            metadata_={"provider": cloud.provider.value if cloud.provider else None,
+                       "asset_type": cloud.asset_type.value if cloud.asset_type else None,
+                       "name": cloud.name, "is_public": cloud.is_public, "source": cloud.source},
+        )
         assets_created += 1
 
     for f in attacktrace_session.findings:
@@ -1003,8 +986,31 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
             logger.info(f"Scan {scan_job_id} already in status {job.status.value} — skipping duplicate")
             return {"status": job.status.value}
 
+        # --- Atomic scan claiming via PostgreSQL advisory lock ---
+        # pg_try_advisory_xact_lock acquires a transaction-level lock:
+        # - Only one worker can hold it at a time (no race between duplicate tasks)
+        # - Released automatically when the transaction ends (no cleanup needed)
+        # - Uses a stable int64 derived from the scan UUID
+        import hashlib as _hashlib
+        from sqlalchemy import text as _text
+        _lock_key = int(_hashlib.md5(scan_job_id.encode()).hexdigest()[:16], 16) % (2**63)
+        lock_acquired = db.execute(
+            _text("SELECT pg_try_advisory_xact_lock(:key)"),
+            {"key": _lock_key}
+        ).scalar()
+
+        if not lock_acquired:
+            logger.info(f"Scan {scan_job_id} already claimed by another worker — skipping")
+            return {"status": "skipped", "reason": "advisory_lock_held"}
+
+        # Re-fetch status inside the lock to catch races
+        db.refresh(job)
+        if job.status in (DBScanStatus.CANCELLED, DBScanStatus.COMPLETED, DBScanStatus.FAILED, DBScanStatus.RUNNING):
+            logger.info(f"Scan {scan_job_id} already in status {job.status.value} — skipping duplicate")
+            return {"status": job.status.value}
+
         # Per-org concurrency limit: max 3 running scans per org at a time.
-        # If already at the limit, reschedule this task to run in 2 minutes.
+        # Checked inside the advisory lock so the count+update is atomic.
         _MAX_CONCURRENT_SCANS_PER_ORG = 3
         running_count = db.execute(
             sync_select(ScanJob).where(
@@ -1202,6 +1208,10 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
 
         except Exception as exc:
             logger.exception(f"Scan {scan_job_id} failed: {exc}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
             job.status = DBScanStatus.FAILED
             job.error_message = str(exc)[:2000]
             job.completed_at = datetime.now(timezone.utc)

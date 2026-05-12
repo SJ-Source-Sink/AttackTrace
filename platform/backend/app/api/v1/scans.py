@@ -144,7 +144,7 @@ async def cancel_or_delete_scan_job(
         scan_id_str = str(job.id)
 
         await db.delete(job)
-        await db.commit()
+        await db.commit()  # DB is source of truth — commit first, then clean up files
 
         # Invalidate dashboard cache so asset/finding counts update immediately
         try:
@@ -155,20 +155,19 @@ async def cancel_or_delete_scan_job(
         except Exception:
             pass
 
-        # Clean up scan files from disk (screenshots, AttackTrace sqlite db, reports)
+        # Clean up scan files from disk — done AFTER commit so files are only removed
+        # once the DB record is durably gone (crash between commit and here is harmless:
+        # orphan files waste disk but the next deploy or manual cleanup handles them).
         workspace = Path(settings.ATTACKTRACE_WORKSPACE_DIR)
 
-        # Screenshots & scan outputs: {workspace}/{org_id}/{scan_id}/
         scan_dir = workspace / org_id_str / scan_id_str
         if scan_dir.exists():
             shutil.rmtree(scan_dir, ignore_errors=True)
 
-        # AttackTrace sqlite db: {workspace}/{org_id}/{scan_id}.db
         scan_db = workspace / org_id_str / f"{scan_id_str}.db"
         if scan_db.exists():
             scan_db.unlink(missing_ok=True)
 
-        # Reports: {workspace}/reports/{org_id}/report_{scan_id}_*.html
         reports_dir = workspace / "reports" / org_id_str
         if reports_dir.exists():
             for f in reports_dir.glob(f"report_{scan_id_str}_*.html"):

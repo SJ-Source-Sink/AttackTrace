@@ -56,6 +56,37 @@ logger = structlog.get_logger("attacktrace.platform")
 limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
 
 
+# --- Request timeout middleware ---
+# Prevents slow DB queries or hung external calls from holding connections open indefinitely.
+# SSE streaming endpoints are excluded (they intentionally run for minutes).
+class TimeoutMiddleware:
+    """Abort non-streaming requests that take longer than REQUEST_TIMEOUT_SECONDS."""
+
+    def __init__(self, app, timeout: float = 60.0):
+        self.app = app
+        self.timeout = timeout
+
+    async def __call__(self, scope, receive, send):
+        import asyncio
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path", "")
+        # SSE streams and long-poll endpoints must not be cut off
+        if path.endswith("/stream") or path.endswith("/events"):
+            await self.app(scope, receive, send)
+            return
+        try:
+            await asyncio.wait_for(self.app(scope, receive, send), timeout=self.timeout)
+        except asyncio.TimeoutError:
+            if scope["type"] == "http":
+                body = b'{"detail":"Request timed out","code":"GATEWAY_TIMEOUT"}'
+                await send({"type": "http.response.start", "status": 504,
+                            "headers": [[b"content-type", b"application/json"],
+                                        [b"content-length", str(len(body)).encode()]]})
+                await send({"type": "http.response.body", "body": body})
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan: startup and shutdown tasks."""
@@ -121,6 +152,9 @@ app = FastAPI(
 # --- Rate limiter ---
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# --- Request timeout (60s for all non-streaming endpoints) ---
+app.add_middleware(TimeoutMiddleware, timeout=60.0)
 
 # --- CORS ---
 app.add_middleware(

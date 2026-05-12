@@ -49,7 +49,11 @@ async def _get_redis() -> aioredis.Redis | None:
         await _redis_pool.ping()
         return _redis_pool
     except Exception:
-        # Pool is unhealthy — reset so it's recreated on the next request
+        # Pool is unhealthy — close it properly before resetting to avoid connection leak
+        try:
+            await _redis_pool.aclose()
+        except Exception:
+            pass
         _redis_pool = None
         return None
 

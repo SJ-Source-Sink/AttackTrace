@@ -32,7 +32,7 @@ celery_app.conf.update(
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
     # All scan tasks go to the "scans" queue; default catches everything else.
-    # Workers MUST be started with: -Q scans,default
+    # Workers MUST be started with: -Q scans,default,ai
     task_routes={
         "app.workers.scan_worker.run_scan": {"queue": "scans"},
         "app.workers.scan_worker.recover_stuck_scans": {"queue": "default"},
@@ -42,8 +42,20 @@ celery_app.conf.update(
     },
     task_default_queue="default",
     broker_connection_retry_on_startup=True,
-    result_expires=3600,  # Keep results for 1 hour (was 7 days)
+    # Results kept for 24 hours — must outlive the longest possible task (7800s ≈ 2h10m)
+    result_expires=86400,
     worker_concurrency=int(os.getenv("CELERYD_CONCURRENCY", "4")),
+    # Recycle workers after N tasks to prevent memory bloat from long-running scans
+    worker_max_tasks_per_child=int(os.getenv("CELERYD_MAX_TASKS_PER_CHILD", "50")),
+    # Recycle workers exceeding 400MB RSS
+    worker_max_memory_per_child=int(os.getenv("CELERYD_MAX_MEMORY_PER_CHILD", "400000")),
+    # Broker transport options: visibility_timeout must exceed the longest task runtime.
+    # If a task takes longer than visibility_timeout, Redis requeues it while it's still
+    # running — causing duplicate execution. Set to 8 hours to be safe.
+    broker_transport_options={
+        "visibility_timeout": 28800,  # 8 hours
+        "confirm_publish": True,       # Broker acks the enqueue; prevents silent drops
+    },
     # Periodic tasks
     beat_schedule={
         "recover-stuck-scans-every-5min": {
