@@ -19,7 +19,7 @@ from sqlalchemy import select
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
-from app.models.db.scan_job import ScanJob
+from app.models.db.scan import ScanJob
 from app.models.db.user import User
 from app.services.report_service import generate_report, generate_pdf_report
 

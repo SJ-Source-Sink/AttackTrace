@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     AI_MODEL: str = "claude-haiku-4-5-20251001"
     AI_MAX_TOKENS: int = 2048
 
+    # MSRA — Mobile Security Review Assistant sidecar
+    MSRA_URL: str = "http://localhost:5001"
+
     # AttackTrace CLI
     ATTACKTRACE_WORKSPACE_DIR: str = str(Path.home() / ".attacktrace" / "scans")
 

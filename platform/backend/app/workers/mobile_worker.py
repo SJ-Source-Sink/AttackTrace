@@ -82,10 +82,61 @@ def _safe_read_text(zip_ref: zipfile.ZipFile, name: str, max_bytes: int = 1_000_
         return None
 
 
+_NESTED_ZIP_EXTENSIONS = {".apk", ".apkm", ".xapk", ".jar", ".ipa"}
+
+
+def _scan_zip(zf: zipfile.ZipFile, prefix: str, tmp_dir: str, depth: int = 0) -> list[tuple[str, str]]:
+    """
+    Recursively scan a ZipFile, following nested APK/JAR/ZIP members up to depth 2.
+    Returns list of (virtual_path, text_content) tuples.
+    """
+    results: list[tuple[str, str]] = []
+    if depth > 2:
+        return results
+
+    for name in zf.namelist():
+        if name.endswith("/"):
+            continue
+        suffix = Path(name).suffix.lower()
+        vpath = f"{prefix}/{name}" if prefix else name
+
+        if _is_text_file(name):
+            content = _safe_read_text(zf, name)
+            if content:
+                results.append((vpath, content))
+
+        elif suffix in (".dex", ".class"):
+            # Extract printable string literals from binary
+            try:
+                with zf.open(name) as f:
+                    raw = f.read(2_000_000)
+                strings_text = "\n".join(
+                    m.group(0) for m in re.finditer(rb"[\x20-\x7e]{6,}", raw)
+                ).decode("ascii", errors="replace")
+                if strings_text:
+                    results.append((vpath + "[strings]", strings_text))
+            except Exception:
+                pass
+
+        elif suffix in _NESTED_ZIP_EXTENSIONS and depth < 2:
+            # Nested APK/JAR — extract to temp file and recurse
+            try:
+                nested_path = Path(tmp_dir) / f"_nested_{depth}_{name.replace('/', '_')}"
+                with zf.open(name) as src, open(nested_path, "wb") as dst:
+                    dst.write(src.read())
+                with zipfile.ZipFile(nested_path, "r") as nested_zf:
+                    results.extend(_scan_zip(nested_zf, vpath, tmp_dir, depth + 1))
+                nested_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    return results
+
+
 def _extract_files(scan_platform: str, file_path: str, tmp_dir: str) -> list[tuple[str, str]]:
     """
     Returns list of (archive_path, text_content) tuples.
-    For APK/IPA/JAR: unzip and collect text files + raw bytes from .dex/.class.
+    For APK/IPA/JAR/APKM: unzip recursively (APKM bundles contain nested APKs).
     For EXE/DLL: treat as binary, do strings-style extraction.
     """
     results: list[tuple[str, str]] = []
@@ -96,7 +147,6 @@ def _extract_files(scan_platform: str, file_path: str, tmp_dir: str) -> list[tup
         try:
             with open(file_path, "rb") as f:
                 raw = f.read()
-            # Find runs of printable ASCII >= 6 chars
             strings_text = "\n".join(
                 m.group(0) for m in re.finditer(rb"[\x20-\x7e]{6,}", raw)
             ).decode("ascii", errors="replace")
@@ -108,27 +158,7 @@ def _extract_files(scan_platform: str, file_path: str, tmp_dir: str) -> list[tup
     # APK, APKM, XAPK, JAR, IPA are all ZIP-based
     try:
         with zipfile.ZipFile(file_path, "r") as zf:
-            names = zf.namelist()
-            for name in names:
-                if name.endswith("/"):
-                    continue
-                suffix = Path(name).suffix.lower()
-                if _is_text_file(name):
-                    content = _safe_read_text(zf, name)
-                    if content:
-                        results.append((name, content))
-                elif suffix in (".dex", ".class"):
-                    # Scan raw bytes for printable string literals
-                    try:
-                        with zf.open(name) as f:
-                            raw = f.read(2_000_000)
-                        strings_text = "\n".join(
-                            m.group(0) for m in re.finditer(rb"[\x20-\x7e]{6,}", raw)
-                        ).decode("ascii", errors="replace")
-                        if strings_text:
-                            results.append((name + "[strings]", strings_text))
-                    except Exception:
-                        pass
+            results.extend(_scan_zip(zf, "", tmp_dir, depth=0))
     except zipfile.BadZipFile:
         # Not a valid zip — try reading as text directly
         try:
