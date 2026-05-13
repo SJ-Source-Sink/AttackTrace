@@ -621,7 +621,11 @@ export default function JsScannerPage() {
               completed = true;
               setSummary(data as unknown as ScanSummary);
               setIsScanning(false);
-              toast.success(`Scan complete — ${data.js_files_scanned} files, ${data.secrets_found} secrets, ${data.endpoints_found} endpoints`);
+              if (data.error) {
+                toast.error(`Scan failed: ${data.error}`);
+              } else {
+                toast.success(`Scan complete — ${data.js_files_scanned} files, ${data.secrets_found} secrets, ${data.endpoints_found} endpoints`);
+              }
             } else if (event === "error") {
               completed = true;
               setIsScanning(false);

@@ -732,19 +732,40 @@ async def _run_js_scan(
     discovered_js: list[str] = []
     seen_urls: set[str] = set()
 
+    _fetch_error: list[str] = []  # mutable container so inner func can write to it
+
     async def _safe_get(client: httpx.AsyncClient, url: str, timeout: float = 10.0) -> httpx.Response | None:
         try:
             return await client.get(url, follow_redirects=True, timeout=timeout)
-        except Exception:
-            return None
+        except httpx.ConnectError as e:
+            _fetch_error.append(f"Connection failed: {e}")
+        except httpx.TimeoutException:
+            _fetch_error.append(f"Timeout after {timeout}s")
+        except httpx.SSLError as e:
+            _fetch_error.append(f"SSL error (try http://): {e}")
+        except Exception as e:
+            _fetch_error.append(f"Request failed: {e}")
+        return None
 
     async with httpx.AsyncClient(
         headers={"User-Agent": "Mozilla/5.0 (compatible; AttackTrace/2.0; +https://attacktrace.io)"},
         follow_redirects=True,
         timeout=10.0,
+        verify=False,
     ) as client:
 
         main_resp = await _safe_get(client, target)
+        if main_resp is None and _fetch_error:
+            err_msg = _fetch_error[-1]
+            yield _sse("progress", {"phase": "error", "message": f"Failed to reach {target}: {err_msg}"})
+            yield _sse("complete", {
+                "scan_id": scan_id, "target": target,
+                "js_files_scanned": 0, "endpoints_found": 0, "secrets_found": 0,
+                "dom_xss_sinks": 0, "source_maps_exposed": 0, "graphql_issues": 0,
+                "prototype_pollution": 0, "env_leaks": 0, "duration_seconds": 0,
+                "error": err_msg,
+            })
+            return
         inline_scripts: list[str] = []
 
         if main_resp and main_resp.status_code == 200:
