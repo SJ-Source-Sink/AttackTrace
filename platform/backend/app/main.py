@@ -73,7 +73,7 @@ class TimeoutMiddleware:
             return
         path = scope.get("path", "")
         # SSE streams and long-poll endpoints must not be cut off
-        if path.endswith("/stream") or path.endswith("/events"):
+        if path.endswith("/stream") or path.endswith("/events") or path.endswith("/scan"):
             await self.app(scope, receive, send)
             return
         try:
