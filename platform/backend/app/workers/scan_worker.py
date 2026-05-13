@@ -979,6 +979,13 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
 
         job = db.get(ScanJob, _scan_uuid)
         if job is None:
+            # The API commits the record before dispatching, but under very high load
+            # the worker may start before the commit propagates. Retry once after a brief wait.
+            import time as _time
+            _time.sleep(2)
+            db.expire_all()
+            job = db.get(ScanJob, _scan_uuid)
+        if job is None:
             logger.error(f"ScanJob {scan_job_id} not found")
             return {"error": "scan_job_not_found"}
 

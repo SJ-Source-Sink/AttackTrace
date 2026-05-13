@@ -477,6 +477,31 @@ async def export_findings(
         return {"items": [FindingResponse.from_orm(f, 0).model_dump() for f in findings], "total": len(findings)}
 
 
+@router.get(
+    "/assignees",
+    summary="List users who can be assigned to findings",
+)
+async def list_assignees(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return org members (id, name, email, role) for the assignment dropdown."""
+    result = await db.execute(
+        select(User.id, User.full_name, User.email, OrgMember.role)
+        .join(OrgMember, OrgMember.user_id == User.id)
+        .where(OrgMember.org_id == org_id, User.is_active == True)
+        .order_by(User.full_name)
+    )
+    rows = result.all()
+    return {
+        "items": [
+            {"id": str(r[0]), "name": r[1], "email": r[2], "role": r[3].value if hasattr(r[3], 'value') else r[3]}
+            for r in rows
+        ]
+    }
+
+
 @router.post(
     "/bulk-status",
     summary="Bulk update finding status",
@@ -764,29 +789,6 @@ async def list_comments(
     }
 
 
-@router.get(
-    "/assignees",
-    summary="List users who can be assigned to findings",
-)
-async def list_assignees(
-    current_user: Annotated[User, Depends(get_current_user)],
-    org_id: UUID = Depends(get_current_org_id),
-    db: AsyncSession = Depends(get_db),
-) -> dict:
-    """Return org members (id, name, email, role) for the assignment dropdown."""
-    result = await db.execute(
-        select(User.id, User.full_name, User.email, OrgMember.role)
-        .join(OrgMember, OrgMember.user_id == User.id)
-        .where(OrgMember.org_id == org_id, User.is_active == True)
-        .order_by(User.full_name)
-    )
-    rows = result.all()
-    return {
-        "items": [
-            {"id": str(r[0]), "name": r[1], "email": r[2], "role": r[3]}
-            for r in rows
-        ]
-    }
 
 
 # --- Helpers ---

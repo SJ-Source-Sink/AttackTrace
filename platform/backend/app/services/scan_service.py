@@ -77,6 +77,14 @@ async def create_scan(
     db.add(log)
     await db.flush()
 
+    # Commit BEFORE dispatching to Celery.
+    # The worker runs in a separate process and queries the DB independently.
+    # If we dispatch before committing, the worker may not find the scan record
+    # (it's flushed but not yet visible outside this transaction).
+    # expire_on_commit=False on AsyncSessionLocal keeps the job object usable.
+    await db.commit()
+    await db.refresh(job)
+
     # Enqueue Celery task (import here to avoid circular imports at module load)
     if not payload.scheduled_at:
         from app.workers.scan_worker import run_scan
