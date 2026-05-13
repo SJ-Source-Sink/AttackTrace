@@ -25,6 +25,12 @@ import {
   Settings2,
   Variable,
   Bug,
+  Shield,
+  Shuffle,
+  Link,
+  Dices,
+  Lock,
+  BookOpen,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -50,7 +56,9 @@ const API_BASE =
 
 type FindingType =
   | "secret" | "dom_xss" | "dom_source" | "source_map" | "graphql"
-  | "prototype_pollution" | "postmessage" | "websocket" | "service_worker" | "env_leak";
+  | "prototype_pollution" | "postmessage" | "websocket" | "service_worker" | "env_leak"
+  | "security_header" | "sri_missing" | "library_vuln" | "open_redirect"
+  | "jsonp" | "insecure_random" | "hardcoded_auth";
 type Severity = "critical" | "high" | "medium" | "low" | "info";
 
 interface JsFinding {
@@ -79,7 +87,13 @@ interface ScanSummary {
   graphql_issues: number;
   prototype_pollution: number;
   env_leaks: number;
+  security_headers: number;
+  sri_missing: number;
+  vulnerable_libs: number;
+  open_redirects: number;
+  hardcoded_auth: number;
   duration_seconds: number;
+  error?: string;
 }
 
 interface HistoryRecord {
@@ -137,6 +151,13 @@ const FINDING_TYPE_META: Record<string, { icon: React.ElementType; color: string
   websocket:          { icon: Radio,        color: "text-emerald-400", label: "WebSocket" },
   service_worker:     { icon: Settings2,    color: "text-indigo-400",  label: "Service Worker" },
   env_leak:           { icon: Variable,     color: "text-amber-400",   label: "Env Leak" },
+  security_header:    { icon: Shield,       color: "text-sky-400",     label: "Sec Header" },
+  sri_missing:        { icon: Link,         color: "text-violet-400",  label: "Missing SRI" },
+  library_vuln:       { icon: BookOpen,     color: "text-rose-400",    label: "Vuln Library" },
+  open_redirect:      { icon: Shuffle,      color: "text-orange-300",  label: "Open Redirect" },
+  jsonp:              { icon: Globe,        color: "text-teal-400",    label: "JSONP" },
+  insecure_random:    { icon: Dices,        color: "text-yellow-300",  label: "Insecure Random" },
+  hardcoded_auth:     { icon: Lock,         color: "text-red-500",     label: "Hardcoded Auth" },
 };
 
 function FindingTypeIcon({ type }: { type: string }) {
@@ -296,14 +317,19 @@ function EndpointsList({ endpoints }: { endpoints: JsEndpoint[] }) {
 
 function SummaryStrip({ summary }: { summary: ScanSummary }) {
   const stats = [
-    { label: "Secrets",      value: summary.secrets_found,       color: "text-red-400",     Icon: Key },
-    { label: "Endpoints",    value: summary.endpoints_found,     color: "text-blue-400",    Icon: Globe },
-    { label: "DOM XSS",      value: summary.dom_xss_sinks,       color: "text-orange-400",  Icon: Zap },
+    { label: "Secrets",      value: summary.secrets_found,        color: "text-red-400",     Icon: Key },
+    { label: "Endpoints",    value: summary.endpoints_found,      color: "text-blue-400",    Icon: Globe },
+    { label: "DOM XSS",      value: summary.dom_xss_sinks,        color: "text-orange-400",  Icon: Zap },
     { label: "Proto Pollut", value: summary.prototype_pollution ?? 0, color: "text-red-300", Icon: Bug },
-    { label: "Env Leaks",    value: summary.env_leaks ?? 0,      color: "text-amber-400",   Icon: Variable },
-    { label: "Source Maps",  value: summary.source_maps_exposed, color: "text-purple-400",  Icon: FileCode2 },
-    { label: "GraphQL",      value: summary.graphql_issues,      color: "text-pink-400",    Icon: Database },
-    { label: "JS Files",     value: summary.js_files_scanned,    color: "text-zinc-300",    Icon: Layers },
+    { label: "Env Leaks",    value: summary.env_leaks ?? 0,       color: "text-amber-400",   Icon: Variable },
+    { label: "Sec Headers",  value: summary.security_headers ?? 0,color: "text-sky-400",     Icon: Shield },
+    { label: "Vuln Libs",    value: summary.vulnerable_libs ?? 0, color: "text-rose-400",    Icon: BookOpen },
+    { label: "Missing SRI",  value: summary.sri_missing ?? 0,     color: "text-violet-400",  Icon: Link },
+    { label: "Open Redirect",value: summary.open_redirects ?? 0,  color: "text-orange-300",  Icon: Shuffle },
+    { label: "Auth Headers", value: summary.hardcoded_auth ?? 0,  color: "text-red-500",     Icon: Lock },
+    { label: "Source Maps",  value: summary.source_maps_exposed,  color: "text-purple-400",  Icon: FileCode2 },
+    { label: "GraphQL",      value: summary.graphql_issues,       color: "text-pink-400",    Icon: Database },
+    { label: "JS Files",     value: summary.js_files_scanned,     color: "text-zinc-300",    Icon: Layers },
   ];
   return (
     <div className="grid grid-cols-4 sm:grid-cols-8 gap-2">

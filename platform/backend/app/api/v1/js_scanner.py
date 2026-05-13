@@ -254,6 +254,18 @@ JS_SECRET_PATTERNS: list[dict] = [
     {"name": "Internal URL",               "pattern": r"https?://(?:10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|localhost|127\.0\.0\.1)[/\w]*", "severity": "medium", "check_entropy": False},
     {"name": "TODO with Credentials",      "pattern": r"(?i)//[^\n]*(?:TODO|FIXME|HACK)[^\n]{0,50}(?:password|secret|token|key)",  "severity": "medium", "check_entropy": False},
     {"name": "Commented Credentials",      "pattern": r"(?i)//[^\n]*(?:password|passwd|secret|token|api_?key)\s*[=:][^\n]{4,}",     "severity": "medium", "check_entropy": False},
+    # ── AI / ML Providers ─────────────────────────────────────────────────────
+    {"name": "OpenAI API Key",             "pattern": r"sk-[a-zA-Z0-9]{48}",                                                         "severity": "critical", "check_entropy": False},
+    {"name": "OpenAI Project API Key",     "pattern": r"sk-proj-[A-Za-z0-9\-_]{48,}",                                               "severity": "critical", "check_entropy": False},
+    {"name": "Anthropic API Key",          "pattern": r"sk-ant-api\d{2}-[A-Za-z0-9\-_]{93,}",                                       "severity": "critical", "check_entropy": False},
+    {"name": "HuggingFace Token",          "pattern": r"hf_[A-Za-z0-9]{34,}",                                                       "severity": "critical", "check_entropy": False},
+    {"name": "Cohere API Key",             "pattern": r"(?i)cohere[_\-]?(?:api[_\-]?)?key[^=\n]{0,10}=\s*['\"]([a-zA-Z0-9]{40})['\"]", "severity": "critical", "check_entropy": True},
+    # ── Cloud / SaaS ──────────────────────────────────────────────────────────
+    {"name": "Azure Storage Account Key",  "pattern": r"AccountKey=[A-Za-z0-9+/]{88}==",                                            "severity": "critical", "check_entropy": False},
+    {"name": "Linear API Key",             "pattern": r"lin_api_[A-Za-z0-9]{40}",                                                   "severity": "critical", "check_entropy": False},
+    {"name": "Notion API Token",           "pattern": r"secret_[A-Za-z0-9]{43}",                                                    "severity": "critical", "check_entropy": False},
+    {"name": "Algolia API Key",            "pattern": r'(?i)algolia[^=\n]{0,30}=\s*[\'"]([A-Za-z0-9]{32})[\'"]',                   "severity": "high",     "check_entropy": True},
+    {"name": "Vercel Token",               "pattern": r"(?i)vercel[_\-]?(?:token|api[_\-]?key)[^=\n]{0,10}=\s*['\"]([A-Za-z0-9]{24})['\"]", "severity": "critical", "check_entropy": True},
 ]
 
 # ── Environment variable leak patterns ────────────────────────────────────────
@@ -359,6 +371,99 @@ SERVICE_WORKER_PATTERNS: list[dict] = [
     {"name": "SW Dangerous Message Handler",    "pattern": r"self\.addEventListener\s*\(\s*['\"`]message['\"`][^}]{0,300}(?:fetch|eval|importScripts)", "severity": "high"},
 ]
 
+# ── Open redirect patterns ────────────────────────────────────────────────────
+
+OPEN_REDIRECT_PATTERNS: list[dict] = [
+    {
+        "name": "Open Redirect via URL Parameter",
+        "pattern": r"(?:location|window\.location)\.(?:href|assign|replace)\s*[=(]\s*[^;'\"]{0,60}(?:getParam|searchParams\.get|params\.get|query\.|req\.query|url=|redirect=|next=|return=)",
+        "severity": "high",
+    },
+    {
+        "name": "Unvalidated Redirect Assignment",
+        "pattern": r"(?:location|window\.location)\s*=\s*(?!['\"]/)[a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*)*\s*[;(,]",
+        "severity": "medium",
+    },
+]
+
+# ── JSONP patterns ─────────────────────────────────────────────────────────────
+
+JSONP_PATTERNS: list[dict] = [
+    {
+        "name": "JSONP Callback Parameter",
+        "pattern": r"""['"](https?://[^'"]{5,}\?[^'"]*\bcallback=[^'"]{3,})['"]""",
+        "severity": "medium",
+    },
+    {
+        "name": "Dynamic JSONP Window Callback",
+        "pattern": r"window\[['\"]\w*[Cc]allback\w*['\"]\]",
+        "severity": "medium",
+    },
+]
+
+# ── Insecure randomness patterns ──────────────────────────────────────────────
+
+INSECURE_RANDOM_PATTERNS: list[dict] = [
+    {
+        "name": "Math.random() for Security Token",
+        "pattern": r"Math\.random\(\)[^;\n]{0,80}(?:token|secret|key|password|nonce|csrf|salt|session|auth)",
+        "severity": "high",
+    },
+    {
+        "name": "Security Value Seeded with Math.random",
+        "pattern": r"(?:nonce|csrf|token|session(?:Id|Key)|secret)\s*(?:=|\+=)\s*[^;\n]{0,40}Math\.random",
+        "severity": "high",
+    },
+]
+
+# ── Hardcoded credentials in request headers ──────────────────────────────────
+
+HARDCODED_AUTH_PATTERNS: list[dict] = [
+    {
+        "name": "Hardcoded Authorization Header",
+        "pattern": r"""['"]Authorization['"]\s*:\s*['"`](?:Bearer|Basic|Token|ApiKey)\s+[A-Za-z0-9+/=._\-]{10,}['"`]""",
+        "severity": "critical",
+    },
+    {
+        "name": "Hardcoded API Key in Request Header",
+        "pattern": r"""['"](?:X-Api-Key|X-Auth-Token|X-Access-Token|Api-Key|Apikey)['"]:\s*['"`][A-Za-z0-9+/=._\-]{10,}['"`]""",
+        "severity": "high",
+    },
+]
+
+# ── Library version fingerprinting ────────────────────────────────────────────
+
+LIBRARY_SIGNATURES: list[dict] = [
+    {
+        "name": "jQuery",
+        "pattern": r"jQuery\s+v?([0-9]+\.[0-9]+\.[0-9]+)|[Jj][Qq]uery[/:]([0-9]+\.[0-9]+\.[0-9]+)",
+        "vuln_below": "3.5.0",
+        "severity": "high",
+        "note": "jQuery < 3.5.0 has XSS vulnerabilities (CVE-2020-11022, CVE-2020-11023).",
+    },
+    {
+        "name": "AngularJS 1.x",
+        "pattern": r"AngularJS\s+v([1]\.[0-9]+\.[0-9]+)|angular[/:]([1]\.[0-9]+\.[0-9]+)",
+        "vuln_below": "9.9.9",  # all 1.x is EOL
+        "severity": "high",
+        "note": "AngularJS 1.x reached end-of-life Dec 2021. Migrate to Angular 15+.",
+    },
+    {
+        "name": "lodash",
+        "pattern": r"lodash\s+([0-9]+\.[0-9]+\.[0-9]+)|lodash[/:]([0-9]+\.[0-9]+\.[0-9]+)",
+        "vuln_below": "4.17.21",
+        "severity": "medium",
+        "note": "lodash < 4.17.21 has prototype pollution (CVE-2021-23337).",
+    },
+    {
+        "name": "moment.js",
+        "pattern": r"moment\.js\s+version\s+([0-9]+\.[0-9]+\.[0-9]+)|\"moment\":\s*\"([0-9]+\.[0-9]+\.[0-9]+)\"",
+        "vuln_below": "2.29.4",
+        "severity": "low",
+        "note": "moment.js is in maintenance mode — migrate to date-fns or Day.js.",
+    },
+]
+
 GRAPHQL_INTROSPECTION_QUERY = json.dumps({
     "query": "{ __schema { types { name } } }"
 })
@@ -406,16 +511,50 @@ def _is_known_3rd_party(url: str) -> bool:
         return False
 
 COMMON_JS_PATHS = [
+    # React Create React App
     "/static/js/main.chunk.js",
     "/static/js/bundle.js",
     "/static/js/vendors~main.chunk.js",
+    "/static/js/runtime-main.js",
+    "/static/js/2.chunk.js",
+    # Next.js
+    "/_next/static/chunks/pages/_app.js",
+    "/_next/static/chunks/main.js",
+    "/_next/static/chunks/webpack.js",
+    "/_next/static/chunks/polyfills.js",
+    "/_next/static/chunks/framework.js",
+    "/_next/static/chunks/commons.js",
+    "/_next/static/development/_buildManifest.js",
+    # Nuxt.js
+    "/_nuxt/runtime.js",
+    "/_nuxt/commons.js",
+    "/_nuxt/app.js",
+    "/_nuxt/vendors.js",
+    # Vite
     "/assets/index.js",
-    "/app.js",
+    "/assets/main.js",
+    # Angular
     "/main.js",
+    "/polyfills.js",
+    "/runtime.js",
+    "/vendor.js",
+    "/scripts.js",
+    # Generic
+    "/app.js",
     "/bundle.js",
+    "/index.js",
+    "/js/app.js",
+    "/js/main.js",
+    "/js/bundle.js",
+    "/dist/bundle.js",
+    "/dist/main.js",
+    "/build/bundle.js",
+    "/build/static/js/main.js",
+    # Manifests (parsed for chunk names)
     "/manifest.json",
     "/asset-manifest.json",
-    "/_next/static/chunks/pages/_app.js",
+    "/webpack-stats.json",
+    # WordPress
     "/wp-includes/js/wp-embed.min.js",
 ]
 
@@ -476,6 +615,191 @@ def _get_context(content: str, pos: int, lines: int = 2) -> str:
 
 def _is_likely_placeholder(value: str) -> bool:
     return bool(_PLACEHOLDER_PATTERNS.search(value))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Security headers + SRI check
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _check_security_headers(resp: httpx.Response) -> list[dict]:
+    """Check HTTP response headers for security misconfigurations."""
+    headers = {k.lower(): v for k, v in resp.headers.items()}
+    page_url = str(resp.url)
+    findings: list[dict] = []
+
+    def _f(name: str, sev: str, match: str, rec: str) -> dict:
+        return {
+            "type": "security_header",
+            "name": name,
+            "severity": sev,
+            "file_url": page_url,
+            "match": match,
+            "line_number": 0,
+            "context": "",
+            "recommendation": rec,
+        }
+
+    # CORS
+    acao = headers.get("access-control-allow-origin", "")
+    acac = headers.get("access-control-allow-credentials", "")
+    if acao == "*" and acac.lower() == "true":
+        findings.append(_f(
+            "CORS: Wildcard Origin + Allow-Credentials",
+            "critical",
+            "Access-Control-Allow-Origin: * + Access-Control-Allow-Credentials: true",
+            "Browsers reject credentials with wildcard CORS, but the config signals misconfiguration. Set a specific trusted origin.",
+        ))
+    elif acao == "*":
+        findings.append(_f(
+            "CORS: Wildcard Allow-Origin",
+            "high",
+            "Access-Control-Allow-Origin: *",
+            "Restrict Access-Control-Allow-Origin to specific trusted origins instead of wildcard.",
+        ))
+
+    # CSP
+    csp = headers.get("content-security-policy", "")
+    if not csp:
+        findings.append(_f(
+            "Missing Content-Security-Policy",
+            "medium",
+            "Content-Security-Policy: not present",
+            "Add a Content-Security-Policy header to reduce XSS risk. Start with \"default-src 'self'\".",
+        ))
+    else:
+        if "unsafe-inline" in csp and "unsafe-eval" in csp:
+            findings.append(_f(
+                "CSP: unsafe-inline + unsafe-eval Directives",
+                "high",
+                csp[:100],
+                "Both 'unsafe-inline' and 'unsafe-eval' in CSP provide minimal XSS protection. Use nonces or hashes.",
+            ))
+        elif "unsafe-inline" in csp:
+            findings.append(_f(
+                "CSP: unsafe-inline Directive",
+                "medium",
+                csp[:100],
+                "CSP 'unsafe-inline' allows inline scripts, weakening XSS protection. Use nonces or hashes.",
+            ))
+
+    # HSTS
+    if page_url.startswith("https://") and not headers.get("strict-transport-security"):
+        findings.append(_f(
+            "Missing HSTS Header",
+            "medium",
+            "Strict-Transport-Security: not present",
+            "Add 'Strict-Transport-Security: max-age=31536000; includeSubDomains' to enforce HTTPS.",
+        ))
+
+    # X-Frame-Options / frame-ancestors
+    xfo = headers.get("x-frame-options", "")
+    has_frame_ancestors = "frame-ancestors" in csp
+    if not xfo and not has_frame_ancestors:
+        findings.append(_f(
+            "Missing Clickjacking Protection",
+            "medium",
+            "X-Frame-Options: not present, CSP frame-ancestors: not present",
+            "Add 'X-Frame-Options: DENY' or CSP 'frame-ancestors 'none'' to prevent clickjacking.",
+        ))
+
+    # X-Content-Type-Options
+    if headers.get("x-content-type-options", "").lower() != "nosniff":
+        findings.append(_f(
+            "Missing X-Content-Type-Options",
+            "low",
+            f"X-Content-Type-Options: {headers.get('x-content-type-options', 'not present')}",
+            "Add 'X-Content-Type-Options: nosniff' to prevent MIME-sniffing attacks.",
+        ))
+
+    # Referrer-Policy
+    if not headers.get("referrer-policy"):
+        findings.append(_f(
+            "Missing Referrer-Policy",
+            "low",
+            "Referrer-Policy: not present",
+            "Add 'Referrer-Policy: strict-origin-when-cross-origin' to control referrer leakage.",
+        ))
+
+    # Server / X-Powered-By version disclosure
+    server = headers.get("server", "")
+    xpb = headers.get("x-powered-by", "")
+    if server and any(v in server.lower() for v in ("apache/", "nginx/", "iis/", "php/", "express/", "werkzeug")):
+        findings.append(_f(
+            "Server Version Disclosure",
+            "low",
+            f"Server: {server}",
+            "Remove or genericize the Server header to avoid disclosing server software/version.",
+        ))
+    if xpb:
+        findings.append(_f(
+            "X-Powered-By Disclosure",
+            "low",
+            f"X-Powered-By: {xpb}",
+            "Remove the X-Powered-By header to avoid disclosing framework/version information.",
+        ))
+
+    return findings
+
+
+def _check_external_sri(html: str, page_url: str) -> list[dict]:
+    """Find cross-origin <script> tags missing Subresource Integrity."""
+    findings: list[dict] = []
+    page_netloc = urlparse(page_url).netloc
+    for m in re.finditer(r'<script\s([^>]+)>', html, re.IGNORECASE):
+        attrs = m.group(1)
+        src_m = re.search(r"""src=['"](https?://[^'"]+)['"]""", attrs, re.IGNORECASE)
+        if not src_m:
+            continue
+        src = src_m.group(1)
+        if urlparse(src).netloc == page_netloc:
+            continue
+        if "integrity=" in attrs.lower():
+            continue
+        findings.append({
+            "type": "sri_missing",
+            "name": "External Script Without Subresource Integrity",
+            "severity": "medium",
+            "file_url": page_url,
+            "match": src[:80],
+            "line_number": 0,
+            "context": m.group(0)[:200],
+            "recommendation": (
+                "Add integrity='sha384-...' and crossorigin='anonymous' to external <script> tags. "
+                "Generate SRI hashes at https://www.srihash.org/"
+            ),
+        })
+    return findings
+
+
+def _detect_library_versions(content: str, file_url: str) -> list[dict]:
+    """Fingerprint known JS library versions and flag outdated ones."""
+    findings: list[dict] = []
+    for lib in LIBRARY_SIGNATURES:
+        m = re.search(lib["pattern"], content, re.IGNORECASE)
+        if not m:
+            continue
+        version = next((g for g in m.groups() if g), None)
+        if not version:
+            continue
+        # Parse version tuple for comparison
+        try:
+            v_parts = tuple(int(x) for x in version.split(".")[:3])
+            threshold = tuple(int(x) for x in lib["vuln_below"].split(".")[:3])
+            is_vuln = v_parts < threshold
+        except Exception:
+            is_vuln = True  # assume vulnerable if parse fails
+        if is_vuln:
+            findings.append({
+                "type": "library_vuln",
+                "name": f"Outdated {lib['name']} ({version})",
+                "severity": lib["severity"],
+                "file_url": file_url,
+                "match": f"{lib['name']} {version}",
+                "line_number": _line_number(content, m.start()),
+                "context": _get_context(content, m.start()),
+                "recommendation": lib.get("note") or f"Upgrade {lib['name']} to {lib['vuln_below']} or later.",
+            })
+    return findings
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -681,6 +1005,74 @@ def _analyze_js_content(
                 "recommendation": "Review service worker scope and ensure it does not intercept sensitive requests or execute untrusted scripts.",
             })
 
+    # ── Open redirect ──────────────────────────────────────────────────────────
+    for pat in OPEN_REDIRECT_PATTERNS:
+        for m in re.finditer(pat["pattern"], processed, re.IGNORECASE | re.DOTALL):
+            line = _line_number(processed, m.start())
+            _add_finding({
+                "type": "open_redirect",
+                "name": pat["name"],
+                "severity": pat["severity"],
+                "file_url": file_url,
+                "match": _truncate_match(m.group(0), 60),
+                "line_number": line,
+                "context": _get_context(processed, m.start()),
+                "recommendation": "Validate redirect destinations against an allowlist of trusted URLs before redirecting.",
+            })
+
+    # ── JSONP ──────────────────────────────────────────────────────────────────
+    for pat in JSONP_PATTERNS:
+        for m in re.finditer(pat["pattern"], processed, re.IGNORECASE):
+            line = _line_number(processed, m.start())
+            raw = m.group(1) if m.lastindex and m.lastindex >= 1 else m.group(0)
+            _add_finding({
+                "type": "jsonp",
+                "name": pat["name"],
+                "severity": pat["severity"],
+                "file_url": file_url,
+                "match": _truncate_match(raw, 80),
+                "line_number": line,
+                "context": _get_context(processed, m.start()),
+                "recommendation": "JSONP is deprecated. Migrate to CORS-enabled APIs. If JSONP must be used, validate the callback name strictly.",
+            })
+
+    # ── Insecure randomness ────────────────────────────────────────────────────
+    for pat in INSECURE_RANDOM_PATTERNS:
+        for m in re.finditer(pat["pattern"], processed, re.IGNORECASE):
+            line = _line_number(processed, m.start())
+            _add_finding({
+                "type": "insecure_random",
+                "name": pat["name"],
+                "severity": pat["severity"],
+                "file_url": file_url,
+                "match": _truncate_match(m.group(0), 60),
+                "line_number": line,
+                "context": _get_context(processed, m.start()),
+                "recommendation": "Use window.crypto.getRandomValues() or crypto.randomUUID() for security-sensitive random values.",
+            })
+
+    # ── Hardcoded auth headers ─────────────────────────────────────────────────
+    for pat in HARDCODED_AUTH_PATTERNS:
+        for m in re.finditer(pat["pattern"], processed, re.IGNORECASE):
+            raw = m.group(1) if m.lastindex and m.lastindex >= 1 else m.group(0)
+            if _is_likely_placeholder(raw):
+                continue
+            line = _line_number(processed, m.start())
+            _add_finding({
+                "type": "hardcoded_auth",
+                "name": pat["name"],
+                "severity": pat["severity"],
+                "file_url": file_url,
+                "match": _truncate_match(raw),
+                "line_number": line,
+                "context": _get_context(processed, m.start()),
+                "recommendation": "Never hardcode credentials in client-side JS. Fetch tokens at runtime from a secure backend endpoint.",
+            })
+
+    # ── Library versions ───────────────────────────────────────────────────────
+    for lib_finding in _detect_library_versions(processed, file_url):
+        _add_finding(lib_finding)
+
     return endpoints, findings, has_graphql
 
 
@@ -713,9 +1105,15 @@ async def _run_js_scan(
     proto_pollution_count = 0
     env_leak_count = 0
     graphql_detected = False
+    security_header_count = 0
+    sri_missing_count = 0
+    vuln_lib_count = 0
+    open_redirect_count = 0
+    hardcoded_auth_count = 0
 
     def _count_finding(f: dict) -> None:
         nonlocal secrets_count, dom_xss_count, proto_pollution_count, env_leak_count
+        nonlocal security_header_count, sri_missing_count, vuln_lib_count, open_redirect_count, hardcoded_auth_count
         t = f.get("type", "")
         if t == "secret":
             secrets_count += 1
@@ -725,6 +1123,16 @@ async def _run_js_scan(
             proto_pollution_count += 1
         elif t == "env_leak":
             env_leak_count += 1
+        elif t == "security_header":
+            security_header_count += 1
+        elif t == "sri_missing":
+            sri_missing_count += 1
+        elif t == "library_vuln":
+            vuln_lib_count += 1
+        elif t == "open_redirect":
+            open_redirect_count += 1
+        elif t == "hardcoded_auth":
+            hardcoded_auth_count += 1
 
     yield _sse("start", {"scan_id": scan_id, "target": target})
     yield _sse("progress", {"phase": "discovery", "message": "Fetching target page..."})
@@ -762,7 +1170,9 @@ async def _run_js_scan(
                 "scan_id": scan_id, "target": target,
                 "js_files_scanned": 0, "endpoints_found": 0, "secrets_found": 0,
                 "dom_xss_sinks": 0, "source_maps_exposed": 0, "graphql_issues": 0,
-                "prototype_pollution": 0, "env_leaks": 0, "duration_seconds": 0,
+                "prototype_pollution": 0, "env_leaks": 0,
+                "security_headers": 0, "sri_missing": 0, "vulnerable_libs": 0,
+                "open_redirects": 0, "hardcoded_auth": 0, "duration_seconds": 0,
                 "error": err_msg,
             })
             return
@@ -802,6 +1212,45 @@ async def _run_js_scan(
                 if sw_url and sw_url not in seen_urls:
                     seen_urls.add(sw_url)
                     discovered_js.append(sw_url)
+
+        # ── Security headers check (on main page response) ───────────────────
+        if main_resp and main_resp.status_code == 200:
+            yield _sse("progress", {"phase": "headers", "message": "Checking security headers..."})
+            for hdr_finding in _check_security_headers(main_resp):
+                yield _sse("finding", hdr_finding)
+                all_findings.append(hdr_finding)
+                _count_finding(hdr_finding)
+
+        # ── External SRI check ────────────────────────────────────────────────
+        if main_resp and main_resp.status_code == 200:
+            for sri_finding in _check_external_sri(main_resp.text, target):
+                yield _sse("finding", sri_finding)
+                all_findings.append(sri_finding)
+                _count_finding(sri_finding)
+
+        # ── Parse link[rel=modulepreload] for Vite/modern bundlers ────────────
+        if main_resp and main_resp.status_code == 200:
+            html = main_resp.text
+            for m in re.finditer(r'<link[^>]+rel=["\']modulepreload["\'][^>]+href=["\']([^"\']+)["\']', html, re.IGNORECASE):
+                url = _resolve_js_url(m.group(1), target)
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    discovered_js.append(url)
+            # Parse Next.js __NEXT_DATA__ for buildId → construct chunk URLs
+            next_data_m = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', html, re.IGNORECASE | re.DOTALL)
+            if next_data_m:
+                try:
+                    nd = json.loads(next_data_m.group(1))
+                    build_id = nd.get("buildId", "")
+                    if build_id:
+                        for pg in ("/_app", "/_error", "/index"):
+                            pg_url = f"/_next/static/{build_id}/pages{pg}.js"
+                            full = origin + pg_url
+                            if full not in seen_urls:
+                                seen_urls.add(full)
+                                discovered_js.append(full)
+                except Exception:
+                    pass
 
         # Probe common JS paths
         async def _probe_path(path: str) -> None:
@@ -910,6 +1359,21 @@ async def _run_js_scan(
                     )
                     js_files_scanned += 1
 
+                    # Depth-2 discovery: follow import() / require() URLs in this JS
+                    for imp_m in re.finditer(
+                        r"""(?:import\s*\(\s*|require\s*\(\s*)['"`]([^'"`]+\.js(?:\?[^'"`]*)?)['"`]""",
+                        content, re.IGNORECASE,
+                    ):
+                        more_js = _resolve_js_url(imp_m.group(1), js_url)
+                        if (
+                            more_js
+                            and more_js not in seen_urls
+                            and _is_same_origin(more_js, origin, request.include_subdomains)
+                            and len(discovered_js) < request.max_files
+                        ):
+                            seen_urls.add(more_js)
+                            discovered_js.append(more_js)
+
                     for ep in eps:
                         if ep["url"] not in _global_endpoint_seen:
                             _global_endpoint_seen.add(ep["url"])
@@ -1016,6 +1480,11 @@ async def _run_js_scan(
             "graphql_issues": graphql_count,
             "prototype_pollution": proto_pollution_count,
             "env_leaks": env_leak_count,
+            "security_headers": security_header_count,
+            "sri_missing": sri_missing_count,
+            "vulnerable_libs": vuln_lib_count,
+            "open_redirects": open_redirect_count,
+            "hardcoded_auth": hardcoded_auth_count,
             "duration_seconds": duration,
         }
         yield _sse("complete", completion)
