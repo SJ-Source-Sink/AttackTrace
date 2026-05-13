@@ -58,7 +58,7 @@ type FindingType =
   | "secret" | "dom_xss" | "dom_source" | "source_map" | "graphql"
   | "prototype_pollution" | "postmessage" | "websocket" | "service_worker" | "env_leak"
   | "security_header" | "sri_missing" | "library_vuln" | "open_redirect"
-  | "jsonp" | "insecure_random" | "hardcoded_auth";
+  | "jsonp" | "insecure_random" | "hardcoded_auth" | "confirmed_xss";
 type Severity = "critical" | "high" | "medium" | "low" | "info";
 
 interface JsFinding {
@@ -92,6 +92,7 @@ interface ScanSummary {
   vulnerable_libs: number;
   open_redirects: number;
   hardcoded_auth: number;
+  confirmed_xss: number;
   duration_seconds: number;
   error?: string;
 }
@@ -158,6 +159,7 @@ const FINDING_TYPE_META: Record<string, { icon: React.ElementType; color: string
   jsonp:              { icon: Globe,        color: "text-teal-400",    label: "JSONP" },
   insecure_random:    { icon: Dices,        color: "text-yellow-300",  label: "Insecure Random" },
   hardcoded_auth:     { icon: Lock,         color: "text-red-500",     label: "Hardcoded Auth" },
+  confirmed_xss:      { icon: Zap,          color: "text-red-400",     label: "Confirmed XSS" },
 };
 
 function FindingTypeIcon({ type }: { type: string }) {
@@ -181,8 +183,12 @@ function FindingTypeBadge({ type }: { type: string }) {
 
 function FindingCard({ finding }: { finding: JsFinding }) {
   const [open, setOpen] = useState(false);
+  const isConfirmedXss = finding.type === "confirmed_xss";
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60">
+    <div className={cn(
+      "rounded-lg border bg-zinc-900/60",
+      isConfirmedXss ? "border-red-500/50 bg-red-500/5 ring-1 ring-red-500/20" : "border-zinc-800"
+    )}>
       <button
         className="w-full flex items-start gap-3 px-4 py-3 text-left"
         onClick={() => setOpen((p) => !p)}
@@ -190,6 +196,11 @@ function FindingCard({ finding }: { finding: JsFinding }) {
         <FindingTypeIcon type={finding.type} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
+            {isConfirmedXss && (
+              <span className="inline-flex items-center gap-1 rounded bg-red-500/20 border border-red-500/40 px-1.5 py-0.5 text-[9px] font-bold uppercase text-red-400 tracking-wider">
+                ⚡ CONFIRMED
+              </span>
+            )}
             <span className="text-sm font-semibold text-zinc-200">{finding.name}</span>
             <SeverityBadge severity={finding.severity} />
             <FindingTypeBadge type={finding.type} />
@@ -317,18 +328,18 @@ function EndpointsList({ endpoints }: { endpoints: JsEndpoint[] }) {
 
 function SummaryStrip({ summary }: { summary: ScanSummary }) {
   const stats = [
-    { label: "Secrets",      value: summary.secrets_found,        color: "text-red-400",     Icon: Key },
+    { label: "Confirmed XSS", value: summary.confirmed_xss ?? 0,   color: "text-red-400",     Icon: Zap },
+    { label: "Secrets",      value: summary.secrets_found,        color: "text-red-300",     Icon: Key },
     { label: "Endpoints",    value: summary.endpoints_found,      color: "text-blue-400",    Icon: Globe },
-    { label: "DOM XSS",      value: summary.dom_xss_sinks,        color: "text-orange-400",  Icon: Zap },
-    { label: "Proto Pollut", value: summary.prototype_pollution ?? 0, color: "text-red-300", Icon: Bug },
-    { label: "Env Leaks",    value: summary.env_leaks ?? 0,       color: "text-amber-400",   Icon: Variable },
+    { label: "DOM XSS",      value: summary.dom_xss_sinks,        color: "text-orange-400",  Icon: AlertTriangle },
     { label: "Sec Headers",  value: summary.security_headers ?? 0,color: "text-sky-400",     Icon: Shield },
     { label: "Vuln Libs",    value: summary.vulnerable_libs ?? 0, color: "text-rose-400",    Icon: BookOpen },
     { label: "Missing SRI",  value: summary.sri_missing ?? 0,     color: "text-violet-400",  Icon: Link },
     { label: "Open Redirect",value: summary.open_redirects ?? 0,  color: "text-orange-300",  Icon: Shuffle },
     { label: "Auth Headers", value: summary.hardcoded_auth ?? 0,  color: "text-red-500",     Icon: Lock },
+    { label: "Proto Pollut", value: summary.prototype_pollution ?? 0, color: "text-red-200", Icon: Bug },
+    { label: "Env Leaks",    value: summary.env_leaks ?? 0,       color: "text-amber-400",   Icon: Variable },
     { label: "Source Maps",  value: summary.source_maps_exposed,  color: "text-purple-400",  Icon: FileCode2 },
-    { label: "GraphQL",      value: summary.graphql_issues,       color: "text-pink-400",    Icon: Database },
     { label: "JS Files",     value: summary.js_files_scanned,     color: "text-zinc-300",    Icon: Layers },
   ];
   return (

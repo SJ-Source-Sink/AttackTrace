@@ -803,6 +803,247 @@ def _detect_library_versions(content: str, file_url: str) -> list[dict]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Source → Sink taint analysis (confirmed XSS)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Patterns that capture a variable name assigned from a user-controlled source
+_TAINT_SOURCE_PATTERNS: list[str] = [
+    # var x = location.search / .hash / .href / .pathname
+    r'(?:var|let|const)\s+([a-zA-Z_$][\w$]*)\s*=\s*(?:window\.)?location\.(?:search|hash|href|pathname)\b',
+    # var x = document.referrer / document.cookie
+    r'(?:var|let|const)\s+([a-zA-Z_$][\w$]*)\s*=\s*document\.(?:referrer|cookie)\b',
+    # var x = window.name
+    r'(?:var|let|const)\s+([a-zA-Z_$][\w$]*)\s*=\s*window\.name\b',
+    # var x = new URLSearchParams(...)
+    r'(?:var|let|const)\s+([a-zA-Z_$][\w$]*)\s*=\s*new\s+URLSearchParams\s*\(',
+    # var x = params.get(...) / searchParams.get(...) / urlParams.get(...)
+    r'(?:var|let|const)\s+([a-zA-Z_$][\w$]*)\s*=\s*\w+\.get\s*\([^)]+\)',
+    # var x = decodeURIComponent(location...) or atob(location...)
+    r'(?:var|let|const)\s+([a-zA-Z_$][\w$]*)\s*=\s*(?:decodeURIComponent|decodeURI|atob|unescape)\s*\([^)]*location',
+    # var x = getParameter(...) / getUrlParameter(...) / getQueryParam(...)
+    r'(?:var|let|const)\s+([a-zA-Z_$][\w$]*)\s*=\s*(?:getParam|getParameter|getUrlParam|getQueryParam|getQueryString)\s*\(',
+    # var x = req.query.* / req.params.* / req.body.* (isomorphic/SSR)
+    r'(?:var|let|const)\s+([a-zA-Z_$][\w$]*)\s*=\s*(?:req|request)\.(?:query|params|body)\.\w+',
+    # x = e.data (postMessage event)
+    r'(?:var|let|const)\s+([a-zA-Z_$][\w$]*)\s*=\s*(?:event|e|evt)\.data\b',
+    # Direct reads without assignment (track expressions used in sinks below)
+]
+
+# Sink patterns: group(1) captures the expression being written
+_TAINT_SINK_PATTERNS: list[tuple[str, str]] = [
+    ("innerHTML write",       r'(\w[\w$.]*)\s*\.innerHTML\s*[+]?=\s*([^;\n]{3,120})'),
+    ("outerHTML write",       r'(\w[\w$.]*)\s*\.outerHTML\s*[+]?=\s*([^;\n]{3,120})'),
+    ("insertAdjacentHTML",    r'\.insertAdjacentHTML\s*\([^,]+,\s*([^)]{3,120})\)'),
+    ("document.write",        r'document\.write(?:ln)?\s*\(\s*([^)]{3,120})\)'),
+    ("eval()",                r'\beval\s*\(\s*([^)]{3,120})\)'),
+    ("Function() constructor", r'\bnew\s+Function\s*\([^)]*([^)]{5,120})\)'),
+    ("setTimeout with string", r'setTimeout\s*\(\s*([^,)]{5,120})[,)]'),
+    ("jQuery .html()",        r'\.html\s*\(\s*([^)]{3,120})\)'),
+    ("jQuery .append()",      r'\.(?:append|prepend|after|before)\s*\(\s*([^)]{3,120})\)'),
+    ("location.href redirect", r'(?:window\.)?location\.(?:href|assign|replace)\s*[=(]\s*([^;\n]{3,120})'),
+    (".src assignment",        r'(\w[\w$.]*)\.src\s*=\s*([^;\n]{3,80})'),
+    ("dangerouslySetInnerHTML", r'dangerouslySetInnerHTML\s*=\s*\{\{?\s*__html\s*:\s*([^}]{3,120})'),
+]
+
+
+def _find_tainted_sinks(content: str, file_url: str) -> list[dict]:
+    """
+    Source-to-sink taint analysis for DOM XSS.
+
+    Collects variable names assigned from user-controlled sources, then checks
+    whether those variables appear in dangerous sink expressions.  Reports as
+    'confirmed_xss' (critical) instead of separate source/sink findings.
+    """
+    findings: list[dict] = []
+
+    # ── Step 1: collect tainted variable names ────────────────────────────────
+    tainted_vars: set[str] = set()
+    for pattern in _TAINT_SOURCE_PATTERNS:
+        for m in re.finditer(pattern, content, re.IGNORECASE):
+            var = m.group(1)
+            if var and var not in ("i", "j", "k", "n", "x", "e", "t", "r", "o", "s"):
+                tainted_vars.add(var)
+
+    # Also directly track readable source expressions (not via variable)
+    # so we can catch inline cases like:  el.innerHTML = location.hash
+    INLINE_SOURCES = re.compile(
+        r'\b(?:location\.(?:search|hash|href|pathname)|document\.(?:referrer|cookie)|window\.name|'
+        r'(?:event|e|evt)\.data)\b',
+        re.IGNORECASE,
+    )
+
+    if not tainted_vars and not re.search(INLINE_SOURCES.pattern, content, re.IGNORECASE):
+        return findings
+
+    # ── Step 2: check sinks for tainted variable usage ────────────────────────
+    seen_sinks: set[str] = set()
+
+    for sink_name, sink_pattern in _TAINT_SINK_PATTERNS:
+        for m in re.finditer(sink_pattern, content, re.IGNORECASE | re.DOTALL):
+            # The "value being written" is always the last capturing group
+            groups = [g for g in m.groups() if g is not None]
+            sink_expr = groups[-1] if groups else m.group(0)
+            sink_expr = sink_expr.strip()
+
+            tainted_var_found: str | None = None
+
+            # Check named tainted variables
+            for var in tainted_vars:
+                if re.search(r'\b' + re.escape(var) + r'\b', sink_expr):
+                    tainted_var_found = var
+                    break
+
+            # Check inline source expressions flowing directly into sink
+            if not tainted_var_found and INLINE_SOURCES.search(sink_expr):
+                tainted_var_found = INLINE_SOURCES.search(sink_expr).group(0)  # type: ignore[union-attr]
+
+            if not tainted_var_found:
+                continue
+
+            line = _line_number(content, m.start())
+            dedup_key = f"{sink_name}:{line}"
+            if dedup_key in seen_sinks:
+                continue
+            seen_sinks.add(dedup_key)
+
+            findings.append({
+                "type": "confirmed_xss",
+                "name": f"Confirmed DOM XSS — {sink_name}",
+                "severity": "critical",
+                "file_url": file_url,
+                "match": f"{tainted_var_found} → {sink_expr[:70]}",
+                "line_number": line,
+                "context": _get_context(content, m.start()),
+                "recommendation": (
+                    f"User-controlled value '{tainted_var_found}' flows directly into '{sink_name}'. "
+                    "Sanitize with DOMPurify.sanitize() before inserting into the DOM, "
+                    "or use safe DOM APIs (textContent, createElement) instead."
+                ),
+            })
+
+    return findings
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# HTML page crawler (multi-page JS discovery)
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def _crawl_html_pages(
+    client: httpx.AsyncClient,
+    start_url: str,
+    origin: str,
+    include_subdomains: bool,
+    max_pages: int = 15,
+    max_depth: int = 2,
+) -> tuple[list[str], list[str], list[str]]:
+    """
+    BFS-crawl same-origin HTML pages to discover JS files.
+
+    Returns (discovered_js_urls, inline_script_blocks, crawled_page_urls).
+    """
+    seen_pages: set[str] = {start_url}
+    seen_js: set[str] = set()
+    discovered_js: list[str] = []
+    inline_scripts: list[str] = []
+    crawled_pages: list[str] = []
+    queue: list[tuple[str, int]] = [(start_url, 0)]
+
+    # File extensions to skip when following links
+    _SKIP_EXTS = frozenset((
+        ".css", ".jpg", ".jpeg", ".png", ".gif", ".svg", ".ico",
+        ".pdf", ".zip", ".tar", ".gz", ".mp4", ".mp3", ".woff", ".woff2", ".ttf",
+        ".xml", ".rss", ".atom",
+    ))
+
+    while queue and len(crawled_pages) < max_pages:
+        page_url, depth = queue.pop(0)
+
+        try:
+            resp = await client.get(page_url, follow_redirects=True, timeout=8.0)
+        except Exception:
+            continue
+
+        if resp.status_code != 200:
+            continue
+        ct = resp.headers.get("content-type", "")
+        if "html" not in ct:
+            continue
+
+        html = resp.text
+        crawled_pages.append(page_url)
+
+        # Extract <script src>
+        for m in re.finditer(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE):
+            js_url = _resolve_js_url(m.group(1), page_url)
+            if js_url and js_url not in seen_js:
+                seen_js.add(js_url)
+                discovered_js.append(js_url)
+
+        # Extract <link rel="preload/modulepreload" as="script">
+        for m in re.finditer(
+            r'<link[^>]+(?:rel=["\'](?:preload|modulepreload)["\'][^>]+href=["\']([^"\']+)["\']'
+            r'|href=["\']([^"\']+)["\'][^>]+rel=["\'](?:preload|modulepreload)["\'])',
+            html, re.IGNORECASE,
+        ):
+            src = m.group(1) or m.group(2)
+            if not src:
+                continue
+            # Only add if it looks like a JS file (or no extension – could be chunked)
+            if ".css" not in src.lower():
+                js_url = _resolve_js_url(src, page_url)
+                if js_url and js_url not in seen_js:
+                    seen_js.add(js_url)
+                    discovered_js.append(js_url)
+
+        # Extract inline scripts
+        for m in re.finditer(r'<script(?:[^>]*)>([\s\S]*?)</script>', html, re.IGNORECASE):
+            block = m.group(1).strip()
+            if block and len(block) > 20 and "application/ld+json" not in m.group(0):
+                inline_scripts.append(block)
+
+        # Parse Next.js __NEXT_DATA__ for buildId
+        nd_m = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', html, re.IGNORECASE | re.DOTALL)
+        if nd_m:
+            try:
+                nd = json.loads(nd_m.group(1))
+                build_id = nd.get("buildId", "")
+                if build_id:
+                    for pg in ("/_app", "/_error", "/index"):
+                        chunk = f"/_next/static/{build_id}/pages{pg}.js"
+                        full = origin + chunk
+                        if full not in seen_js:
+                            seen_js.add(full)
+                            discovered_js.append(full)
+            except Exception:
+                pass
+
+        # Follow same-origin links at shallower depths
+        if depth < max_depth:
+            for m in re.finditer(r'<a[^>]+href=["\']([^"\'#][^"\']*)["\']', html, re.IGNORECASE):
+                href = m.group(1).strip()
+                if not href or href.startswith(("javascript:", "mailto:", "tel:")):
+                    continue
+                linked = _resolve_js_url(href, page_url)
+                if not linked:
+                    continue
+                # Strip query/fragment for dedup
+                from urllib.parse import urldefrag
+                linked_clean, _ = urldefrag(linked)
+                # Skip non-HTML resource extensions
+                path_lower = urlparse(linked_clean).path.lower()
+                if any(path_lower.endswith(ext) for ext in _SKIP_EXTS):
+                    continue
+                if (
+                    linked_clean not in seen_pages
+                    and _is_same_origin(linked_clean, origin, include_subdomains)
+                ):
+                    seen_pages.add(linked_clean)
+                    queue.append((linked_clean, depth + 1))
+
+    return discovered_js, inline_scripts, crawled_pages
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Core analysis function
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -1073,6 +1314,10 @@ def _analyze_js_content(
     for lib_finding in _detect_library_versions(processed, file_url):
         _add_finding(lib_finding)
 
+    # ── Source → Sink taint analysis (confirmed XSS) ──────────────────────────
+    for xss_finding in _find_tainted_sinks(processed, file_url):
+        _add_finding(xss_finding)
+
     return endpoints, findings, has_graphql
 
 
@@ -1110,6 +1355,7 @@ async def _run_js_scan(
     vuln_lib_count = 0
     open_redirect_count = 0
     hardcoded_auth_count = 0
+    confirmed_xss_count = 0
 
     def _count_finding(f: dict) -> None:
         nonlocal secrets_count, dom_xss_count, proto_pollution_count, env_leak_count
@@ -1133,6 +1379,8 @@ async def _run_js_scan(
             open_redirect_count += 1
         elif t == "hardcoded_auth":
             hardcoded_auth_count += 1
+        elif t == "confirmed_xss":
+            confirmed_xss_count += 1
 
     yield _sse("start", {"scan_id": scan_id, "target": target})
     yield _sse("progress", {"phase": "discovery", "message": "Fetching target page..."})
@@ -1162,6 +1410,7 @@ async def _run_js_scan(
         verify=False,
     ) as client:
 
+        # ── Phase 1: probe main page to check connectivity ────────────────────
         main_resp = await _safe_get(client, target)
         if main_resp is None and _fetch_error:
             err_msg = _fetch_error[-1]
@@ -1172,85 +1421,48 @@ async def _run_js_scan(
                 "dom_xss_sinks": 0, "source_maps_exposed": 0, "graphql_issues": 0,
                 "prototype_pollution": 0, "env_leaks": 0,
                 "security_headers": 0, "sri_missing": 0, "vulnerable_libs": 0,
-                "open_redirects": 0, "hardcoded_auth": 0, "duration_seconds": 0,
-                "error": err_msg,
+                "open_redirects": 0, "hardcoded_auth": 0, "confirmed_xss": 0,
+                "duration_seconds": 0, "error": err_msg,
             })
             return
-        inline_scripts: list[str] = []
 
+        # ── Phase 2: security headers check on main response ──────────────────
         if main_resp and main_resp.status_code == 200:
-            html = main_resp.text
-
-            # <script src="...">
-            for m in re.finditer(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE):
-                url = _resolve_js_url(m.group(1), target)
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    discovered_js.append(url)
-
-            # <link rel="preload" as="script">
-            for m in re.finditer(r'<link[^>]+rel=["\']preload["\'][^>]+as=["\']script["\'][^>]+href=["\']([^"\']+)["\']', html, re.IGNORECASE):
-                url = _resolve_js_url(m.group(1), target)
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    discovered_js.append(url)
-            for m in re.finditer(r'<link[^>]+href=["\']([^"\']+)["\'][^>]+as=["\']script["\']', html, re.IGNORECASE):
-                url = _resolve_js_url(m.group(1), target)
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    discovered_js.append(url)
-
-            # Inline <script> blocks
-            for m in re.finditer(r'<script(?:[^>]*)>([\s\S]*?)</script>', html, re.IGNORECASE):
-                block = m.group(1).strip()
-                if block and len(block) > 20:
-                    inline_scripts.append(block)
-
-            # Service worker registration from HTML
-            for m in re.finditer(r"navigator\.serviceWorker\.register\s*\(\s*['\"`]([^'\"` ]+)['\"`]", html):
-                sw_url = _resolve_js_url(m.group(1), target)
-                if sw_url and sw_url not in seen_urls:
-                    seen_urls.add(sw_url)
-                    discovered_js.append(sw_url)
-
-        # ── Security headers check (on main page response) ───────────────────
-        if main_resp and main_resp.status_code == 200:
-            yield _sse("progress", {"phase": "headers", "message": "Checking security headers..."})
+            yield _sse("progress", {"phase": "headers", "message": "Checking security response headers..."})
             for hdr_finding in _check_security_headers(main_resp):
                 yield _sse("finding", hdr_finding)
                 all_findings.append(hdr_finding)
                 _count_finding(hdr_finding)
 
-        # ── External SRI check ────────────────────────────────────────────────
+        # ── Phase 3: multi-page BFS crawl to discover JS across the site ──────
+        yield _sse("progress", {"phase": "crawl", "message": f"Crawling site (max {request.max_depth} levels deep)..."})
+
+        crawl_js, inline_scripts, crawled_pages = await _crawl_html_pages(
+            client=client,
+            start_url=target,
+            origin=origin,
+            include_subdomains=request.include_subdomains,
+            max_pages=20,
+            max_depth=request.max_depth,
+        )
+
+        for js_url in crawl_js:
+            if js_url not in seen_urls:
+                seen_urls.add(js_url)
+                discovered_js.append(js_url)
+
+        yield _sse("progress", {
+            "phase": "crawl",
+            "message": f"Crawled {len(crawled_pages)} pages, found {len(discovered_js)} JS files so far",
+            "pages": crawled_pages[:20],
+        })
+
+        # ── SRI check from crawled pages' HTML ────────────────────────────────
         if main_resp and main_resp.status_code == 200:
             for sri_finding in _check_external_sri(main_resp.text, target):
                 yield _sse("finding", sri_finding)
                 all_findings.append(sri_finding)
                 _count_finding(sri_finding)
-
-        # ── Parse link[rel=modulepreload] for Vite/modern bundlers ────────────
-        if main_resp and main_resp.status_code == 200:
-            html = main_resp.text
-            for m in re.finditer(r'<link[^>]+rel=["\']modulepreload["\'][^>]+href=["\']([^"\']+)["\']', html, re.IGNORECASE):
-                url = _resolve_js_url(m.group(1), target)
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    discovered_js.append(url)
-            # Parse Next.js __NEXT_DATA__ for buildId → construct chunk URLs
-            next_data_m = re.search(r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', html, re.IGNORECASE | re.DOTALL)
-            if next_data_m:
-                try:
-                    nd = json.loads(next_data_m.group(1))
-                    build_id = nd.get("buildId", "")
-                    if build_id:
-                        for pg in ("/_app", "/_error", "/index"):
-                            pg_url = f"/_next/static/{build_id}/pages{pg}.js"
-                            full = origin + pg_url
-                            if full not in seen_urls:
-                                seen_urls.add(full)
-                                discovered_js.append(full)
-                except Exception:
-                    pass
 
         # Probe common JS paths
         async def _probe_path(path: str) -> None:
@@ -1485,6 +1697,7 @@ async def _run_js_scan(
             "vulnerable_libs": vuln_lib_count,
             "open_redirects": open_redirect_count,
             "hardcoded_auth": hardcoded_auth_count,
+            "confirmed_xss": confirmed_xss_count,
             "duration_seconds": duration,
         }
         yield _sse("complete", completion)
