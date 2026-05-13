@@ -47,6 +47,8 @@ const INTEGRATIONS: Integration[] = [
     docsUrl: "https://console.anthropic.com/settings/keys",
     fields: [
       { key: "anthropic_key", label: "API Key", placeholder: "sk-ant-api03-...", hint: "Required for AI Test Case Generator and AI triage features" },
+      { key: "ai_base_url", label: "API Gateway URL (optional)", placeholder: "https://your-bedrock-proxy.example.com", hint: "Custom Anthropic-compatible endpoint (AWS Bedrock proxy, etc.). Leave blank to use the default Anthropic API." },
+      { key: "ai_model_override", label: "Model Override (optional)", placeholder: "claude-sonnet-4-6", hint: "Override the default model. Leave blank to use claude-sonnet-4-6." },
     ],
   },
   {

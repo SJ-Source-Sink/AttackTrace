@@ -61,7 +61,11 @@ class Settings(BaseSettings):
 
     # Anthropic AI
     ANTHROPIC_API_KEY: Optional[str] = None
-    AI_MODEL: str = "claude-haiku-4-5-20251001"
+    # Optional: custom API gateway / Bedrock proxy that speaks the Anthropic API format.
+    # When set, all Claude calls are routed through this URL instead of api.anthropic.com.
+    # e.g.  https://bedrock-gateway.internal/anthropic
+    AI_BASE_URL: Optional[str] = None
+    AI_MODEL: str = "claude-sonnet-4-6"
     AI_MAX_TOKENS: int = 2048
 
     # MSRA — Mobile Security Review Assistant sidecar

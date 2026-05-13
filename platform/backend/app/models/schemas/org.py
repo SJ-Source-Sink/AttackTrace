@@ -182,6 +182,8 @@ class ApiKeyResponse(BaseModel):
 
 class CredentialsUpdate(BaseModel):
     anthropic_key: Optional[str] = None
+    ai_base_url: Optional[str] = None
+    ai_model_override: Optional[str] = None
     shodan_key: Optional[str] = None
     censys_id: Optional[str] = None
     censys_secret: Optional[str] = None

@@ -1113,6 +1113,8 @@ async def run_burp_analysis(
     content: bytes,
     ai_analysis: bool,
     anthropic_api_key: str,
+    base_url: str | None = None,
+    model: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Full analysis pipeline — yields SSE events."""
 
@@ -1181,9 +1183,13 @@ async def run_burp_analysis(
 
         try:
             import anthropic  # type: ignore[import]
-            client = anthropic.AsyncAnthropic(api_key=anthropic_api_key)
+            effective_model = model or _settings.AI_MODEL
+            client_kwargs: dict = {"api_key": anthropic_api_key}
+            if base_url:
+                client_kwargs["base_url"] = base_url
+            client = anthropic.AsyncAnthropic(**client_kwargs)
             async with client.messages.stream(
-                model=_settings.AI_MODEL,
+                model=effective_model,
                 max_tokens=2000,
                 system="You are a senior penetration tester. Be specific, concise, and technical. Always reference exact endpoint paths from the data provided.",
                 messages=[{"role": "user", "content": prompt}],

@@ -22,6 +22,7 @@ from app.services.ai_service import (
     bulk_triage_findings,
     generate_exec_summary,
     generate_remediation_ticket,
+    get_org_ai_config,
     nl_to_filter,
     triage_finding,
 )
@@ -76,12 +77,24 @@ class TicketRequest(BaseModel):
     finding_id: str
 
 
-def _check_ai_configured() -> None:
-    if not settings.ANTHROPIC_API_KEY:
+async def _check_ai_configured(org_id, db) -> dict:
+    """Resolve org AI config and raise 503 if no API key is available."""
+    ai_config = await get_org_ai_config(org_id, db)
+    if not ai_config.get("api_key"):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"error": {"code": "AI_NOT_CONFIGURED", "message": "Anthropic API key not configured"}},
+            detail={
+                "error": {
+                    "code": "AI_NOT_CONFIGURED",
+                    "message": (
+                        "No Anthropic API key configured. "
+                        "Go to Settings → Integrations → Anthropic Claude to add your key, "
+                        "or contact your administrator."
+                    ),
+                }
+            },
         )
+    return ai_config
 
 
 @router.post(
@@ -98,7 +111,7 @@ async def triage_finding_endpoint(
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    _check_ai_configured()
+    ai_config = await _check_ai_configured(org_id, db)
 
     try:
         finding_id = UUID(payload.finding_id)
@@ -137,7 +150,7 @@ async def triage_finding_endpoint(
     org_ctx = {"plan": org.plan.value if org else "unknown"}
 
     try:
-        triage_result = await triage_finding(finding, asset_ctx, org_ctx)
+        triage_result = await triage_finding(finding, asset_ctx, org_ctx, ai_config=ai_config)
     except RuntimeError as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -173,7 +186,7 @@ async def bulk_triage_endpoint(
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    _check_ai_configured()
+    await _check_ai_configured(org_id, db)
 
     try:
         scan_job_id = UUID(payload.scan_job_id)
@@ -219,7 +232,7 @@ async def nl_search_endpoint(
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    _check_ai_configured()
+    ai_config = await _check_ai_configured(org_id, db)
 
     if payload.target not in ("findings", "assets"):
         raise HTTPException(
@@ -230,7 +243,7 @@ async def nl_search_endpoint(
     schema = FINDING_FILTER_SCHEMA if payload.target == "findings" else ASSET_FILTER_SCHEMA
 
     try:
-        filter_dict = await nl_to_filter(payload.query, schema)
+        filter_dict = await nl_to_filter(payload.query, schema, ai_config=ai_config)
     except RuntimeError as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -258,7 +271,7 @@ async def summarize_scan_endpoint(
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    _check_ai_configured()
+    pass  # generate_exec_summary is template-based; no API key required
 
     try:
         scan_job_id = UUID(payload.scan_job_id)
@@ -326,7 +339,7 @@ async def generate_ticket_endpoint(
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    _check_ai_configured()
+    pass  # generate_remediation_ticket is template-based; no API key required
 
     try:
         finding_id = UUID(payload.finding_id)

@@ -161,6 +161,10 @@ class OrgCredentials(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         PGUUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), unique=True, nullable=False
     )
     anthropic_key_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Custom API gateway / Bedrock proxy URL (Anthropic API-compatible)
+    ai_base_url_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Optional model ID override (e.g. a specific Bedrock model ARN or version)
+    ai_model_override_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     shodan_key_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     censys_id_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     censys_secret_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

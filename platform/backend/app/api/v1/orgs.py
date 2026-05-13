@@ -661,6 +661,10 @@ async def update_credentials(
 
     if payload.anthropic_key is not None:
         creds.anthropic_key_enc = encrypt_credential(payload.anthropic_key) if payload.anthropic_key else None
+    if payload.ai_base_url is not None:
+        creds.ai_base_url_enc = encrypt_credential(payload.ai_base_url) if payload.ai_base_url else None
+    if payload.ai_model_override is not None:
+        creds.ai_model_override_enc = encrypt_credential(payload.ai_model_override) if payload.ai_model_override else None
     if payload.shodan_key is not None:
         creds.shodan_key_enc = encrypt_credential(payload.shodan_key) if payload.shodan_key else None
     if payload.censys_id is not None:
@@ -695,6 +699,8 @@ async def update_credentials(
     # Return which keys are configured (no values)
     return {
         "anthropic_key": bool(creds.anthropic_key_enc),
+        "ai_base_url": bool(creds.ai_base_url_enc),
+        "ai_model_override": bool(creds.ai_model_override_enc),
         "shodan_key": bool(creds.shodan_key_enc),
         "censys_id": bool(creds.censys_id_enc),
         "censys_secret": bool(creds.censys_secret_enc),
@@ -908,6 +914,8 @@ async def get_current_org_credentials(
     if not creds:
         return {
             "anthropic_key": False,
+            "ai_base_url": False,
+            "ai_model_override": False,
             "shodan_key": False,
             "censys_id": False,
             "censys_secret": False,
@@ -919,6 +927,8 @@ async def get_current_org_credentials(
         }
     return {
         "anthropic_key": bool(creds.anthropic_key_enc),
+        "ai_base_url": bool(creds.ai_base_url_enc),
+        "ai_model_override": bool(creds.ai_model_override_enc),
         "shodan_key": bool(creds.shodan_key_enc),
         "censys_id": bool(creds.censys_id_enc),
         "censys_secret": bool(creds.censys_secret_enc),
@@ -951,6 +961,10 @@ async def update_current_org_credentials(
 
     if payload.anthropic_key is not None:
         creds.anthropic_key_enc = encrypt_credential(payload.anthropic_key) if payload.anthropic_key else None
+    if payload.ai_base_url is not None:
+        creds.ai_base_url_enc = encrypt_credential(payload.ai_base_url) if payload.ai_base_url else None
+    if payload.ai_model_override is not None:
+        creds.ai_model_override_enc = encrypt_credential(payload.ai_model_override) if payload.ai_model_override else None
     if payload.shodan_key is not None:
         creds.shodan_key_enc = encrypt_credential(payload.shodan_key) if payload.shodan_key else None
     if payload.censys_id is not None:
@@ -984,6 +998,8 @@ async def update_current_org_credentials(
 
     return {
         "anthropic_key": bool(creds.anthropic_key_enc),
+        "ai_base_url": bool(creds.ai_base_url_enc),
+        "ai_model_override": bool(creds.ai_model_override_enc),
         "shodan_key": bool(creds.shodan_key_enc),
         "censys_id": bool(creds.censys_id_enc),
         "censys_secret": bool(creds.censys_secret_enc),

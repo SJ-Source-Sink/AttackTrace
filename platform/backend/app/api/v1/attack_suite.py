@@ -32,8 +32,11 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 
-from app.core.dependencies import get_current_user, require_tool
+from uuid import UUID
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.dependencies import get_current_user, get_current_org_id, require_tool
 from app.core.config import get_settings
+from app.core.database import get_db
 from app.models.db.user import User
 from app.services.waf_service import detect_waf, get_waf_bypass_payloads
 from app.api.v1.attack_patterns import (
@@ -4331,6 +4334,8 @@ async def analyze_burp_file(
     file: UploadFile = File(...),
     ai_analysis: bool = Form(default=True),
     current_user: Annotated[User, Depends(require_tool("burp_analyzer"))] = None,
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     """
     Upload a Burp Suite HTTP History XML export and receive a streaming SSE
@@ -4340,15 +4345,19 @@ async def analyze_burp_file(
     Export from Burp: Proxy → HTTP history → Ctrl-A → Right-click → Save items
     """
     from app.api.v1.burp_analyzer import run_burp_analysis  # local import avoids circular deps
+    from app.services.ai_service import get_org_ai_config
 
     content = await file.read()
     if len(content) > 500 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="File too large — maximum 500 MB")
 
-    api_key = settings.ANTHROPIC_API_KEY or ""
+    ai_config = await get_org_ai_config(org_id, db)
+    api_key = ai_config.get("api_key") or ""
+    base_url = ai_config.get("base_url")
+    model = ai_config.get("model") or settings.AI_MODEL
 
     return StreamingResponse(
-        run_burp_analysis(content, ai_analysis, api_key),
+        run_burp_analysis(content, ai_analysis, api_key, base_url=base_url, model=model),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

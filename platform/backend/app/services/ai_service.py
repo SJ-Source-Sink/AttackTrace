@@ -73,14 +73,60 @@ def _cb_record_failure() -> None:
         pass
 
 
-def _get_client() -> anthropic.Anthropic:
-    if not settings.ANTHROPIC_API_KEY:
-        raise RuntimeError("ANTHROPIC_API_KEY is not configured")
-    return anthropic.Anthropic(
-        api_key=settings.ANTHROPIC_API_KEY,
-        timeout=_AI_TIMEOUT,
-        max_retries=0,  # We handle retries ourselves for better control
-    )
+def _get_client(
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> anthropic.Anthropic:
+    resolved_key = api_key or settings.ANTHROPIC_API_KEY
+    if not resolved_key:
+        raise RuntimeError(
+            "Anthropic API key not configured. "
+            "Set it in Settings → Integrations → Anthropic Claude, "
+            "or set the ANTHROPIC_API_KEY environment variable."
+        )
+    resolved_base_url = base_url or settings.AI_BASE_URL
+    kwargs: dict = {
+        "api_key": resolved_key,
+        "timeout": _AI_TIMEOUT,
+        "max_retries": 0,
+    }
+    if resolved_base_url:
+        kwargs["base_url"] = resolved_base_url
+    return anthropic.Anthropic(**kwargs)
+
+
+async def get_org_ai_config(org_id, db) -> dict:
+    """
+    Resolve the effective AI configuration for an org.
+
+    Priority: org DB credential > system env var / config default.
+    Returns dict with keys: api_key, base_url, model.
+    """
+    from app.core.security import decrypt_credential
+    from app.models.db.org import OrgCredentials
+    from sqlalchemy import select
+
+    api_key: str | None = settings.ANTHROPIC_API_KEY
+    base_url: str | None = settings.AI_BASE_URL
+    model: str = settings.AI_MODEL
+
+    if org_id and db:
+        try:
+            result = await db.execute(
+                select(OrgCredentials).where(OrgCredentials.org_id == org_id)
+            )
+            creds = result.scalar_one_or_none()
+            if creds:
+                if creds.anthropic_key_enc:
+                    api_key = decrypt_credential(creds.anthropic_key_enc)
+                if creds.ai_base_url_enc:
+                    base_url = decrypt_credential(creds.ai_base_url_enc)
+                if creds.ai_model_override_enc:
+                    model = decrypt_credential(creds.ai_model_override_enc)
+        except Exception as exc:
+            logger.warning(f"Could not fetch org AI config for {org_id}: {exc}")
+
+    return {"api_key": api_key, "base_url": base_url, "model": model}
 
 
 async def _call_with_retry(client: anthropic.Anthropic, **kwargs) -> anthropic.types.Message:
@@ -122,14 +168,18 @@ async def triage_finding(
     finding,
     asset_context: dict,
     org_context: dict,
+    ai_config: dict | None = None,
 ) -> dict:
     """
     Use Claude to classify severity, detect false positives,
     and generate reasoning for a security finding.
 
     Returns a dict with keys: severity, is_false_positive, reasoning, confidence.
+    ai_config: optional dict with keys api_key, base_url, model (from get_org_ai_config).
     """
-    client = _get_client()
+    cfg = ai_config or {}
+    client = _get_client(api_key=cfg.get("api_key"), base_url=cfg.get("base_url"))
+    model = cfg.get("model") or settings.AI_MODEL
 
     evidence_str = json.dumps(finding.evidence or {}, indent=2)
 
@@ -176,7 +226,7 @@ Respond with this exact JSON (no other text):
     try:
         response = await _call_with_retry(
             client,
-            model=settings.AI_MODEL,
+            model=model,
             max_tokens=settings.AI_MAX_TOKENS,
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
@@ -211,18 +261,21 @@ Respond with this exact JSON (no other text):
         }
 
 
-async def nl_to_filter(query: str, schema: dict) -> dict:
+async def nl_to_filter(query: str, schema: dict, ai_config: dict | None = None) -> dict:
     """
     Translate a natural language query into a structured asset/finding filter JSON.
 
     Args:
         query: Human-readable search string e.g. "show me critical findings with CVEs in login pages"
         schema: Dict describing available filter fields and their types
+        ai_config: optional dict with keys api_key, base_url, model
 
     Returns:
         Structured filter dict matching AssetFilter or FindingFilter schema.
     """
-    client = _get_client()
+    cfg = ai_config or {}
+    client = _get_client(api_key=cfg.get("api_key"), base_url=cfg.get("base_url"))
+    model = cfg.get("model") or settings.AI_MODEL
 
     system_prompt = (
         "You are a search query parser for a security platform. "
@@ -259,7 +312,7 @@ Respond with ONLY the JSON object."""
     try:
         response = await _call_with_retry(
             client,
-            model=settings.AI_MODEL,
+            model=model,
             max_tokens=512,
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
@@ -479,7 +532,12 @@ async def generate_remediation_ticket(finding, technologies: list[str]) -> dict:
     }
 
 
-async def bulk_triage_findings(findings: list, asset_map: dict, org_context: dict) -> list[dict]:
+async def bulk_triage_findings(
+    findings: list,
+    asset_map: dict,
+    org_context: dict,
+    ai_config: dict | None = None,
+) -> list[dict]:
     """
     Triage multiple findings in batch, returning results in order.
     Skips AI on findings already triaged.
@@ -500,7 +558,7 @@ async def bulk_triage_findings(findings: list, asset_map: dict, org_context: dic
             continue
 
         asset_ctx = asset_map.get(str(finding.asset_id), {}) if finding.asset_id else {}
-        triage_result = await triage_finding(finding, asset_ctx, org_context)
+        triage_result = await triage_finding(finding, asset_ctx, org_context, ai_config=ai_config)
         triage_result["finding_id"] = str(finding.id)
         results.append(triage_result)
 

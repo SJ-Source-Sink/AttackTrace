@@ -9,15 +9,18 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import Annotated, AsyncGenerator
+from uuid import UUID
 
 import anthropic
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.dependencies import get_current_user, require_tool
+from app.core.database import get_db
+from app.core.dependencies import get_current_org_id, get_current_user, require_tool
 from app.models.db.user import User
 from app.api.v1.attack_patterns import (
     XSS_PAYLOADS, XSS_TEST_PARAMS, DOM_XSS_PAYLOADS, DOM_XSS_SINK_PARAMS,
@@ -3880,12 +3883,19 @@ class AIRequest(BaseModel):
 # AI generation stream
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _stream_ai_testcases(payload: AIRequest) -> AsyncGenerator[str, None]:
-    if not settings.ANTHROPIC_API_KEY:
+async def _stream_ai_testcases(payload: AIRequest, ai_config: dict | None = None) -> AsyncGenerator[str, None]:
+    cfg = ai_config or {}
+    api_key = cfg.get("api_key") or settings.ANTHROPIC_API_KEY
+    if not api_key:
         yield f"event: error\ndata: {json.dumps({'message': 'ANTHROPIC_API_KEY is not configured'})}\n\n"
         return
 
-    client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+    client_kwargs: dict = {"api_key": api_key}
+    effective_base_url = cfg.get("base_url") or settings.AI_BASE_URL
+    if effective_base_url:
+        client_kwargs["base_url"] = effective_base_url
+    model = cfg.get("model") or settings.AI_MODEL
+    client = anthropic.Anthropic(**client_kwargs)
 
     target_desc  = payload.target or "unspecified target"
     types_desc   = ", ".join(payload.target_types) if payload.target_types else "web application"
@@ -3953,7 +3963,7 @@ OUTPUT: Return ONLY the JSON array. Do not wrap in an object. Do not add any tex
         yield f"event: start\ndata: {json.dumps({'message': 'Generating AI test cases…'})}\n\n"
 
         with client.messages.stream(
-            model=settings.AI_MODEL,
+            model=model,
             max_tokens=8192,
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
@@ -4005,12 +4015,18 @@ async def generate_standard(
 async def generate_ai(
     payload: AIRequest,
     current_user: Annotated[User, Depends(require_tool("test_generator"))],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
-    if not settings.ANTHROPIC_API_KEY:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                            detail="AI features require ANTHROPIC_API_KEY")
+    from app.services.ai_service import get_org_ai_config
+    ai_config = await get_org_ai_config(org_id, db)
+    if not ai_config.get("api_key"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI features require an Anthropic API key. Set it in Settings → Integrations.",
+        )
     return StreamingResponse(
-        _stream_ai_testcases(payload),
+        _stream_ai_testcases(payload, ai_config=ai_config),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
