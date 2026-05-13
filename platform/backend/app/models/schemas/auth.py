@@ -8,7 +8,7 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 
 class RegisterRequest(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
+    password: str = Field(min_length=12, max_length=128)
     full_name: str = Field(min_length=1, max_length=255)
     invite_code: str = Field(min_length=1, max_length=64)
     org_name: Optional[str] = Field(None, min_length=1, max_length=255)
@@ -16,10 +16,19 @@ class RegisterRequest(BaseModel):
     @field_validator("password")
     @classmethod
     def password_strength(cls, v: str) -> str:
+        errors = []
+        if len(v) < 12:
+            errors.append("at least 12 characters")
         if not any(c.isupper() for c in v):
-            raise ValueError("Password must contain at least one uppercase letter")
+            errors.append("at least one uppercase letter")
+        if not any(c.islower() for c in v):
+            errors.append("at least one lowercase letter")
         if not any(c.isdigit() for c in v):
-            raise ValueError("Password must contain at least one digit")
+            errors.append("at least one digit")
+        if not any(c in r"!@#$%^&*()_+-=[]{}|;':\",./<>?" for c in v):
+            errors.append("at least one special character (!@#$%^&*...)")
+        if errors:
+            raise ValueError(f"Password must contain: {', '.join(errors)}")
         return v
 
 
@@ -41,15 +50,24 @@ class RefreshRequest(BaseModel):
 
 class PasswordChangeRequest(BaseModel):
     current_password: str
-    new_password: str = Field(min_length=8, max_length=128)
+    new_password: str = Field(min_length=12, max_length=128)
 
     @field_validator("new_password")
     @classmethod
     def password_strength(cls, v: str) -> str:
+        errors = []
+        if len(v) < 12:
+            errors.append("at least 12 characters")
         if not any(c.isupper() for c in v):
-            raise ValueError("Password must contain at least one uppercase letter")
+            errors.append("at least one uppercase letter")
+        if not any(c.islower() for c in v):
+            errors.append("at least one lowercase letter")
         if not any(c.isdigit() for c in v):
-            raise ValueError("Password must contain at least one digit")
+            errors.append("at least one digit")
+        if not any(c in r"!@#$%^&*()_+-=[]{}|;':\",./<>?" for c in v):
+            errors.append("at least one special character")
+        if errors:
+            raise ValueError(f"Password must contain: {', '.join(errors)}")
         return v
 
 

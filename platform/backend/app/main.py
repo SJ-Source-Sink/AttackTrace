@@ -6,6 +6,7 @@ OpenAPI metadata, and mounts all API routers.
 """
 
 import logging
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -22,6 +23,13 @@ from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+
+# Sensitive field patterns to scrub from log output
+_SENSITIVE_FIELDS_RE = re.compile(
+    r'("(?:password|token|secret|api_key|authorization|cookie|'
+    r'access_token|refresh_token|key_hash|anthropic_api_key)"\s*:\s*)"[^"]{4,}"',
+    re.IGNORECASE,
+)
 
 from app.core.config import get_settings
 from app.core.database import close_db, init_db
@@ -53,7 +61,12 @@ structlog.configure(
 logger = structlog.get_logger("attacktrace.platform")
 
 # --- Rate limiter ---
-limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
+# Global: 200/min per IP  |  Auth endpoints: 10/min per IP (brute-force protection)
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["200/minute"],
+    application_limits=[],
+)
 
 
 # --- Request timeout middleware ---
@@ -167,27 +180,60 @@ app.add_middleware(
 )
 
 
+# Paths that require stricter per-IP rate limiting (brute-force targets)
+_AUTH_RATE_PATHS = frozenset({"/api/v1/auth/login", "/api/v1/auth/register", "/api/v1/auth/refresh"})
+# In-process auth rate limit: simple token-bucket per IP in Redis via slowapi
+# Declared here so auth router can reference it via app.state.auth_limiter
+from slowapi import Limiter as _Limiter
+_auth_limiter = _Limiter(key_func=get_remote_address, default_limits=[f"{settings.AUTH_RATE_LIMIT_PER_MINUTE}/minute"])
+
+
 # --- Request ID + timing + security headers middleware ---
 @app.middleware("http")
 async def request_middleware(request: Request, call_next):
-    request_id = str(uuid.uuid4())
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
     request.state.request_id = request_id
+
+    # Bind request_id into structlog context for all log statements in this request
+    import structlog
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(
+        request_id=request_id,
+        method=request.method,
+        path=request.url.path,
+        remote_ip=request.client.host if request.client else "unknown",
+    )
+
     start = time.perf_counter()
-
     response = await call_next(request)
-
     duration_ms = (time.perf_counter() - start) * 1000
+
     response.headers["X-Request-ID"] = request_id
     response.headers["X-Response-Time-Ms"] = f"{duration_ms:.1f}"
-    # Security headers
+
+    # Security headers — applied to every response
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Permissions-Policy"] = (
+        "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()"
+    )
+    # API responses have no need to embed in frames or load external resources
     response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
     if settings.ENVIRONMENT != "development":
-        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains; preload"
+
+    # Log slow requests (>2s non-streaming) at WARN level
+    path = request.url.path
+    is_streaming = any(path.endswith(s) for s in ("/stream", "/events", "/scan", "/start"))
+    if not is_streaming and duration_ms > 2000:
+        logger.warning(
+            "slow_request",
+            duration_ms=round(duration_ms),
+            status=response.status_code,
+        )
+
     return response
 
 

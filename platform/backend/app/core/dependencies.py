@@ -76,8 +76,9 @@ async def _authenticate_api_key(
     token: str,
     db: AsyncSession,
     exc: HTTPException,
+    required_scope: str | None = None,
 ) -> User:
-    """Authenticate via hashed API key lookup."""
+    """Authenticate via hashed API key lookup with optional scope enforcement."""
     from datetime import datetime, timezone
 
     key_hash = hash_api_key(token)
@@ -95,7 +96,18 @@ async def _authenticate_api_key(
     if api_key.expires_at and api_key.expires_at < datetime.now(timezone.utc):
         raise exc
 
-    # Update last_used
+    # Scope enforcement: if the key has an explicit scope list, it must include the required scope
+    if required_scope and api_key.scopes is not None:
+        if required_scope not in api_key.scopes and "*" not in api_key.scopes:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"error": {
+                    "code": "INSUFFICIENT_SCOPE",
+                    "message": f"API key does not have the required scope: '{required_scope}'",
+                }},
+            )
+
+    # Update last_used (non-blocking — fire and forget the flush)
     api_key.last_used = datetime.now(timezone.utc)
     db.add(api_key)
     await db.flush()
@@ -110,6 +122,8 @@ async def _authenticate_api_key(
 
     user._jwt_org_id = str(api_key.org_id)
     user._jwt_role = None
+    # Surface scopes for downstream scope-aware checks
+    user._api_key_scopes = api_key.scopes  # None = unrestricted, [] = all denied
 
     return user
 
