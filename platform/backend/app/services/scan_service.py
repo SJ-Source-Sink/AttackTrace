@@ -30,9 +30,23 @@ _POLL_INTERVAL = 0.2       # seconds between get_message polls when idle
 
 
 def _get_redis() -> aioredis.Redis:
+    """Return the module-level Redis connection pool, creating it on first call.
+
+    Uses a connection pool (not a single connection) so concurrent requests
+    share connections efficiently. max_connections=100 supports up to ~100
+    concurrent SSE subscribers + API callers without pool exhaustion.
+    socket_keepalive prevents silent drops on idle connections behind proxies.
+    """
     global _redis
     if _redis is None:
-        _redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        _redis = aioredis.from_url(
+            settings.REDIS_URL,
+            decode_responses=True,
+            max_connections=100,
+            socket_keepalive=True,
+            socket_keepalive_options={},
+            health_check_interval=30,
+        )
     return _redis
 
 
@@ -240,7 +254,11 @@ async def stream_scan_events(
     - Finding events from the last 100 are also replayed on reconnect so the live
       feed is not empty after a brief navigation away.
     """
-    r = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+    # Reuse the module-level connection pool instead of spawning a new connection
+    # per subscriber. Each pubsub object gets its own dedicated connection from
+    # the pool, so 50 concurrent viewers use 50 pooled connections — not 50
+    # independent pools.
+    r = _get_redis()
     pubsub = r.pubsub()
     await pubsub.subscribe(f"scan:{scan_id}")
 
@@ -318,4 +336,5 @@ async def stream_scan_events(
     finally:
         await pubsub.unsubscribe(f"scan:{scan_id}")
         await pubsub.close()
-        await r.aclose()
+        # Don't close `r` — it's the shared module-level pool; closing it would
+        # break all other concurrent subscribers. The pool manages its own connections.

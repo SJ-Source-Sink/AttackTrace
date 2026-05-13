@@ -179,8 +179,8 @@ export function Topbar({ className }: TopbarProps) {
     setUnreadCount(0);
   }, []);
 
-  const handleLogout = () => {
-    logout();
+  const handleLogout = async () => {
+    await logout();
     router.push("/login");
   };
 

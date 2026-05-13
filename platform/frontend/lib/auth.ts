@@ -128,7 +128,7 @@ interface AuthContextValue {
   isAuthenticated: boolean;
   login: (credentials: LoginRequest) => Promise<void>;
   register: (data: RegisterRequest) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
   hasToolAccess: (toolKey: string) => boolean;
 }
 
@@ -180,13 +180,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => clearTimeout(timer);
   }, [user]);
 
-  // On mount: restore session — use existing access token if still valid, else refresh
+  // On mount: restore session — use existing access token if still valid, else refresh.
+  // The `mounted` flag prevents setState calls on unmounted components (StrictMode
+  // double-invocation or rapid navigation away before the async chain completes).
   useEffect(() => {
+    let mounted = true;
+
     const init = async () => {
       // Try existing access token first (survives route navigations via sessionStorage)
       const existingToken = getAccessToken();
       if (existingToken) {
         const userData = await fetchCurrentUser(existingToken);
+        if (!mounted) return;
         if (userData) {
           setUser(userData);
           setIsLoading(false);
@@ -198,19 +203,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       const refreshToken = getRefreshToken();
       if (!refreshToken) {
-        setIsLoading(false);
+        if (mounted) setIsLoading(false);
         return;
       }
 
       const token = await refreshAccessToken();
+      if (!mounted) return;
       if (token) {
         const userData = await fetchCurrentUser(token);
-        setUser(userData);
+        if (mounted) setUser(userData);
       }
-      setIsLoading(false);
+      if (mounted) setIsLoading(false);
     };
 
     init();
+    return () => { mounted = false; };
   }, [fetchCurrentUser]);
 
   const login = useCallback(async (credentials: LoginRequest) => {
@@ -251,7 +258,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(userData);
   }, [fetchCurrentUser]);
 
-  const logout = useCallback(() => {
+  const logout = useCallback(async () => {
+    // Revoke the refresh token on the server first so it can no longer be used
+    // to obtain new access tokens even if it was stolen.
+    const rt = getRefreshToken();
+    if (rt) {
+      try {
+        await fetch(`${_AUTH_API_BASE}/auth/logout`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refresh_token: rt }),
+        });
+      } catch {
+        // Network error — proceed with local cleanup anyway
+      }
+    }
     setAccessToken(null);
     setRefreshToken(null);
     setUser(null);

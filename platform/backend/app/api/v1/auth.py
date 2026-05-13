@@ -97,8 +97,8 @@ async def register(
     # Add user to the invite's org with the specified role
     try:
         member_role = MemberRole(invite.role)
-    except ValueError:
-        member_role = MemberRole.MEMBER
+    except (ValueError, AttributeError):
+        member_role = MemberRole.ANALYST
 
     member = OrgMember(
         user_id=user.id,
@@ -142,40 +142,51 @@ async def login(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
-    # Check account lockout
+    # Check account lockout and manage brute-force counters via Redis.
+    # Each Redis operation uses a short-lived connection that is always closed
+    # in a finally block, preventing connection leaks on all code paths.
     import redis.asyncio as _aioredis
+
     _lockout_key = f"lockout:{payload.email}"
     _attempt_key = f"loginattempts:{payload.email}"
-    try:
-        _redis = _aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=1)
-        _locked = await _redis.get(_lockout_key)
-        if _locked:
-            await _redis.aclose()
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail={"error": {"code": "ACCOUNT_LOCKED", "message": "Account temporarily locked due to too many failed login attempts. Try again in 15 minutes."}},
-            )
-    except HTTPException:
-        raise
-    except Exception:
-        _redis = None
+
+    async def _redis_op(coro_factory):
+        """Execute a Redis coroutine with a dedicated connection; return None on any error."""
+        _r = None
+        try:
+            _r = _aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=1)
+            return await coro_factory(_r)
+        except Exception:
+            return None
+        finally:
+            if _r is not None:
+                try:
+                    await _r.aclose()
+                except Exception:
+                    pass
+
+    # Check lockout
+    _locked = await _redis_op(lambda r: r.get(_lockout_key))
+    if _locked:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"error": {"code": "ACCOUNT_LOCKED", "message": "Account temporarily locked due to too many failed login attempts. Try again in 15 minutes."}},
+        )
 
     # Load user
     result = await db.execute(select(User).where(User.email == payload.email))
     user = result.scalar_one_or_none()
 
     if not user or not verify_password(payload.password, user.hashed_password):
-        # Increment failed attempt counter
-        try:
-            if _redis:
-                attempts = await _redis.incr(_attempt_key)
-                await _redis.expire(_attempt_key, 900)  # 15 min window
-                if int(attempts) >= 5:
-                    await _redis.set(_lockout_key, "1", ex=900)  # Lock for 15 min
-                    await _redis.delete(_attempt_key)
-                await _redis.aclose()
-        except Exception:
-            pass
+        # Increment failed attempt counter; lock after 5 failures within 15 min
+        async def _increment(r):
+            attempts = await r.incr(_attempt_key)
+            await r.expire(_attempt_key, 900)
+            if int(attempts) >= 5:
+                await r.set(_lockout_key, "1", ex=900)
+                await r.delete(_attempt_key)
+
+        await _redis_op(_increment)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error": {"code": "INVALID_CREDENTIALS", "message": "Invalid email or password"}},
@@ -207,14 +218,8 @@ async def login(
     refresh_token = create_refresh_token(subject=str(user.id))
     await store_refresh_token(str(user.id), refresh_token)
 
-    # Clear failed attempt counter on success
-    try:
-        if '_redis' in locals() and _redis:
-            await _redis.delete(_attempt_key)
-            await _redis.delete(_lockout_key)
-            await _redis.aclose()
-    except Exception:
-        pass
+    # Clear failed attempt counter on successful login
+    await _redis_op(lambda r: r.delete(_attempt_key, _lockout_key))
 
     return TokenResponse(
         access_token=access_token,

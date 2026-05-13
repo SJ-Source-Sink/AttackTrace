@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, List, Optional
 from uuid import UUID
 
+from pydantic import BaseModel as _PydanticBaseModel
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -447,7 +449,14 @@ async def export_findings(
 
     query = select(Finding).where(Finding.org_id == org_id)
     if scan_job_id:
-        query = query.where(Finding.scan_job_id == UUID(scan_job_id))
+        try:
+            _export_scan_uuid = UUID(scan_job_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": {"code": "INVALID_UUID", "message": "Invalid scan_job_id"}},
+            )
+        query = query.where(Finding.scan_job_id == _export_scan_uuid)
     if severity:
         query = query.where(Finding.severity == severity)
     if finding_status:
@@ -502,34 +511,47 @@ async def list_assignees(
     }
 
 
+class BulkStatusPayload(_PydanticBaseModel):
+    finding_ids: List[str] = Field(..., min_length=1, max_length=500,
+                                   description="Up to 500 finding UUIDs to update in one request")
+    status: str = Field(..., description="Target FindingStatus value")
+
+
 @router.post(
     "/bulk-status",
-    summary="Bulk update finding status",
+    summary="Bulk update finding status (max 500 findings per request)",
 )
 async def bulk_update_status(
-    payload: dict,
+    payload: BulkStatusPayload,
     request: Request,
     current_user: Annotated[User, Depends(get_current_user)],
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    finding_ids = payload.get("finding_ids", [])
-    new_status = payload.get("status")
-    if not finding_ids or not new_status:
-        raise HTTPException(status_code=400, detail="finding_ids and status required")
     try:
-        target_status = FindingStatus(new_status)
+        target_status = FindingStatus(payload.status)
     except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid status: {new_status}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"code": "INVALID_STATUS", "message": f"Invalid status: {payload.status}"}},
+        )
+
+    # Validate all UUIDs up-front to return a clear 400 instead of a 500
+    try:
+        uuids = [UUID(fid) for fid in payload.finding_ids]
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"code": "INVALID_UUID", "message": "One or more finding_ids are not valid UUIDs"}},
+        )
 
     from sqlalchemy import update as _update
     stmt = (
         _update(Finding)
-        .where(Finding.org_id == org_id, Finding.id.in_([UUID(fid) for fid in finding_ids]))
-        .values(status=target_status)
+        .where(Finding.org_id == org_id, Finding.id.in_(uuids))
+        .values(status=target_status, updated_at=datetime.now(timezone.utc))
     )
     result = await db.execute(stmt)
-    await db.commit()
     return {"updated": result.rowcount}
 
 
@@ -719,7 +741,7 @@ async def delete_finding(
     )
     db.add(log)
     await db.delete(finding)
-    await db.commit()
+    # get_db auto-commits on return; explicit commit removed to keep audit log atomic
 
 
 @router.post(
@@ -758,8 +780,8 @@ async def list_comments(
     current_user: Annotated[User, Depends(get_current_user)],
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
-    page: int = 1,
-    per_page: int = 50,
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=50, ge=1, le=200),
 ) -> dict:
     await _get_finding_or_404(db, finding_id, org_id)
 

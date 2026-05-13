@@ -3,6 +3,13 @@ import { NextRequest, NextResponse } from "next/server";
 export function middleware(request: NextRequest) {
   const response = NextResponse.next();
 
+  // Derive backend origin from env so CSP works in both dev and production.
+  // NEXT_PUBLIC_API_URL is set at build time (e.g. https://api.attacktrace.io/api/v1).
+  // Strip the path suffix to get just the origin.
+  const rawApiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
+  const apiOrigin = rawApiUrl.replace(/\/api\/v1\/?$/, "").replace(/\/$/, "") || "http://localhost:8000";
+  const wsOrigin = apiOrigin.replace(/^https?/, (p) => (p === "https" ? "wss" : "ws"));
+
   // Security headers for all responses
   response.headers.set("X-Content-Type-Options", "nosniff");
   response.headers.set("X-Frame-Options", "DENY");
@@ -15,9 +22,9 @@ export function middleware(request: NextRequest) {
       "default-src 'self'",
       "script-src 'self' 'unsafe-inline' 'unsafe-eval'", // unsafe-eval required by Next.js dev
       "style-src 'self' 'unsafe-inline'",
-      "img-src 'self' data: blob: http://localhost:8000",
+      `img-src 'self' data: blob: ${apiOrigin}`,
       "font-src 'self'",
-      "connect-src 'self' http://localhost:8000 ws://localhost:8000",
+      `connect-src 'self' ${apiOrigin} ${wsOrigin}`,
       "frame-ancestors 'none'",
     ].join("; ")
   );

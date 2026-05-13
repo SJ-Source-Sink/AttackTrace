@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -75,8 +75,8 @@ async def list_scan_jobs(
     workspace_id: str = None,
     target_domain: str = None,
     search: str = None,
-    page: int = 1,
-    per_page: int = 50,
+    page: int = Query(default=1, ge=1),
+    per_page: int = Query(default=50, ge=1, le=200),
 ) -> dict:
     return await list_scans(
         db=db,
@@ -148,10 +148,8 @@ async def cancel_or_delete_scan_job(
 
         # Invalidate dashboard cache so asset/finding counts update immediately
         try:
-            import redis.asyncio as aioredis
-            _r = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=1)
-            await _r.delete(f"dashboard:stats:{org_id_str}")
-            await _r.aclose()
+            from app.services.scan_service import _get_redis as _get_scan_redis
+            await _get_scan_redis().delete(f"dashboard:stats:{org_id_str}")
         except Exception:
             pass
 
