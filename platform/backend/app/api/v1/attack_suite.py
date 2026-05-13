@@ -199,6 +199,28 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+def _probe(module: str, method: str, url: str, *,
+           payload: str = "", status: int | None = None,
+           size: int | None = None, note: str = "") -> dict:
+    """
+    Yield this from a module to emit a verbose HTTP trace to the progress panel.
+    The orchestrator routes dicts with __type__=='probe' to SSE 'progress' events.
+    """
+    parts = [f"  → {method} {url}"]
+    if payload:
+        p = payload if len(payload) <= 80 else payload[:77] + "..."
+        parts.append(f"     payload: {p}")
+    if status is not None:
+        parts.append(f"     ← HTTP {status}" + (f"  ({size} bytes)" if size is not None else ""))
+    if note:
+        parts.append(f"     note: {note}")
+    return {
+        "__type__": "probe",
+        "module": module,
+        "message": "\n".join(parts),
+    }
+
+
 # ── Proof-based scanning helpers ──────────────────────────────────────────────
 
 import html as _html_mod
@@ -934,8 +956,11 @@ async def _ai_analyze_finding(finding: dict, target: str, ai_config: dict | None
 # ── Module: Security Headers ──────────────────────────────────────────────────
 
 async def _module_headers(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    yield _probe("headers", "GET", target, note="fetching security headers")
     try:
         r = await client.get(target, timeout=10)
+        yield _probe("headers", "GET", target, status=r.status_code, size=len(r.content),
+                     note=f"headers present: {', '.join(k for k in r.headers if k.lower() in ['strict-transport-security','content-security-policy','x-frame-options','x-content-type-options','permissions-policy'])}")
         h = {k.lower(): v for k, v in r.headers.items()}
 
         checks = [
@@ -1014,9 +1039,12 @@ async def _module_cors(target: str, client: httpx.AsyncClient) -> AsyncGenerator
     # ── Test 1: Wildcard ACAO on data-returning API endpoints ────────────────
     for path in CORS_WILDCARD_API_PATHS[:8]:
         url = target + path
+        yield _probe("cors", "GET", url, note="checking CORS wildcard on API endpoint")
         try:
             r = await client.get(url, timeout=8)
             acao = r.headers.get("access-control-allow-origin", "")
+            yield _probe("cors", "GET", url, status=r.status_code, size=len(r.content),
+                         note=f"ACAO: {acao or '(not set)'}, CT: {r.headers.get('content-type','')[:40]}")
             ct = r.headers.get("content-type", "")
             if (acao == "*" and r.status_code == 200
                     and "application/json" in ct and len(r.content) > 200):
@@ -1063,6 +1091,7 @@ async def _module_cors(target: str, client: httpx.AsyncClient) -> AsyncGenerator
         for origin, technique in test_origins:
             try:
                 # Test preflight
+                yield _probe("cors", "OPTIONS", url, payload=f"Origin: {origin}", note=f"preflight — {technique}")
                 pre_r = await client.options(url, headers={
                     "Origin": origin,
                     "Access-Control-Request-Method": "GET",
@@ -1070,11 +1099,16 @@ async def _module_cors(target: str, client: httpx.AsyncClient) -> AsyncGenerator
                 }, timeout=8)
                 acao = pre_r.headers.get("access-control-allow-origin", "")
                 acac = pre_r.headers.get("access-control-allow-credentials", "false").lower()
+                yield _probe("cors", "OPTIONS", url, status=pre_r.status_code,
+                             note=f"ACAO: {acao or '(none)'}, ACAC: {acac}")
                 origin_reflected = (acao == origin or
                                     (origin != "null" and len(origin) > 5 and origin in acao))
 
                 # Also test simple GET with Origin header
+                yield _probe("cors", "GET", url, payload=f"Origin: {origin}", note=f"simple request — {technique}")
                 get_r = await client.get(url, headers={"Origin": origin}, timeout=8)
+                yield _probe("cors", "GET", url, status=get_r.status_code, size=len(get_r.content),
+                             note=f"ACAO: {get_r.headers.get('access-control-allow-origin','(none)')}")
                 acao2 = get_r.headers.get("access-control-allow-origin", "")
                 acac2 = get_r.headers.get("access-control-allow-credentials", "false").lower()
                 get_reflected = (acao2 == origin or
@@ -1230,8 +1264,11 @@ async def _module_xss(target: str, client: httpx.AsyncClient,
         # Use canary embedded in payload so we can correlate the exact injection
         probe_payload = f'<script>/*{canary}*/</script>'
         test_url = f"{target}?{param}={probe_payload}"
+        yield _probe("xss", "GET", test_url, payload=probe_payload, note=f"param={param}, canary={canary}")
         try:
             r = await client.get(test_url, timeout=8)
+            yield _probe("xss", "GET", test_url, status=r.status_code, size=len(r.content),
+                         note=f"canary in body: {'YES — checking escape' if canary in r.text else 'no'}")
             ct = r.headers.get("content-type", "")
             if "text/html" in ct and canary in r.text:
                 # Canary present — now check if it's UNESCAPED (i.e., executable)
@@ -1298,7 +1335,10 @@ async def _module_xss(target: str, client: httpx.AsyncClient,
                 form_data[inp] = payload
 
         try:
+            yield _probe("xss", "POST", action, payload=payload[:80], note="stored XSS form probe")
             post_r = await client.post(action, data=form_data, timeout=10)
+            yield _probe("xss", "POST", action, status=post_r.status_code, size=len(post_r.content),
+                         note=f"canary in body: {'YES' if canary in post_r.text else 'no'}")
             # Check immediate response (reflected after POST)
             if canary in post_r.text and _is_unescaped_in_html(f'id="atxss_{canary}"', post_r.text):
                 yield _finding("xss", "stored_xss", "critical",
@@ -1373,13 +1413,18 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
     # Establish baseline for the page WITHOUT injection (to filter pre-existing errors)
     baseline_body = ""
     try:
+        yield _probe("sqli", "GET", target, note="baseline request (no payload)")
         baseline_r = await client.get(target, timeout=8)
+        yield _probe("sqli", "GET", target, status=baseline_r.status_code, size=len(baseline_r.content),
+                     note="baseline established")
         baseline_body = baseline_r.text.lower()
     except Exception:
         pass
 
     # Statistical baseline timing (3 samples)
+    yield _probe("sqli", "GET", target, note="timing baseline — 3 samples to measure normal response time")
     baseline_mean, baseline_stdev = await _timing_samples(client, target, n=3)
+    yield _probe("sqli", "GET", target, note=f"timing baseline: mean={baseline_mean:.2f}s stdev={baseline_stdev:.2f}s")
 
     # Augment error payloads with WAF-specific bypass payloads
     error_payloads = list(SQLI_ERROR_PAYLOADS)
@@ -1396,7 +1441,10 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
         # ── Error-based: inject quote, look for NEW DB errors ───────────────
         for quote in ["'", '"']:
             try:
-                r = await client.get(f"{target}?{param}={quote}", timeout=8)
+                test_url = f"{target}?{param}={quote}"
+                yield _probe("sqli", "GET", test_url, payload=quote, note=f"error-based probe, param={param}")
+                r = await client.get(test_url, timeout=8)
+                yield _probe("sqli", "GET", test_url, status=r.status_code, size=len(r.content))
                 bl = r.text.lower()
                 for pat in _SQLI_CONFIRMED_PATTERNS:
                     if pat in bl and pat not in baseline_body:
@@ -1428,17 +1476,25 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
         if baseline_mean < 3.0:
             payload = SQLI_TIME_PAYLOADS[0]  # e.g. ' OR SLEEP(3)--
             try:
+                time_url = f"{target}?{param}={payload}"
+                yield _probe("sqli", "GET", time_url, payload=payload,
+                             note=f"time-based probe — expecting >{baseline_mean + 3.0:.1f}s delay")
                 t0 = time.monotonic()
-                await client.get(f"{target}?{param}={payload}", timeout=15)
+                await client.get(time_url, timeout=15)
                 elapsed = time.monotonic() - t0
+                yield _probe("sqli", "GET", time_url, note=f"elapsed: {elapsed:.2f}s (threshold: {baseline_mean + 3.0:.1f}s)")
                 # Threshold: baseline_mean + 3s delay + 2*stdev safety margin
                 threshold = baseline_mean + 3.0 + max(2 * baseline_stdev, 0.5)
                 if elapsed >= threshold:
                     # Confirm with a second payload (different SLEEP value) to rule out fluke
                     confirm_payload = SQLI_TIME_PAYLOADS[1] if len(SQLI_TIME_PAYLOADS) > 1 else payload
+                    confirm_url = f"{target}?{param}={confirm_payload}"
+                    yield _probe("sqli", "GET", confirm_url, payload=confirm_payload,
+                                 note="confirmation probe (second SLEEP payload)")
                     t1 = time.monotonic()
-                    await client.get(f"{target}?{param}={confirm_payload}", timeout=15)
+                    await client.get(confirm_url, timeout=15)
                     elapsed2 = time.monotonic() - t1
+                    yield _probe("sqli", "GET", confirm_url, note=f"confirm elapsed: {elapsed2:.2f}s")
                     if elapsed2 >= baseline_mean + 2.5:
                         hit_params.add(param)
                         yield _finding("sqli", "time_sqli_url", "critical",
@@ -1657,8 +1713,11 @@ async def _module_ssrf(target: str, client: httpx.AsyncClient) -> AsyncGenerator
     for param in SSRF_PARAMS[:10]:
         for ssrf_url, _indicators in SSRF_TARGETS[:6]:
             test_url = f"{target}?{param}={ssrf_url}"
+            yield _probe("ssrf", "GET", test_url, payload=ssrf_url, note=f"param={param}, probing cloud metadata endpoint")
             try:
                 r = await client.get(test_url, timeout=8)
+                yield _probe("ssrf", "GET", test_url, status=r.status_code, size=len(r.content),
+                             note="format-validating response for real cloud metadata structure")
                 # Strict format validation: response must look like actual cloud metadata
                 if _validate_ssrf_content(r.text, ssrf_url):
                     yield _finding("ssrf", "ssrf_cloud_metadata", "critical",
@@ -1733,8 +1792,11 @@ async def _module_idor(target: str, client: httpx.AsyncClient,
 
         # Get a 404 baseline: use an obviously non-existent ID
         nonexistent = re.sub(r'/(\d+)(?=[/?]|$)', '/999999', ep)
+        yield _probe("idor", "GET", nonexistent, note="404 baseline — non-existent ID to establish expected not-found response")
         try:
             baseline_r = await client.get(nonexistent, timeout=8)
+            yield _probe("idor", "GET", nonexistent, status=baseline_r.status_code, size=len(baseline_r.content),
+                         note=f"baseline: {'4xx (good baseline)' if baseline_r.status_code >= 400 else 'NOT 4xx — may be SPA fallback'}")
             baseline_status = baseline_r.status_code
             baseline_size = len(baseline_r.content)
         except httpx.HTTPError:
@@ -1742,16 +1804,21 @@ async def _module_idor(target: str, client: httpx.AsyncClient,
             baseline_size = 0
 
         # Fetch the original endpoint (authenticated user's own resource)
+        yield _probe("idor", "GET", ep, note="original resource (authenticated user's own ID)")
         try:
             orig_r = await client.get(ep, timeout=8)
             orig_status = orig_r.status_code
             orig_size = len(orig_r.content)
+            yield _probe("idor", "GET", ep, status=orig_status, size=orig_size)
         except httpx.HTTPError:
             continue
 
         # Fetch the incremented ID
+        yield _probe("idor", "GET", modified, note="incremented ID — checking if different user's resource is returned")
         try:
             r = await client.get(modified, timeout=8)
+            yield _probe("idor", "GET", modified, status=r.status_code, size=len(r.content),
+                         note=f"meaningfully differs: {_responses_meaningfully_differ(orig_r.text, r.text, orig_size, len(r.content))}")
         except httpx.HTTPError:
             continue
 
@@ -2641,8 +2708,10 @@ async def _module_auth_bypass(target: str, client: httpx.AsyncClient,
     # ── Sensitive file exposure (SPA-aware) ───────────────────────────────────
     for path in COMMON_SENSITIVE_PATHS[:20]:
         url = target + path
+        yield _probe("auth_bypass", "GET", url, note=f"checking sensitive path: {path}")
         try:
             r = await client.get(url, timeout=6)
+            yield _probe("auth_bypass", "GET", url, status=r.status_code, size=len(r.content))
             # Skip if this is the SPA returning its index.html for all routes
             if _is_spa_fallback(r, spa_fallback_size):
                 continue
@@ -2740,8 +2809,14 @@ async def _module_auth_bypass(target: str, client: httpx.AsyncClient,
     for path in ["/admin", "/api/admin", "/admin/users"]:
         url = target + path
         try:
+            yield _probe("auth_bypass", "GET", url, note="no X-Forwarded-For (baseline)")
             r_plain = await client.get(url, timeout=6)
+            yield _probe("auth_bypass", "GET", url, status=r_plain.status_code, size=len(r_plain.content))
+            yield _probe("auth_bypass", "GET", url, payload="X-Forwarded-For: 127.0.0.1",
+                         note="with X-Forwarded-For bypass header")
             r_xff = await client.get(url, headers={"X-Forwarded-For": "127.0.0.1"}, timeout=6)
+            yield _probe("auth_bypass", "GET", url, status=r_xff.status_code, size=len(r_xff.content),
+                         note="bypass worked!" if r_plain.status_code in (401, 403) and r_xff.status_code == 200 else "no bypass")
             if (not _is_spa_fallback(r_plain, spa_fallback_size) and
                     not _is_spa_fallback(r_xff, spa_fallback_size)):
                 if r_plain.status_code in (401, 403) and r_xff.status_code == 200:
@@ -2768,7 +2843,11 @@ async def _module_auth_bypass(target: str, client: httpx.AsyncClient,
                 r_plain = await client.get(target + path, timeout=5)
                 if r_plain.status_code not in (403, 401):
                     continue
+                yield _probe("auth_bypass", "GET", url, payload=f"{bypass_header}: {path}",
+                             note=f"header routing bypass — direct path returned {r_plain.status_code}")
                 r_bypass = await client.get(url, headers={bypass_header: path}, timeout=6)
+                yield _probe("auth_bypass", "GET", url, status=r_bypass.status_code, size=len(r_bypass.content),
+                             note="bypass confirmed!" if r_bypass.status_code == 200 else "not bypassed")
                 if r_bypass.status_code == 200 and not _is_spa_fallback(r_bypass, spa_fallback_size):
                     body = r_bypass.text.lower()
                     if any(ind in body for ind in ["admin", "users", "dashboard", "management"]):
@@ -3367,8 +3446,11 @@ async def _module_info_disclosure(target: str, client: httpx.AsyncClient,
 
     for path in INFO_DISCLOSURE_PATHS:
         url = target + path
+        yield _probe("info_disclosure", "GET", url, note=f"probing sensitive path: {path}")
         try:
             r = await client.get(url, timeout=8)
+            yield _probe("info_disclosure", "GET", url, status=r.status_code, size=len(r.content),
+                         note="exposed!" if r.status_code == 200 and len(r.content) > 20 else "not found")
             if _is_spa_fallback(r, spa_fallback_size):
                 continue
             if r.status_code == 200 and len(r.content) > 20:
@@ -3752,8 +3834,11 @@ async def _module_rate_limit(target: str, client: httpx.AsyncClient) -> AsyncGen
 async def _module_session(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
     """Test session security: fixation, cookie flags, concurrent sessions, logout."""
 
+    yield _probe("session", "GET", target, note="checking session cookie flags")
     try:
         r = await client.get(target, timeout=8)
+        yield _probe("session", "GET", target, status=r.status_code,
+                     note=f"Set-Cookie headers: {sum(1 for k,_ in r.headers.multi_items() if k.lower()=='set-cookie')}")
     except httpx.HTTPError:
         return
 
@@ -4821,6 +4906,17 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, ai_config:
                                f"Tech: {', '.join(crawl_result.tech_stack) or 'unknown'}",
                     "module": "crawl"
                 })
+                # Emit discovered URLs as probe events so user can see what was found
+                for ep in sorted(crawl_result.endpoints)[:30]:
+                    yield _sse("progress", {"message": f"  [crawl] endpoint: {ep}", "module": "crawl"})
+                for fm in crawl_result.forms[:10]:
+                    action = fm.get("action", "?")
+                    method = fm.get("method", "GET")
+                    fields = fm.get("inputs", [])
+                    yield _sse("progress", {
+                        "message": f"  [crawl] form: {method} {action} — fields: {', '.join(fields[:6]) or '(none)'}",
+                        "module": "crawl"
+                    })
                 _scan_history[scan_id]["crawl"] = {
                     "pages": len(crawl_result.pages),
                     "forms": len(crawl_result.forms),
@@ -4932,6 +5028,14 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, ai_config:
             yield _sse("progress", {"message": f"[{mod_id}] ► Running: {meta['label']}...", "module": mod_id})
             try:
                 async for finding in module_runners[mod_id]():
+                    # Verbose HTTP probe trace — route to progress, not finding
+                    if finding.get("__type__") == "probe":
+                        yield _sse("progress", {
+                            "message": finding["message"],
+                            "module": finding.get("module", mod_id),
+                        })
+                        await asyncio.sleep(0)
+                        continue
                     # AI deep-analysis for critical/high findings when key available
                     if _ai_key and finding.get("is_vulnerable") and finding.get("severity") in ("critical", "high"):
                         try:
