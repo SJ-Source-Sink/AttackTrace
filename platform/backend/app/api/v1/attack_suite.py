@@ -500,18 +500,23 @@ IDOR Patterns:
 
 async def _ai_plan_attack(target: str, tech_stack: list[str],
                           endpoints: list[str], modules: list[str],
-                          api_key: str | None = None) -> str:
+                          ai_config: dict | None = None) -> str:
     """Use Claude to generate a prioritised attack strategy using hunt skill context.
 
     Raises RuntimeError if API key is not configured.
     Raises any Anthropic API exception so the caller can emit a proper SSE error event.
     """
-    effective_key = api_key or settings.ANTHROPIC_API_KEY
+    cfg = ai_config or {}
+    effective_key = cfg.get("api_key") or settings.ANTHROPIC_API_KEY
     if not effective_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not configured")
 
     import anthropic
-    ac = anthropic.AsyncAnthropic(api_key=effective_key)
+    client_kwargs: dict = {"api_key": effective_key}
+    if cfg.get("base_url") or settings.AI_BASE_URL:
+        client_kwargs["base_url"] = cfg.get("base_url") or settings.AI_BASE_URL
+    ac = anthropic.AsyncAnthropic(**client_kwargs)
+    model = cfg.get("model") or settings.AI_MODEL
 
     system_prompt = (
         "You are an expert penetration tester and bug bounty hunter. "
@@ -537,7 +542,7 @@ Provide:
 Max 250 words. Be specific — reference actual endpoints and tech detected above."""
 
     msg = await ac.messages.create(
-        model="claude-sonnet-4-6",
+        model=model,
         max_tokens=500,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
@@ -545,17 +550,22 @@ Max 250 words. Be specific — reference actual endpoints and tech detected abov
     return msg.content[0].text.strip()
 
 
-async def _ai_analyze_finding(finding: dict, target: str, api_key: str | None = None) -> str:
+async def _ai_analyze_finding(finding: dict, target: str, ai_config: dict | None = None) -> str:
     """Use Claude to deeply analyze a specific finding and suggest exploitation steps."""
-    effective_key = api_key or settings.ANTHROPIC_API_KEY
+    cfg = ai_config or {}
+    effective_key = cfg.get("api_key") or settings.ANTHROPIC_API_KEY
     if not effective_key:
         return ""
 
     import anthropic
-    ac = anthropic.AsyncAnthropic(api_key=effective_key)
+    client_kwargs: dict = {"api_key": effective_key}
+    if cfg.get("base_url") or settings.AI_BASE_URL:
+        client_kwargs["base_url"] = cfg.get("base_url") or settings.AI_BASE_URL
+    ac = anthropic.AsyncAnthropic(**client_kwargs)
+    model = cfg.get("model") or settings.AI_MODEL
 
     msg = await ac.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=model,
         max_tokens=200,
         messages=[{"role": "user", "content": (
             f"Security finding on {target}:\n"
@@ -3965,7 +3975,7 @@ async def _module_websocket(target: str, client: httpx.AsyncClient) -> AsyncGene
 
 # ── Main Stream ───────────────────────────────────────────────────────────────
 
-async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGenerator[str, None]:
+async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, ai_config: dict | None = None) -> AsyncGenerator[str, None]:
     start_time = time.monotonic()
     findings: list[dict] = []
     counts: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
@@ -4140,14 +4150,15 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGe
                 yield _sse("progress", {"message": f"Crawler error: {e}", "module": "crawl"})
 
         # ── AI Strategy Planning ───────────────────────────────────────────
-        _ai_key = req.anthropic_api_key or settings.ANTHROPIC_API_KEY or None
+        _resolved_cfg = ai_config or {}
+        _ai_key = _resolved_cfg.get("api_key") or req.anthropic_api_key or settings.ANTHROPIC_API_KEY or None
         if req.ai_analysis and _ai_key:
             yield _sse("progress", {"message": "🤖 Claude analyzing target with hunt skill context...", "module": "ai"})
             try:
                 plan = await _ai_plan_attack(
                     req.target, crawl_result.tech_stack,
                     list(crawl_result.endpoints)[:30], req.modules,
-                    api_key=_ai_key,
+                    ai_config=_resolved_cfg or {"api_key": _ai_key},
                 )
                 if plan:
                     yield _sse("ai_plan", {"plan": plan, "tech_stack": crawl_result.tech_stack})
@@ -4213,7 +4224,7 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest) -> AsyncGe
                     # AI deep-analysis for critical/high findings when key available
                     if _ai_key and finding.get("is_vulnerable") and finding.get("severity") in ("critical", "high"):
                         try:
-                            ai_note = await _ai_analyze_finding(finding, req.target, api_key=_ai_key)
+                            ai_note = await _ai_analyze_finding(finding, req.target, ai_config=_resolved_cfg or {"api_key": _ai_key})
                             if ai_note:
                                 finding["ai_analysis"] = ai_note
                         except Exception:
@@ -4291,10 +4302,14 @@ async def test_auth_connection(
 async def run_attack_suite(
     payload: AttackSuiteRequest,
     current_user: Annotated[User, Depends(require_tool("attack_suite"))],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
+    from app.services.ai_service import get_org_ai_config
+    ai_config = await get_org_ai_config(org_id, db)
     scan_id = str(uuid.uuid4())
     return StreamingResponse(
-        _stream_attack_suite(scan_id, payload),
+        _stream_attack_suite(scan_id, payload, ai_config=ai_config),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
                  "X-Accel-Buffering": "no"},

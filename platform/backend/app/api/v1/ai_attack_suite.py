@@ -14,14 +14,17 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, AsyncGenerator
+from uuid import UUID
 
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.dependencies import get_current_user, require_tool
+from app.core.database import get_db
+from app.core.dependencies import get_current_org_id, get_current_user, require_tool
 from app.models.db.user import User
 
 router = APIRouter(prefix="/ai-attack-suite", tags=["AIAttackSuite"])
@@ -175,7 +178,7 @@ def _find_latest_shannon_report() -> str | None:
 # Main streaming function
 # ---------------------------------------------------------------------------
 
-async def _stream_shannon(scan_id: str, req: ShannonScanRequest) -> AsyncGenerator[str, None]:
+async def _stream_shannon(scan_id: str, req: ShannonScanRequest, ai_config: dict | None = None) -> AsyncGenerator[str, None]:
     def _sse(event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
@@ -230,10 +233,14 @@ async def _stream_shannon(scan_id: str, req: ShannonScanRequest) -> AsyncGenerat
             "scan_id": scan_id,
         })
 
-        # Build environment — pass ANTHROPIC_API_KEY
+        # Build environment — pass ANTHROPIC_API_KEY (org-specific takes priority)
         env = os.environ.copy()
-        if settings.ANTHROPIC_API_KEY:
-            env["ANTHROPIC_API_KEY"] = settings.ANTHROPIC_API_KEY
+        _cfg = ai_config or {}
+        _effective_key = _cfg.get("api_key") or settings.ANTHROPIC_API_KEY
+        if _effective_key:
+            env["ANTHROPIC_API_KEY"] = _effective_key
+        if _cfg.get("base_url") or settings.AI_BASE_URL:
+            env["ANTHROPIC_BASE_URL"] = _cfg.get("base_url") or settings.AI_BASE_URL
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -325,6 +332,8 @@ async def _stream_shannon(scan_id: str, req: ShannonScanRequest) -> AsyncGenerat
 async def run_shannon_scan(
     payload: ShannonScanRequest,
     current_user: Annotated[User, Depends(require_tool("attack_suite"))],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     if not shutil.which("shannon") and not shutil.which("npx"):
         raise HTTPException(
@@ -332,9 +341,11 @@ async def run_shannon_scan(
             detail="Neither 'shannon' nor 'npx' is installed on this server. Install Node.js to use Shannon.",
         )
 
+    from app.services.ai_service import get_org_ai_config
+    ai_config = await get_org_ai_config(org_id, db)
     scan_id = str(uuid.uuid4())
     return StreamingResponse(
-        _stream_shannon(scan_id, payload),
+        _stream_shannon(scan_id, payload, ai_config=ai_config),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

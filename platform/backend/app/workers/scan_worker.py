@@ -1261,9 +1261,6 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
 )
 def triage_scan_findings(self, scan_job_id: str) -> dict:
     """Background task: AI triage on findings from a completed scan."""
-    if not settings.ANTHROPIC_API_KEY:
-        return {"status": "skipped", "reason": "no_api_key"}
-
     engine = _get_sync_engine()
     SessionFactory = _get_session_factory(engine)
 
@@ -1271,7 +1268,8 @@ def triage_scan_findings(self, scan_job_id: str) -> dict:
         from app.models.db.finding import Finding as DBFinding, FindingSeverity
         from app.models.db.asset import Asset
         from app.models.db.scan import ScanJob
-        from app.models.db.org import Organization
+        from app.models.db.org import Organization, OrgCredentials
+        from app.services.crypto import decrypt_credential
         from sqlalchemy import select as sync_select
 
         try:
@@ -1283,6 +1281,29 @@ def triage_scan_findings(self, scan_job_id: str) -> dict:
         job = db.get(ScanJob, _triage_uuid)
         if not job:
             return {"error": "scan_not_found"}
+
+        # Resolve org-specific AI credentials (fall back to system env vars)
+        ai_api_key = settings.ANTHROPIC_API_KEY
+        ai_base_url = settings.AI_BASE_URL
+        ai_model = settings.AI_MODEL
+        try:
+            creds_row = db.execute(
+                sync_select(OrgCredentials).where(OrgCredentials.org_id == job.org_id)
+            ).scalar_one_or_none()
+            if creds_row:
+                if creds_row.anthropic_key_enc:
+                    ai_api_key = decrypt_credential(creds_row.anthropic_key_enc)
+                if creds_row.ai_base_url_enc:
+                    ai_base_url = decrypt_credential(creds_row.ai_base_url_enc)
+                if creds_row.ai_model_override_enc:
+                    ai_model = decrypt_credential(creds_row.ai_model_override_enc)
+        except Exception as e:
+            logger.warning(f"Could not load org AI credentials: {e}")
+
+        if not ai_api_key:
+            return {"status": "skipped", "reason": "no_api_key"}
+
+        ai_config = {"api_key": ai_api_key, "base_url": ai_base_url, "model": ai_model}
 
         org = db.get(Organization, job.org_id)
         org_context = {
@@ -1319,7 +1340,7 @@ def triage_scan_findings(self, scan_job_id: str) -> dict:
                 async with sem:
                     try:
                         ctx = asset_map.get(str(finding.asset_id), {}) if finding.asset_id else {}
-                        result = await _import_and_triage(finding, ctx, org_context)
+                        result = await _import_and_triage(finding, ctx, org_context, ai_config)
                         return finding, result, None
                     except Exception as e:
                         return finding, None, e
@@ -1357,9 +1378,9 @@ def triage_scan_findings(self, scan_job_id: str) -> dict:
         return {"status": "completed", "triaged": triaged, "errors": errors}
 
 
-async def _import_and_triage(finding, asset_ctx: dict, org_context: dict) -> dict:
+async def _import_and_triage(finding, asset_ctx: dict, org_context: dict, ai_config: dict | None = None) -> dict:
     from app.services.ai_service import triage_finding
-    return await triage_finding(finding, asset_ctx, org_context)
+    return await triage_finding(finding, asset_ctx, org_context, ai_config=ai_config)
 
 
 async def _async_notify_critical_findings(org_id: str, scan_job_id: str, findings_count: dict) -> None:
