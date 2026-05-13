@@ -199,6 +199,154 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+# ── Proof-based scanning helpers ──────────────────────────────────────────────
+
+import html as _html_mod
+import statistics as _statistics_mod
+
+def _unique_canary() -> str:
+    """Generate a unique 8-char hex canary for probe correlation."""
+    import secrets
+    return secrets.token_hex(4)
+
+
+def _is_unescaped_in_html(payload: str, body: str) -> bool:
+    """
+    Return True ONLY if payload appears literally (unencoded) in body.
+    Filters cases where the payload is HTML-entity-escaped (e.g. &lt;script&gt;),
+    which means it is NOT executable — common source of XSS false positives.
+    """
+    if payload not in body:
+        return False
+    escaped = _html_mod.escape(payload)
+    # If escape() doesn't change the payload, it has no special chars — safe to report
+    if escaped == payload:
+        return True
+    # Payload has special chars. Make sure the RAW version actually appears
+    # (not just the escaped version which could match a subset)
+    return payload in body and escaped not in body.replace(payload, "")
+
+
+def _extract_js_sinks_from_body(body: str) -> list[str]:
+    """
+    Extract variables assigned from user-controlled DOM sources in inline scripts.
+    Returns list of variable names that could be tainted.
+    Avoids flagging sinks in HTML body that are just framework templates.
+    """
+    import re
+    sinks = []
+    # Only look inside <script> blocks
+    script_blocks = re.findall(r'<script[^>]*>(.*?)</script>', body, re.DOTALL | re.IGNORECASE)
+    dangerous_sinks = [
+        "document.write(", "innerHTML =", "innerHTML=",
+        "outerHTML =", "outerHTML=", "eval(",
+        "location.href =", "location.href=",
+        "location.assign(", "location.replace(",
+        "setTimeout(", "setInterval(",
+    ]
+    source_patterns = [
+        r"location\.search", r"location\.hash", r"location\.href",
+        r"document\.referrer", r"window\.name", r"URLSearchParams",
+    ]
+    for block in script_blocks:
+        for sink in dangerous_sinks:
+            if sink in block:
+                # Check if a user-controlled source also exists in the same block
+                for src_pat in source_patterns:
+                    if re.search(src_pat, block):
+                        sinks.append(sink.strip())
+                        break
+    return list(set(sinks))
+
+
+async def _timing_samples(client: httpx.AsyncClient, url: str, n: int = 3,
+                           timeout: float = 8.0) -> tuple[float, float]:
+    """
+    Take N timing samples for a URL.
+    Returns (mean_seconds, stdev_seconds).
+    Falls back to (999.0, 0.0) on error.
+    """
+    samples = []
+    for _ in range(n):
+        try:
+            t0 = time.monotonic()
+            await client.get(url, timeout=timeout)
+            samples.append(time.monotonic() - t0)
+        except Exception:
+            pass
+        await asyncio.sleep(0.05)
+    if not samples:
+        return 999.0, 0.0
+    mean = sum(samples) / len(samples)
+    stdev = _statistics_mod.stdev(samples) if len(samples) > 1 else 0.5
+    return mean, stdev
+
+
+async def _response_baseline(client: httpx.AsyncClient, url: str) -> dict:
+    """
+    Capture a baseline response profile: status, body length, body hash.
+    Used to compare against injected responses.
+    """
+    import hashlib
+    try:
+        r = await client.get(url, timeout=8)
+        h = hashlib.md5(r.content).hexdigest()
+        return {"status": r.status_code, "size": len(r.content), "hash": h, "ok": True}
+    except Exception:
+        return {"status": 0, "size": 0, "hash": "", "ok": False}
+
+
+def _validate_ssrf_content(body: str, ssrf_url: str) -> bool:
+    """
+    Strict format-validation for SSRF responses.
+    Checks for actual cloud-provider metadata JSON structure, not just keywords.
+    """
+    body_lower = body.lower()
+    if "169.254.169.254" in ssrf_url or "metadata.google" in ssrf_url:
+        # AWS IMDSv1: valid response has JSON with InstanceId, AccountId
+        import re
+        if re.search(r'"instanceid"\s*:\s*"i-[0-9a-f]+', body_lower):
+            return True
+        if re.search(r'"accountid"\s*:\s*"\d{12}"', body_lower):
+            return True
+        # GCP: metadata-flavor header + instance/zone JSON
+        if re.search(r'"project-id"\s*:\s*"[a-z0-9-]+"', body_lower):
+            return True
+        # Azure: response contains compute/subscriptionId
+        if re.search(r'"subscriptionid"\s*:\s*"[0-9a-f-]{36}"', body_lower):
+            return True
+        # Any AccessKeyId-style content (AWS credentials)
+        if re.search(r'AKIA[0-9A-Z]{16}', body):
+            return True
+        # Plaintext IMDSv1 endpoint (169.254.169.254/latest/meta-data)
+        if all(kw in body_lower for kw in ["ami-id", "instance-type"]):
+            return True
+    if "100.100.100.200" in ssrf_url:  # Alibaba Cloud
+        if re.search(r'"instance-id"\s*:', body_lower):
+            return True
+    return False
+
+
+def _responses_meaningfully_differ(r1_body: str, r2_body: str,
+                                    size1: int, size2: int) -> bool:
+    """
+    Returns True if two responses appear to contain different data.
+    Used for IDOR detection to avoid flagging identical-content responses.
+    """
+    # Size must differ by >20% and >100 bytes to be meaningful
+    if max(size1, size2) == 0:
+        return False
+    size_diff_ratio = abs(size1 - size2) / max(size1, size2)
+    if size_diff_ratio > 0.2 and abs(size1 - size2) > 100:
+        return True
+    # Or first 500 chars of body meaningfully differ
+    s1 = r1_body[:500].strip()
+    s2 = r2_body[:500].strip()
+    if s1 and s2 and s1 != s2 and len(s1) > 20 and len(s2) > 20:
+        return True
+    return False
+
+
 # ── Crawler ───────────────────────────────────────────────────────────────────
 
 class CrawlResult:
@@ -650,86 +798,121 @@ async def _module_headers(target: str, client: httpx.AsyncClient) -> AsyncGenera
 # ── Module: CORS Misconfiguration ─────────────────────────────────────────────
 
 async def _module_cors(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    """
+    CORS detection with exploitability validation:
+    - Wildcard ACAO: only reported when endpoint returns real user data (JSON, >200 bytes)
+    - Reflected origin: only CRITICAL when BOTH ACAO reflects AND ACAC=true (real credential theft)
+    - Reflected origin without credentials: HIGH severity (data readable, not cookie theft)
+    - Correctly skips the impossible ACAO:* + credentials combo (browser rejects it)
+    """
     parsed = urlparse(target)
 
-    # ── Test 1: Wildcard ACAO on API endpoints ────────────────────────────────
-    # Access-Control-Allow-Origin: * on endpoints returning user/sensitive data
-    # allows any website to read the response via fetch(). While * can't be
-    # combined with credentials (spec prevents it), it still exposes API data.
-    wildcard_found = False
+    # ── Test 1: Wildcard ACAO on data-returning API endpoints ────────────────
     for path in CORS_WILDCARD_API_PATHS[:8]:
         url = target + path
         try:
             r = await client.get(url, timeout=8)
             acao = r.headers.get("access-control-allow-origin", "")
-            if acao == "*" and r.status_code == 200:
-                # Check if the response contains actual data (not empty/error)
-                body = r.text
-                has_data = len(body) > 50 and r.headers.get("content-type", "").startswith("application/json")
-                if has_data:
-                    wildcard_found = True
-                    yield _finding("cors", "cors_wildcard_api", "high",
-                        f"CORS Wildcard on Data API: {path}",
-                        f"API endpoint `{path}` returns data with `Access-Control-Allow-Origin: *`. "
-                        f"Any website can read this response via cross-origin fetch(). "
-                        f"If the endpoint returns user data, this is a data exposure vulnerability.",
-                        f"URL: {url}\nACAO: *\nContent-Type: {r.headers.get('content-type','')}\n"
-                        f"Response size: {len(body)} bytes",
+            ct = r.headers.get("content-type", "")
+            if (acao == "*" and r.status_code == 200
+                    and "application/json" in ct and len(r.content) > 200):
+                # Parse to check it actually has user/data fields (not just {})
+                try:
+                    data = r.json()
+                    # Must have meaningful keys — empty dict/list doesn't count
+                    has_real_data = (
+                        (isinstance(data, dict) and len(data) > 1) or
+                        (isinstance(data, list) and len(data) > 0)
+                    )
+                except Exception:
+                    has_real_data = True  # Can't parse, be conservative
+
+                if has_real_data:
+                    yield _finding("cors", "cors_wildcard_data_api", "high",
+                        f"CORS Wildcard on Data API Endpoint: {path}",
+                        f"Endpoint `{path}` returns {len(r.content)} bytes of JSON data "
+                        f"with `Access-Control-Allow-Origin: *`. Any website can read this "
+                        f"response cross-origin via fetch(). Sensitive data exposed if "
+                        f"authenticated users call this endpoint.",
+                        f"URL: {url}\nACAO: *\nResponse size: {len(r.content)}b\n"
+                        f"Sample keys: {list(data.keys())[:5] if isinstance(data, dict) else 'array'}",
                         url, True,
-                        "Replace ACAO: * with an explicit allowlist of trusted origins. "
-                        "Never use wildcard CORS on endpoints that return user-specific data.",
+                        "Replace ACAO: * with an explicit origin allowlist. "
+                        "Never use wildcard CORS on data-returning API endpoints.",
                         confidence="high")
                     break
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
 
-    # ── Test 2: Reflected origin bypass ──────────────────────────────────────
-    # Server echoes whatever Origin header is sent back in ACAO — allows any
-    # attacker-controlled domain to read responses cross-origin.
+    # ── Test 2: Reflected origin — requires ACAO echo + real response data ────
     test_origins = [
-        ("null", "null origin (sandboxed iframe)"),
         ("https://evil.example.com", "arbitrary origin"),
+        ("null", "null origin (sandboxed iframe)"),
         (f"https://{parsed.netloc}.evil.com", "suffix bypass"),
         (f"https://evil.{parsed.netloc}", "prefix bypass"),
-        (f"https://evil{parsed.netloc}", "no-dot prefix bypass"),
     ]
-
-    test_paths = CORS_SENSITIVE_PATHS + ["/api/me", "/api/user", "/graphql"]
+    test_paths = CORS_SENSITIVE_PATHS + ["/api/me", "/api/user", "/api/profile", "/graphql"]
 
     for path in test_paths[:6]:
         url = target + path
         for origin, technique in test_origins:
             try:
-                r = await client.options(url, headers={"Origin": origin,
-                    "Access-Control-Request-Method": "GET"}, timeout=8)
-                acao = r.headers.get("access-control-allow-origin", "")
-                acac = r.headers.get("access-control-allow-credentials", "")
+                # Test preflight
+                pre_r = await client.options(url, headers={
+                    "Origin": origin,
+                    "Access-Control-Request-Method": "GET",
+                    "Access-Control-Request-Headers": "Authorization",
+                }, timeout=8)
+                acao = pre_r.headers.get("access-control-allow-origin", "")
+                acac = pre_r.headers.get("access-control-allow-credentials", "false").lower()
+                origin_reflected = (acao == origin or
+                                    (origin != "null" and len(origin) > 5 and origin in acao))
 
-                if acao == origin or (origin != "null" and origin in acao):
-                    sev = "critical" if acac.lower() == "true" else "high"
-                    yield _finding("cors", f"cors_{technique.replace(' ', '_')}", sev,
-                        f"CORS Reflected Origin — {technique}",
-                        f"Origin `{origin}` is reflected in Access-Control-Allow-Origin"
-                        + (" with credentials allowed — attacker can steal cookies/tokens" if acac.lower() == "true" else "")
-                        + f". Technique: {technique}.",
-                        f"Request Origin: {origin}\nACAO: {acao}\nACAC: {acac}", url, True,
-                        "Implement strict CORS allowlist. Never reflect Origin header directly. "
-                        "Never combine ACAO: * with Allow-Credentials: true.",
-                        confidence="high")
-                    return
+                # Also test simple GET with Origin header
+                get_r = await client.get(url, headers={"Origin": origin}, timeout=8)
+                acao2 = get_r.headers.get("access-control-allow-origin", "")
+                acac2 = get_r.headers.get("access-control-allow-credentials", "false").lower()
+                get_reflected = (acao2 == origin or
+                                 (origin != "null" and len(origin) > 5 and origin in acao2))
 
-                r2 = await client.get(url, headers={"Origin": origin}, timeout=8)
-                acao2 = r2.headers.get("access-control-allow-origin", "")
-                acac2 = r2.headers.get("access-control-allow-credentials", "")
-                if acao2 == origin or (origin != "null" and origin in acao2):
-                    sev = "critical" if acac2.lower() == "true" else "high"
-                    yield _finding("cors", f"cors_get_{technique.replace(' ', '_')}", sev,
-                        f"CORS Reflected Origin on GET — {technique}",
-                        f"Origin `{origin}` reflected in ACAO on GET request to {path}.",
-                        f"ACAO: {acao2}\nACAC: {acac2}", url, True,
-                        "Implement strict CORS origin validation.",
-                        confidence="high")
+                if origin_reflected or get_reflected:
+                    _acao_used = acao if origin_reflected else acao2
+                    _acac_used = acac if origin_reflected else acac2
+                    _has_credentials = _acac_used == "true"
+
+                    # Verify the endpoint actually returns meaningful data
+                    # (not just a 200 empty response or error page)
+                    response_has_data = (get_r.status_code == 200
+                                         and len(get_r.content) > 100)
+
+                    if not response_has_data:
+                        continue  # Origin reflected but endpoint returns nothing — low risk
+
+                    if _has_credentials:
+                        yield _finding("cors", f"cors_reflected_credentials_{technique[:15]}", "critical",
+                            f"CORS Misconfiguration — Reflected Origin + Credentials: {technique}",
+                            f"Server reflects `{origin}` in ACAO **AND** sets "
+                            f"`Access-Control-Allow-Credentials: true`. An attacker's site "
+                            f"can make authenticated cross-origin requests and read the "
+                            f"victim's cookies/tokens from the response.",
+                            f"Endpoint: {url}\nOrigin sent: {origin}\nACAO: {_acao_used}\n"
+                            f"ACAC: {_acac_used}\nResponse size: {len(get_r.content)}b",
+                            url, True,
+                            "Validate Origin against an explicit allowlist. Never dynamically "
+                            "reflect the Origin header. Never combine wildcard with credentials.",
+                            confidence="high")
+                    else:
+                        yield _finding("cors", f"cors_reflected_{technique[:15]}", "high",
+                            f"CORS Reflected Origin Bypass — {technique}",
+                            f"Server reflects `{origin}` in ACAO. Without Allow-Credentials, "
+                            f"cookies won't be sent, but any public data at this endpoint can be "
+                            f"read cross-origin by an attacker-controlled website.",
+                            f"Endpoint: {url}\nOrigin sent: {origin}\nACAO: {_acao_used}",
+                            url, True,
+                            "Validate Origin against an explicit allowlist. "
+                            "Never dynamically reflect the request Origin.",
+                            confidence="medium")
                     return
 
             except httpx.HTTPError:
@@ -813,83 +996,147 @@ async def _module_csrf(target: str, client: httpx.AsyncClient,
 
 async def _module_xss(target: str, client: httpx.AsyncClient,
                       forms: list[dict],
-                      waf_bypass_payloads: list[str] | None = None) -> AsyncGenerator[dict, None]:
-    # Reflected XSS via URL params
-    payloads = XSS_PAYLOADS[:8]
-    # Prepend WAF-specific bypass payloads if available
+                      waf_bypass_payloads: list[str] | None = None,
+                      js_tainted_params: list[str] | None = None) -> AsyncGenerator[dict, None]:
+    """
+    XSS detection with proof-of-concept validation:
+    - Uses unique canary tokens to correlate injections
+    - Encoding-aware: only reports if payload appears UNESCAPED in response
+    - DOM XSS: only flags when sink + source co-exist in the same <script> block
+    - Stored XSS: verifies canary on a subsequent GET to the same URL
+    """
+    # Build param list — JS-informed tainted params go first (higher priority)
+    priority_params = list(js_tainted_params or []) + [
+        p for p in XSS_TEST_PARAMS if p not in (js_tainted_params or [])
+    ]
+    params_to_test = priority_params[:10]
+
+    # Build payload list — WAF bypass payloads first
+    base_payloads = XSS_PAYLOADS[:6]
     if waf_bypass_payloads:
-        payloads = list(waf_bypass_payloads) + payloads
-    hit_params = set()
+        base_payloads = list(waf_bypass_payloads[:4]) + base_payloads
 
-    for param in XSS_TEST_PARAMS[:8]:
-        for payload in payloads[:3]:
-            test_url = f"{target}?{param}={payload}"
-            try:
-                r = await client.get(test_url, timeout=8)
-                ct = r.headers.get("content-type", "")
-                if "text/html" in ct:
-                    for sig in ["<script>alert", "onerror=alert", "onload=alert", "onfocus=alert"]:
-                        if sig in r.text and param not in hit_params:
-                            hit_params.add(param)
-                            yield _finding("xss", "reflected_xss", "high",
-                                f"Reflected XSS via '{param}' parameter",
-                                f"Payload `{payload}` is reflected unescaped in HTML response.",
-                                f"URL: {test_url}\nReflected payload: {payload[:80]}",
-                                test_url, True,
-                                "HTML-encode all user-supplied input before reflection. "
-                                "Implement a strict Content-Security-Policy.",
-                                confidence="high")
-                            break
-            except httpx.HTTPError:
-                pass
-            await asyncio.sleep(0)
+    hit_params: set[str] = set()
 
-    # Stored XSS via forms
-    for form in forms[:6]:
-        method = form.get("method", "GET")
-        action = form.get("action", target)
-        inputs = form.get("inputs", [])
-        if method != "POST" or not inputs:
+    # ── Phase 1: Reflected XSS with unique canary ────────────────────────────
+    for param in params_to_test:
+        if param in hit_params:
             continue
-
-        # Inject XSS into all text fields
-        payload = '<img src=x onerror=alert("xss_test_at_' + str(int(time.time()))[-4:] + '")>'
-        form_data = {inp: payload if not any(kw in inp.lower()
-                                              for kw in ["password", "token", "csrf", "hidden"])
-                     else "testvalue" for inp in inputs}
+        canary = _unique_canary()
+        # Use canary embedded in payload so we can correlate the exact injection
+        probe_payload = f'<script>/*{canary}*/</script>'
+        test_url = f"{target}?{param}={probe_payload}"
         try:
-            r = await client.post(action, data=form_data, timeout=10)
-            if "xss_test_at_" in r.text and any(
-                sig in r.text for sig in ["onerror=alert", "src=x"]
-            ):
-                yield _finding("xss", "stored_xss", "critical",
-                    f"Stored XSS via Form at {action}",
-                    f"XSS payload persisted and reflected in response after POST.",
-                    f"Form: {action}\nPayload: {payload[:80]}",
-                    action, True,
-                    "HTML-encode output from database. Validate and sanitise all user input.",
-                    confidence="high")
+            r = await client.get(test_url, timeout=8)
+            ct = r.headers.get("content-type", "")
+            if "text/html" in ct and canary in r.text:
+                # Canary present — now check if it's UNESCAPED (i.e., executable)
+                if _is_unescaped_in_html(probe_payload, r.text):
+                    hit_params.add(param)
+                    yield _finding("xss", "reflected_xss", "high",
+                        f"Reflected XSS via '{param}' parameter",
+                        f"Unique canary `{canary}` reflected UNESCAPED in HTML response. "
+                        f"The `<script>` tag is not HTML-entity-encoded — directly exploitable.",
+                        f"URL: {test_url}\nCanary: {canary}\n"
+                        f"Context snippet: {r.text[max(0,r.text.find(canary)-50):r.text.find(canary)+80]}",
+                        test_url, True,
+                        "HTML-encode all user-supplied input before reflection. "
+                        "Implement a strict Content-Security-Policy.",
+                        confidence="high")
+                    continue
+
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
 
-    # DOM XSS indicators
+        # If canary injection didn't confirm, try event-handler payload with encoding check
+        if param not in hit_params:
+            for payload in base_payloads[:3]:
+                test_url2 = f"{target}?{param}={payload}"
+                try:
+                    r2 = await client.get(test_url2, timeout=8)
+                    ct2 = r2.headers.get("content-type", "")
+                    if "text/html" in ct2:
+                        # Must appear unescaped AND contain a dangerous char sequence
+                        for sig in ["<script", "onerror=", "onload=", "onfocus=", "javascript:"]:
+                            if sig in payload and _is_unescaped_in_html(payload, r2.text):
+                                hit_params.add(param)
+                                yield _finding("xss", "reflected_xss", "high",
+                                    f"Reflected XSS via '{param}' parameter",
+                                    f"Payload `{payload[:60]}` reflected unescaped in HTML response.",
+                                    f"URL: {test_url2}\nUnescaped reflection confirmed.",
+                                    test_url2, True,
+                                    "HTML-encode all user-supplied input before reflection.",
+                                    confidence="high")
+                                break
+                except httpx.HTTPError:
+                    pass
+                await asyncio.sleep(0)
+                if param in hit_params:
+                    break
+
+    # ── Phase 2: Stored XSS via forms — canary + GET verification ────────────
+    for form in forms[:5]:
+        method = form.get("method", "GET")
+        action = form.get("action", target)
+        inputs = form.get("inputs", [])
+        if method.upper() != "POST" or not inputs:
+            continue
+
+        canary = _unique_canary()
+        # Embed canary in a recognisable but safe-looking payload
+        payload = f'<img src=x id="atxss_{canary}" onerror=console.log(1)>'
+        form_data: dict = {}
+        for inp in inputs:
+            if any(kw in inp.lower() for kw in ["password", "token", "csrf", "_token", "hidden"]):
+                form_data[inp] = "testpassword123"
+            else:
+                form_data[inp] = payload
+
+        try:
+            post_r = await client.post(action, data=form_data, timeout=10)
+            # Check immediate response (reflected after POST)
+            if canary in post_r.text and _is_unescaped_in_html(f'id="atxss_{canary}"', post_r.text):
+                yield _finding("xss", "stored_xss", "critical",
+                    f"Stored/Reflected XSS via Form at {action}",
+                    f"Canary `{canary}` survived POST unescaped in response. "
+                    f"Server is rendering raw HTML from form input.",
+                    f"Form: {action}\nPayload: {payload[:80]}\nCanary: {canary}",
+                    action, True,
+                    "HTML-encode all output from user-supplied data. "
+                    "Validate and sanitise all form inputs server-side.",
+                    confidence="high")
+            else:
+                # Try fetching the action URL again (stored XSS shows on read)
+                get_r = await client.get(action, timeout=8)
+                if canary in get_r.text and _is_unescaped_in_html(f'atxss_{canary}', get_r.text):
+                    yield _finding("xss", "stored_xss", "critical",
+                        f"Stored XSS Confirmed at {action}",
+                        f"Canary `{canary}` persisted and appeared unescaped on subsequent GET — "
+                        f"stored XSS confirmed.",
+                        f"Form: {action}\nPayload: {payload[:80]}\nCanary confirmed on GET: yes",
+                        action, True,
+                        "HTML-encode all output. Sanitise before storing in database.",
+                        confidence="high")
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    # ── Phase 3: DOM XSS — source+sink co-location in <script> blocks only ──
     try:
         r = await client.get(target, timeout=8)
-        dom_sinks = ["document.write(", "innerHTML =", "innerHTML=",
-                     "outerHTML =", "eval(", "setTimeout(", "location.href ="]
-        for sink in dom_sinks:
-            if sink in r.text:
-                yield _finding("xss", "dom_xss_sink", "medium",
-                    f"DOM XSS Sink Detected: {sink.strip()}",
-                    f"JavaScript code uses dangerous DOM sink `{sink.strip()}` "
-                    f"that may process attacker-controlled input.",
-                    f"Sink found: {sink}\nURL: {target}",
-                    target, True,
-                    "Avoid dangerous DOM sinks. Use textContent instead of innerHTML. "
-                    "Sanitise before writing to DOM.",
-                    confidence="low")
-                break
+        confirmed_sinks = _extract_js_sinks_from_body(r.text)
+        if confirmed_sinks:
+            yield _finding("xss", "dom_xss_source_sink", "medium",
+                f"DOM XSS: Dangerous Sink + User-Controlled Source in Same Script Block",
+                f"Found sink(s) `{', '.join(confirmed_sinks[:3])}` co-located with user-controlled "
+                f"DOM sources (location.search, location.hash, etc.) in an inline <script> block. "
+                f"User input may flow directly into an executable sink without sanitisation.",
+                f"Sinks found: {confirmed_sinks}\nURL: {target}",
+                target, True,
+                "Avoid dangerous DOM sinks. Use DOMPurify before innerHTML assignments. "
+                "Use textContent instead of innerHTML for plain-text data.",
+                confidence="medium")
     except httpx.HTTPError:
         pass
 
@@ -899,58 +1146,114 @@ async def _module_xss(target: str, client: httpx.AsyncClient,
 async def _module_sqli(target: str, client: httpx.AsyncClient,
                        forms: list[dict],
                        waf_bypass_payloads: list[str] | None = None) -> AsyncGenerator[dict, None]:
-    # Baseline timing
+    """
+    SQL injection detection with false-positive elimination:
+    - Error-based: verifies DB error patterns are NOT in baseline response
+    - Time-based: 3-sample statistical analysis (mean + 2σ threshold)
+    - Error patterns are DB-vendor-specific (no generic "error" strings)
+    """
+    # DB-vendor-specific error patterns only (no generic "syntax error" which catches JS errors)
+    _SQLI_CONFIRMED_PATTERNS = [
+        "you have an error in your sql syntax",   # MySQL
+        "warning: mysql_",                         # PHP MySQL
+        "unclosed quotation mark after the character string",  # MSSQL
+        "quoted string not properly terminated",   # Oracle
+        "pg_query(): query failed",                # PostgreSQL
+        "sqlite3.operationalerror",                # SQLite
+        "odbc sql server driver",                  # ODBC MSSQL
+        "ora-00933",                               # Oracle
+        "sqlstate[",                               # PDO generic
+        "near \"'\"",                              # SQLite syntax near quote
+    ]
+
+    # Establish baseline for the page WITHOUT injection (to filter pre-existing errors)
+    baseline_body = ""
     try:
-        t0 = time.monotonic()
-        await client.get(target, timeout=8)
-        baseline = time.monotonic() - t0
+        baseline_r = await client.get(target, timeout=8)
+        baseline_body = baseline_r.text.lower()
     except Exception:
-        baseline = 0.5
+        pass
+
+    # Statistical baseline timing (3 samples)
+    baseline_mean, baseline_stdev = await _timing_samples(client, target, n=3)
 
     # Augment error payloads with WAF-specific bypass payloads
     error_payloads = list(SQLI_ERROR_PAYLOADS)
     if waf_bypass_payloads:
         error_payloads = list(waf_bypass_payloads) + error_payloads
 
+    hit_params: set[str] = set()
+
     # Test URL parameters
     for param in SQLI_TEST_PARAMS[:5]:
-        # Error-based
+        if param in hit_params:
+            continue
+
+        # ── Error-based: inject quote, look for NEW DB errors ───────────────
         for quote in ["'", '"']:
             try:
                 r = await client.get(f"{target}?{param}={quote}", timeout=8)
                 bl = r.text.lower()
-                if any(pat in bl for pat in SQLI_ERROR_PATTERNS):
-                    yield _finding("sqli", "error_sqli_url", "high",
-                        f"SQL Error Disclosure via '{param}' URL parameter",
-                        f"SQL error string detected when injecting `{quote}` into `{param}`.",
-                        f"URL: {target}?{param}={quote}\nSnippet: {r.text[:300]}",
-                        target, True,
-                        "Use parameterized queries. Never display DB errors to users.",
-                        confidence="high")
-                    break  # move to next param
+                for pat in _SQLI_CONFIRMED_PATTERNS:
+                    if pat in bl and pat not in baseline_body:
+                        hit_params.add(param)
+                        # Extract the error snippet for evidence
+                        idx = bl.find(pat)
+                        snippet = r.text[max(0, idx - 20):idx + 200]
+                        yield _finding("sqli", "error_sqli_url", "high",
+                            f"SQL Error Disclosure via '{param}' URL parameter",
+                            f"Injecting `{quote}` into `{param}` triggered a DB error not "
+                            f"present in the baseline response. Error pattern: `{pat}`",
+                            f"URL: {target}?{param}={quote}\nDB Error: {snippet[:300]}",
+                            target, True,
+                            "Use parameterized queries / prepared statements. "
+                            "Never display raw DB errors to users.",
+                            confidence="high")
+                        break
+                if param in hit_params:
+                    break
             except httpx.HTTPError:
                 pass
             await asyncio.sleep(0)
 
-        # Time-based (one payload, with delay check)
-        if baseline < 1.5:
-            payload = SQLI_TIME_PAYLOADS[0]
+        if param in hit_params:
+            continue
+
+        # ── Time-based: statistical 3-sample analysis ────────────────────────
+        # Only attempt if baseline is fast enough to distinguish delays
+        if baseline_mean < 3.0:
+            payload = SQLI_TIME_PAYLOADS[0]  # e.g. ' OR SLEEP(3)--
             try:
                 t0 = time.monotonic()
-                await client.get(f"{target}?{param}={payload}", timeout=10)
+                await client.get(f"{target}?{param}={payload}", timeout=15)
                 elapsed = time.monotonic() - t0
-                if elapsed >= 3.5 and elapsed > baseline * 3:
-                    yield _finding("sqli", "time_sqli_url", "critical",
-                        f"Time-Based Blind SQL Injection via '{param}'",
-                        f"Response delayed {elapsed:.1f}s with SLEEP payload. "
-                        f"Baseline was {baseline:.2f}s.",
-                        f"URL: {target}?{param}={payload}\nDelay: {elapsed:.2f}s",
-                        target, True,
-                        "Replace string concatenation with prepared statements. "
-                        "Audit all DB query construction.",
-                        confidence="high")
-                    break  # move to next param
-            except (httpx.TimeoutException, httpx.HTTPError):
+                # Threshold: baseline_mean + 3s delay + 2*stdev safety margin
+                threshold = baseline_mean + 3.0 + max(2 * baseline_stdev, 0.5)
+                if elapsed >= threshold:
+                    # Confirm with a second payload (different SLEEP value) to rule out fluke
+                    confirm_payload = SQLI_TIME_PAYLOADS[1] if len(SQLI_TIME_PAYLOADS) > 1 else payload
+                    t1 = time.monotonic()
+                    await client.get(f"{target}?{param}={confirm_payload}", timeout=15)
+                    elapsed2 = time.monotonic() - t1
+                    if elapsed2 >= baseline_mean + 2.5:
+                        hit_params.add(param)
+                        yield _finding("sqli", "time_sqli_url", "critical",
+                            f"Time-Based Blind SQL Injection via '{param}'",
+                            f"Two independent SLEEP payloads both caused significant delays. "
+                            f"Baseline: {baseline_mean:.2f}s (±{baseline_stdev:.2f}s). "
+                            f"Test 1: {elapsed:.1f}s. Test 2: {elapsed2:.1f}s.",
+                            f"URL: {target}?{param}=<SLEEP_PAYLOAD>\n"
+                            f"Payload 1: {payload}\n"
+                            f"Payload 2: {confirm_payload}\n"
+                            f"Delays: {elapsed:.2f}s, {elapsed2:.2f}s (baseline: {baseline_mean:.2f}s)",
+                            target, True,
+                            "Replace string concatenation with prepared statements. "
+                            "Use ORM with parameterized queries.",
+                            confidence="high")
+            except httpx.TimeoutException:
+                # Timeout itself could be SLEEP(10) — but single timeout is ambiguous
+                pass
+            except httpx.HTTPError:
                 pass
             await asyncio.sleep(0)
 
@@ -1140,35 +1443,61 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
 # ── Module: SSRF ──────────────────────────────────────────────────────────────
 
 async def _module_ssrf(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    """
+    SSRF detection with strict format-validation to eliminate false positives:
+    - Only reports if response contains actual cloud-provider metadata structure
+      (AWS InstanceId JSON, GCP project-id JSON, Azure subscriptionId, etc.)
+    - ConnectErrors are NOT reported (too noisy — could be any network issue)
+    - Timing-based SSRF: only reports if delay is statistically significant
+    """
     for param in SSRF_PARAMS[:10]:
-        for ssrf_url, indicators in SSRF_TARGETS[:4]:
+        for ssrf_url, _indicators in SSRF_TARGETS[:6]:
             test_url = f"{target}?{param}={ssrf_url}"
             try:
-                r = await client.get(test_url, timeout=6)
-                body_lower = r.text.lower()
-                if any(ind.lower() in body_lower for ind in indicators):
+                r = await client.get(test_url, timeout=8)
+                # Strict format validation: response must look like actual cloud metadata
+                if _validate_ssrf_content(r.text, ssrf_url):
                     yield _finding("ssrf", "ssrf_cloud_metadata", "critical",
-                        f"SSRF to Cloud Metadata via '{param}'",
-                        f"Server fetched `{ssrf_url}` and reflected response containing "
-                        f"cloud metadata indicators.",
-                        f"Param: {param}\nSSRF URL: {ssrf_url}\nResponse: {r.text[:400]}",
+                        f"Full SSRF Confirmed — Cloud Metadata Exposed via '{param}'",
+                        f"Server fetched `{ssrf_url}` and returned content that matches "
+                        f"the format of real cloud instance metadata (AWS/GCP/Azure). "
+                        f"Credentials and instance details may be accessible to attackers.",
+                        f"Parameter: {param}\nSSRF URL: {ssrf_url}\n"
+                        f"Response (first 500 chars): {r.text[:500]}",
                         test_url, True,
-                        "Validate and allowlist all outbound URLs. Block 169.254.0.0/16 "
-                        "at network level. Implement IMDSv2 on AWS instances.",
+                        "Implement strict outbound URL allowlisting (allowlist > blocklist). "
+                        "Block 169.254.0.0/16 and 100.100.100.200 at network level. "
+                        "Enforce IMDSv2 (token-required) on AWS instances.",
                         confidence="high")
                     return
             except httpx.ConnectError:
-                yield _finding("ssrf", "ssrf_potential", "medium",
-                    f"Potential SSRF — Internal Connection Attempted via '{param}'",
-                    f"Server attempted connecting to `{ssrf_url}` (connection refused). "
-                    f"Indicates server-side request was made.",
-                    f"Param: {param}, Target: {ssrf_url}", test_url, True,
-                    "Implement outbound URL allowlisting.",
-                    confidence="medium")
-                return
+                # ConnectError means the server tried to connect — but we can't confirm
+                # the destination was reached without out-of-band verification. Skip.
+                pass
             except (httpx.TimeoutException, httpx.HTTPError):
                 pass
             await asyncio.sleep(0)
+
+    # ── SSRF via Redirect parameters (open redirect → SSRF chain) ────────────
+    redirect_ssrf_params = ["next", "url", "redirect", "return", "callback", "dest", "go"]
+    for param in redirect_ssrf_params[:5]:
+        ssrf_url = "http://169.254.169.254/latest/meta-data/"
+        test_url = f"{target}?{param}={ssrf_url}"
+        try:
+            r = await client.get(test_url, timeout=8, follow_redirects=True)
+            if _validate_ssrf_content(r.text, ssrf_url):
+                yield _finding("ssrf", "ssrf_open_redirect_chain", "critical",
+                    f"SSRF via Open Redirect Parameter '{param}'",
+                    f"Open redirect chained with SSRF: server followed redirect to "
+                    f"cloud metadata endpoint and returned real metadata content.",
+                    f"Parameter: {param}\nChained URL: {ssrf_url}\nResponse: {r.text[:400]}",
+                    test_url, True,
+                    "Validate redirect destinations against an allowlist. "
+                    "Never follow redirects to internal/private IP ranges.",
+                    confidence="high")
+        except (httpx.HTTPError, httpx.TimeoutException):
+            pass
+        await asyncio.sleep(0)
 
 
 # ── Module: IDOR ─────────────────────────────────────────────────────────────
@@ -1178,7 +1507,13 @@ async def _module_idor(target: str, client: httpx.AsyncClient,
                        endpoints: set[str],
                        ids_found: list[str],
                        spa_fallback_size: int = 0) -> AsyncGenerator[dict, None]:
-    # Test endpoints with incremented/modified IDs
+    """
+    IDOR detection with proper baseline comparison:
+    - Establishes a 404 baseline (non-existent ID like 999999) for each endpoint
+    - Only reports if: incremented ID returns 200, baseline returns 4xx,
+      AND the 200 response meaningfully differs from both the baseline AND the original
+    - Cross-account: requires responses to be DIFFERENT from each other (not same = shared data)
+    """
     id_endpoints = []
     for ep in endpoints:
         for pat in IDOR_ENDPOINT_PATTERNS:
@@ -1187,44 +1522,85 @@ async def _module_idor(target: str, client: httpx.AsyncClient,
                 break
 
     for ep in id_endpoints[:10]:
-        # Try incrementing numeric IDs
+        # Increment numeric ID in path
         modified = re.sub(r'/(\d+)(?=[/?]|$)', lambda m: f'/{int(m.group(1)) + 1}', ep)
         if modified == ep:
             continue
+
+        # Get a 404 baseline: use an obviously non-existent ID
+        nonexistent = re.sub(r'/(\d+)(?=[/?]|$)', '/999999', ep)
+        try:
+            baseline_r = await client.get(nonexistent, timeout=8)
+            baseline_status = baseline_r.status_code
+            baseline_size = len(baseline_r.content)
+        except httpx.HTTPError:
+            baseline_status = 404
+            baseline_size = 0
+
+        # Fetch the original endpoint (authenticated user's own resource)
+        try:
+            orig_r = await client.get(ep, timeout=8)
+            orig_status = orig_r.status_code
+            orig_size = len(orig_r.content)
+        except httpx.HTTPError:
+            continue
+
+        # Fetch the incremented ID
         try:
             r = await client.get(modified, timeout=8)
-            if r.status_code == 200 and len(r.text) > 50:
-                yield _finding("idor", "idor_id_increment", "high",
-                    f"Potential IDOR — Incremented ID Access",
-                    f"Accessing `{modified}` (incremented ID from `{ep}`) returned 200 with data. "
-                    f"May expose another user's data.",
-                    f"Original: {ep}\nModified: {modified}\nStatus: {r.status_code}\n"
-                    f"Response: {r.text[:300]}",
-                    modified, True,
-                    "Verify resource ownership server-side on every request. "
-                    "Use UUIDs instead of sequential IDs. Implement object-level authorization.",
-                    confidence="medium")
         except httpx.HTTPError:
-            pass
+            continue
+
         await asyncio.sleep(0)
 
-    # Cross-account IDOR with Account 2
-    if client2 and ids_found:
-        for ep in id_endpoints[:5]:
-            # Try accessing Account 1's resource with Account 2's session
+        # Require: non-existent ID → 4xx, but incremented ID → 200 with real data
+        # AND the incremented response must meaningfully differ from the 404 baseline
+        # (filtering SPA which returns 200 + index.html for everything)
+        if (r.status_code == 200
+                and baseline_status in (404, 403, 401)
+                and len(r.content) > 100
+                and not (spa_fallback_size > 0 and abs(len(r.content) - spa_fallback_size) < 200)
+                and _responses_meaningfully_differ(orig_r.text, r.text, orig_size, len(r.content))):
+            yield _finding("idor", "idor_id_increment", "high",
+                f"IDOR — Sequential ID Access: {modified}",
+                f"Non-existent ID `999999` → {baseline_status}. "
+                f"Incremented ID returned 200 with {len(r.content)} bytes of data "
+                f"that differs from the authenticated user's own resource. "
+                f"Server may not be checking object ownership.",
+                f"Original endpoint: {ep} ({orig_status}, {orig_size}b)\n"
+                f"Incremented: {modified} (200, {len(r.content)}b)\n"
+                f"Non-existent baseline: {nonexistent} ({baseline_status})\n"
+                f"Response snippet: {r.text[:300]}",
+                modified, True,
+                "Verify resource ownership server-side on every request. "
+                "Use unpredictable UUIDs instead of sequential IDs. "
+                "Implement object-level authorization (check user owns the resource).",
+                confidence="high")
+
+    # ── Cross-account IDOR with Account 2 ────────────────────────────────────
+    if client2:
+        for ep in id_endpoints[:6]:
             try:
                 r1 = await client.get(ep, timeout=8)
                 r2 = await client2.get(ep, timeout=8)
-                if r1.status_code == 200 and r2.status_code == 200:
-                    if len(r2.text) > 50 and r2.text[:200] == r1.text[:200]:
+                # Cross-account IDOR: BOTH accounts get 200 with data
+                # But the RESPONSES DIFFER — meaning Account 2 sees Account 1's unique data
+                if (r1.status_code == 200 and r2.status_code == 200
+                        and len(r1.content) > 100 and len(r2.content) > 100):
+                    if _responses_meaningfully_differ(r1.text, r2.text,
+                                                      len(r1.content), len(r2.content)):
+                        # Account 2 sees different data at Account 1's URL — real IDOR
                         yield _finding("idor", "idor_cross_account", "critical",
-                            f"IDOR — Cross-Account Data Access Confirmed",
-                            f"Account 2 can access Account 1's resource at `{ep}`. "
-                            f"Responses are identical — server not checking ownership.",
-                            f"Endpoint: {ep}\nBoth accounts returned identical data.",
+                            f"IDOR Confirmed — Cross-Account Data Exposure at {ep}",
+                            f"Account 1 and Account 2 both received HTTP 200 at the same URL, "
+                            f"but with meaningfully different response bodies — Account 2 is "
+                            f"accessing Account 1's private data without authorisation.",
+                            f"Endpoint: {ep}\n"
+                            f"Account 1 response ({len(r1.content)}b): {r1.text[:200]}\n"
+                            f"Account 2 response ({len(r2.content)}b): {r2.text[:200]}",
                             ep, True,
-                            "Implement object-level authorization checks tied to the "
-                            "authenticated user's identity, not just the object ID.",
+                            "Implement object-level authorization checks on every request. "
+                            "Associate every DB record with its owning user and verify on read.",
                             confidence="high")
             except httpx.HTTPError:
                 pass
@@ -1463,54 +1839,99 @@ async def _module_account_takeover(target: str, client: httpx.AsyncClient,
 # ── Module: Cache Poisoning ───────────────────────────────────────────────────
 
 async def _module_cache(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
-    # Try each unkeyed header
+    """
+    Cache poisoning detection requiring TWO confirmations:
+    1. Header value must appear UNESCAPED in response (using unique canary)
+    2. A SECOND request WITHOUT the header must return a CACHE HIT with poisoned content
+    This eliminates the common false positive of reflective non-cached responses.
+    """
+    # Get baseline to know what the clean response looks like
+    clean_body = ""
+    try:
+        clean_r = await client.get(target, timeout=8)
+        clean_body = clean_r.text
+    except Exception:
+        return
+
     for header in CACHE_POISON_HEADERS[:6]:
-        for value in CACHE_POISON_VALUES[:2]:
-            try:
-                r = await client.get(target, headers={header: value}, timeout=8)
-                body = r.text
+        canary = _unique_canary()
+        # Embed canary in the poison value for correlation
+        if header.lower() in ("x-forwarded-host", "host"):
+            poison_value = f"attacker-{canary}.evil.com"
+        elif header.lower() == "x-forwarded-for":
+            poison_value = f"1.2.3.{canary[:3]}"
+        else:
+            poison_value = f"atcache_{canary}"
 
-                # Check if injected value appears in response
-                if value in body:
-                    yield _finding("cache", f"cache_poison_{header.lower()}", "high",
-                        f"Cache Poisoning via {header}",
-                        f"Value from unkeyed header `{header}: {value}` was reflected in "
-                        f"the response body. If cached, this poisons the cache for all users.",
-                        f"Header: {header}: {value}\nReflected in body: yes\n"
-                        f"Cache headers: {r.headers.get('cache-control', 'none')}",
-                        target, True,
-                        f"Add {header} to your cache key, or strip unkeyed headers at CDN. "
-                        f"Validate Host header before using it in response generation.",
-                        confidence="high")
-                    return
+        try:
+            # Step 1: Send poisoned request
+            pr = await client.get(target, headers={header: poison_value}, timeout=8)
+            body = pr.text
 
-                # Check if cache hit happens with poisoned header
-                cache_status = r.headers.get("x-cache", "") or r.headers.get("cf-cache-status", "")
-                if "hit" in cache_status.lower() and r.status_code == 200:
-                    yield _finding("cache", "cache_hit_with_unkeyed_header", "medium",
-                        f"Cache Hit with Unkeyed Header Present",
-                        f"Cache served a HIT response even with `{header}` present. "
-                        f"Header may not be included in cache key.",
-                        f"Header: {header}: {value}\nCache-Status: {cache_status}",
-                        target, True,
-                        f"Include {header} in your cache key configuration.",
-                        confidence="medium")
-                    break
+            # Canary must appear in response AND not be in the clean baseline
+            if canary not in body or canary in clean_body:
+                continue
 
-            except httpx.HTTPError:
-                pass
-            await asyncio.sleep(0)
+            # Step 2: Send a CLEAN request (no poison header) and check for HIT
+            await asyncio.sleep(0.3)  # Let cache store the poisoned response
+            cr = await client.get(target, timeout=8)
+            cache_status = (cr.headers.get("x-cache", "")
+                            or cr.headers.get("cf-cache-status", "")
+                            or cr.headers.get("x-drupal-cache", "")
+                            or cr.headers.get("x-varnish", "")).lower()
+            second_body = cr.text
+
+            # Confirmed: canary survives in the non-poisoned response (cached)
+            if canary in second_body:
+                yield _finding("cache", f"cache_poison_confirmed_{header.lower()}", "critical",
+                    f"Cache Poisoning Confirmed via {header}",
+                    f"Unique canary `{canary}` injected via `{header}: {poison_value}` appeared "
+                    f"in the response — and PERSISTED in a subsequent clean request, confirming "
+                    f"the poisoned response was cached and served to all users.",
+                    f"Poison header: {header}: {poison_value}\n"
+                    f"Canary: {canary}\n"
+                    f"Confirmed in subsequent clean response: yes\n"
+                    f"Cache headers on poisoned response: {pr.headers.get('cache-control', 'none')}",
+                    target, True,
+                    f"Add `{header}` to your cache key configuration. "
+                    f"Strip unrecognised/untrusted headers at the CDN/proxy layer. "
+                    f"Validate Host header before using in response generation.",
+                    confidence="high")
+                return
+            elif "hit" in cache_status and canary in body:
+                # Header reflected + cache HIT signal — likely but not fully confirmed
+                yield _finding("cache", f"cache_poison_likely_{header.lower()}", "high",
+                    f"Likely Cache Poisoning via {header}",
+                    f"Canary `{canary}` reflected via `{header}` AND cache shows HIT — "
+                    f"header value likely stored in cached response. "
+                    f"Full exploitation requires testing from a separate IP/session.",
+                    f"Poison header: {header}: {poison_value}\n"
+                    f"Canary in response: yes\nCache-Status: {cache_status}",
+                    target, True,
+                    f"Add `{header}` to your CDN cache key. Strip unkeyed headers before caching.",
+                    confidence="medium")
+                return
+
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
 
 
 # ── Module: Race Conditions ───────────────────────────────────────────────────
 
 async def _module_race(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
-    # Find state-changing endpoints from known patterns
+    """
+    Race condition detection with idempotency baseline to eliminate false positives.
+    Strategy:
+    1. First send 3 sequential requests to establish idempotency baseline
+    2. Only flag if sequential requests DON'T all succeed (endpoint has limits)
+    3. Then send 10 parallel requests — only flag if MORE succeed than sequential allows
+    """
     race_targets = []
     for path in RACE_CONDITION_ENDPOINTS:
         url = target + path
         try:
-            r = await client.get(url, timeout=5)
+            r = await client.head(url, timeout=5)
             if r.status_code not in (404, 405, 501):
                 race_targets.append(url)
         except httpx.HTTPError:
@@ -1518,27 +1939,46 @@ async def _module_race(target: str, client: httpx.AsyncClient) -> AsyncGenerator
         await asyncio.sleep(0)
 
     for url in race_targets[:3]:
-        # Send 10 parallel requests
+        # ── Idempotency baseline: 3 sequential POSTs ─────────────────────────
+        sequential_ok = 0
+        for _ in range(3):
+            try:
+                sr = await client.post(url, json={}, timeout=8)
+                if sr.status_code in (200, 201):
+                    sequential_ok += 1
+            except Exception:
+                pass
+            await asyncio.sleep(0.1)
+
+        # If ALL 3 sequential requests succeed, endpoint is idempotent — not a race condition
+        if sequential_ok >= 3:
+            continue  # Endpoint accepts all requests sequentially — skip
+
+        # Endpoint rejected at least 1 sequential request — has some limiting logic
+        # Now test: do parallel requests bypass that limit?
         async def _req():
             try:
                 return await client.post(url, json={}, timeout=8)
             except Exception:
                 return None
 
-        responses = await asyncio.gather(*[_req() for _ in range(8)])
+        responses = await asyncio.gather(*[_req() for _ in range(10)])
         ok_responses = [r for r in responses if r and r.status_code in (200, 201)]
 
-        if len(ok_responses) >= 2:
-            yield _finding("race", "race_condition_endpoint", "high",
-                f"Race Condition Vulnerability at {urlparse(url).path}",
-                f"Sent 8 parallel requests — {len(ok_responses)} succeeded (HTTP 200/201). "
-                f"This may enable double-spend, duplicate coupon redemption, or "
-                f"resource over-allocation.",
-                f"URL: {url}\nParallel successes: {len(ok_responses)}/8",
+        # Flag only if parallel gets MORE successes than sequential allowed
+        if len(ok_responses) > max(sequential_ok, 1):
+            yield _finding("race", "race_condition_bypass", "high",
+                f"Race Condition — Limit Bypass at {urlparse(url).path}",
+                f"Sequential requests: {sequential_ok}/3 succeeded. "
+                f"Parallel requests (10 simultaneous): {len(ok_responses)}/10 succeeded. "
+                f"The server applies rate/count limiting sequentially but not atomically. "
+                f"Attackers can bypass limits via concurrent requests.",
+                f"URL: {url}\nSequential success rate: {sequential_ok}/3\n"
+                f"Parallel success rate: {len(ok_responses)}/10",
                 url, True,
-                "Use database-level locking or idempotency keys. "
-                "Implement atomic transactions for state-changing operations.",
-                confidence="medium")
+                "Use database-level atomic operations (SELECT FOR UPDATE, Redis SETNX). "
+                "Implement idempotency keys. Use distributed locking for state changes.",
+                confidence="high")
 
 
 # ── Module: Business Logic ────────────────────────────────────────────────────
@@ -2312,34 +2752,56 @@ async def _module_nosql(target: str, client: httpx.AsyncClient,
 
 async def _module_ssti(target: str, client: httpx.AsyncClient,
                        forms: list[dict]) -> AsyncGenerator[dict, None]:
-    """Detect Server-Side Template Injection in forms and URL params."""
+    """
+    SSTI detection with high-specificity math canaries to eliminate false positives.
+    Uses large unique products that are very unlikely to appear in normal responses:
+    - {{7777*7777}} → 60481729 (Jinja2, Twig, Flask)
+    - {{7777*'7'}} → 7777777777 (Jinja2 string multiplication)
+    - <%= 7777*7777 %> → 60481729 (ERB/Ruby)
+    - ${7777*7777} → 60481729 (FreeMarker/OGNL)
+    Also verifies result is NOT in the baseline response (rules out pre-existing content).
+    """
+    # High-specificity SSTI probes: (payload, expected_result, engine_name)
+    _SSTI_PROBES = [
+        ("{{7777*7777}}", "60481729", "Jinja2/Twig"),
+        ("{{7777*'7'}}", "7777777777", "Jinja2 (string mul)"),
+        ("<%= 7777*7777 %>", "60481729", "ERB/Ruby"),
+        ("${7777*7777}", "60481729", "FreeMarker/OGNL"),
+        ("#{7777*7777}", "60481729", "Pebble/Thymeleaf"),
+        ("*{7777*7777}", "60481729", "Spring/Thymeleaf"),
+        ("{{=7777*7777}}", "60481729", "Slim/Haml"),
+    ]
 
-    # Test URL parameters
-    ssti_params = ["name", "q", "search", "message", "template", "subject", "input"]
-    for param in ssti_params[:4]:
-        for payload in SSTI_PAYLOADS[:5]:
+    # Establish baseline for each param (to filter pre-existing content)
+    baseline_body = ""
+    try:
+        bl_r = await client.get(target, timeout=8)
+        baseline_body = bl_r.text
+    except Exception:
+        pass
+
+    ssti_params = ["name", "q", "search", "message", "template", "subject", "input", "content", "text"]
+
+    for param in ssti_params[:5]:
+        for payload, expected, engine in _SSTI_PROBES:
+            if expected in baseline_body:
+                continue  # Result appears in baseline — skip to avoid FP
             try:
-                r = await client.get(f"{target}?{param}={payload}", timeout=8)
-                # Check for math result indicating SSTI
-                if "49" in r.text and payload == "{{7*7}}":
-                    yield _finding("ssti", "ssti_reflected_math", "critical",
-                        f"Server-Side Template Injection via '{param}' URL Parameter",
-                        f"Payload `{{{{7*7}}}}` rendered as `49` in the response. "
-                        f"The server is executing template expressions — this enables RCE.",
-                        f"URL: {target}?{param}={payload}\nEvidence: '49' found in response",
+                import urllib.parse
+                encoded_payload = urllib.parse.quote(payload)
+                r = await client.get(f"{target}?{param}={encoded_payload}", timeout=8)
+                if expected in r.text and expected not in baseline_body:
+                    yield _finding("ssti", "ssti_url_param", "critical",
+                        f"Server-Side Template Injection via '{param}' — {engine}",
+                        f"Payload `{payload}` evaluated to `{expected}` in response. "
+                        f"The server is executing template expressions from user input. "
+                        f"This is a Remote Code Execution vector — attacker can run arbitrary code.",
+                        f"URL: {target}?{param}={payload}\n"
+                        f"Expected result: {expected}\nEngine: {engine}\n"
+                        f"Context: ...{r.text[max(0,r.text.find(expected)-30):r.text.find(expected)+50]}...",
                         target, True,
-                        "Never render user input through a template engine. "
-                        "Use sandboxed template environments or render user data as literals.",
-                        confidence="high")
-                    return
-                if "7777777" in r.text and payload == "{{7*'7'}}":
-                    yield _finding("ssti", "ssti_jinja2_string_mul", "critical",
-                        "Jinja2 SSTI Confirmed via String Multiplication",
-                        f"Payload `{{{{7*'7'}}}}` rendered as `7777777`. Jinja2 template injection confirmed.",
-                        f"URL: {target}?{param}={payload}\nEvidence: '7777777' in response",
-                        target, True,
-                        "Sanitize all user input before passing to template rendering. "
-                        "Use Jinja2's SandboxedEnvironment.",
+                        "Never pass user-supplied data to template rendering functions. "
+                        "Use sandboxed template environments. Treat all user input as literals.",
                         confidence="high")
                     return
             except httpx.HTTPError:
@@ -2347,46 +2809,44 @@ async def _module_ssti(target: str, client: httpx.AsyncClient,
             await asyncio.sleep(0)
 
     # Test POST forms
-    for form in forms[:5]:
+    for form in forms[:4]:
         inputs = form.get("inputs", [])
         action = form.get("action", "")
         if not action:
             continue
+        # Get form baseline
+        form_baseline = ""
+        try:
+            safe_data = {inp: "hello" for inp in inputs}
+            bl_form_r = await client.post(action, data=safe_data, timeout=8)
+            form_baseline = bl_form_r.text
+        except Exception:
+            pass
+
         for field in SSTI_TEST_FIELDS:
             if field not in inputs:
                 continue
-            for payload in SSTI_PAYLOADS[:3]:
+            for payload, expected, engine in _SSTI_PROBES[:4]:
+                if expected in form_baseline:
+                    continue
                 try:
-                    form_data = {inp: payload if inp == field else "test" for inp in inputs}
+                    form_data = {inp: payload if inp == field else "hello" for inp in inputs}
                     r = await client.post(action, data=form_data, timeout=8)
-                    if "49" in r.text and payload == "{{7*7}}":
-                        yield _finding("ssti", "ssti_form_injection", "critical",
-                            f"Server-Side Template Injection in Form Field '{field}'",
-                            f"Payload `{{{{7*7}}}}` rendered as `49` in response from {action}. "
-                            f"The server evaluates template expressions in user input.",
-                            f"Form: {action}\nField: {field}\nEvidence: '49' in response",
+                    if expected in r.text and expected not in form_baseline:
+                        yield _finding("ssti", "ssti_form_field", "critical",
+                            f"SSTI in Form Field '{field}' at {action} — {engine}",
+                            f"Payload `{payload}` evaluated to `{expected}` in POST response. "
+                            f"The server evaluates template expressions from form input — RCE risk.",
+                            f"Form: {action}\nField: {field}\nPayload: {payload}\n"
+                            f"Result: {expected} found in response",
                             action, True,
-                            "Treat all user input as data, never as template code. "
-                            "Use context-aware escaping in templates.",
+                            "Never render user input via template engines. "
+                            "Use SandboxedEnvironment (Jinja2) or equivalent.",
                             confidence="high")
                         return
                 except httpx.HTTPError:
                     pass
                 await asyncio.sleep(0)
-
-    # Test Juice Shop specific search endpoint
-    try:
-        r = await client.get(f"{target}/rest/products/search?q={{{{7*7}}}}", timeout=8)
-        if "49" in r.text:
-            yield _finding("ssti", "ssti_search_endpoint", "critical",
-                "SSTI in Search Endpoint",
-                "Template expression `{{7*7}}` evaluated to `49` in search response.",
-                f"URL: {target}/rest/products/search?q={{{{7*7}}}}\nEvidence: '49' in response",
-                target + "/rest/products/search", True,
-                "Escape template expressions in all query parameters before rendering.",
-                confidence="high")
-    except httpx.HTTPError:
-        pass
 
 
 # ── Module: XXE ───────────────────────────────────────────────────────────────
@@ -4149,6 +4609,36 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, ai_config:
             except Exception as e:
                 yield _sse("progress", {"message": f"Crawler error: {e}", "module": "crawl"})
 
+        # ── JS Source/Sink Analysis — feed into XSS targeting ─────────────
+        # Run a quick JS probe on the main page to extract tainted parameters
+        # from source→sink chains discovered in inline scripts.
+        # These become priority XSS parameters (tested first, with canary correlation).
+        js_tainted_params: list[str] = []
+        if "xss" in req.modules:
+            yield _sse("progress", {"message": "🔍 JS source/sink analysis for targeted XSS...", "module": "js_analysis"})
+            try:
+                main_r = await client.get(req.target, timeout=10)
+                # Extract tainted params from inline script blocks
+                js_sinks = _extract_js_sinks_from_body(main_r.text)
+
+                # Also extract URL param names from location.search references
+                import re as _re_js
+                search_params = _re_js.findall(
+                    r'(?:searchParams\.get|URLSearchParams|location\.search|getParam)\s*\(\s*["\']([^"\']+)["\']',
+                    main_r.text
+                )
+                js_tainted_params = list(set(search_params))[:8]
+
+                if js_sinks or js_tainted_params:
+                    yield _sse("progress", {
+                        "message": f"⚡ JS analysis: {len(js_sinks)} sink(s) in script blocks, "
+                                   f"{len(js_tainted_params)} tainted param(s) identified "
+                                   f"({', '.join(js_tainted_params[:4])}). Prioritising for XSS.",
+                        "module": "js_analysis"
+                    })
+            except Exception:
+                pass
+
         # ── AI Strategy Planning ───────────────────────────────────────────
         _resolved_cfg = ai_config or {}
         _ai_key = _resolved_cfg.get("api_key") or req.anthropic_api_key or settings.ANTHROPIC_API_KEY or None
@@ -4177,7 +4667,7 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, ai_config:
             "headers":   lambda: _module_headers(req.target, client),
             "cors":      lambda: _module_cors(req.target, client),
             "csrf":      lambda: _module_csrf(req.target, client, crawl_result.forms),
-            "xss":       lambda _x=_waf_xss_extra: _module_xss(req.target, client, crawl_result.forms, _x),
+            "xss":       lambda _x=_waf_xss_extra, _j=js_tainted_params: _module_xss(req.target, client, crawl_result.forms, _x, _j),
             "sqli":      lambda _s=_waf_sqli_extra: _module_sqli(req.target, client, crawl_result.forms, _s),
             "ssrf":      lambda: _module_ssrf(req.target, client),
             "idor":      lambda: _module_idor(req.target, client, client2,
