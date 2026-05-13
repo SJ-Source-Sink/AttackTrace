@@ -427,60 +427,68 @@ async def _run_js_scan(
             if gql:
                 graphql_detected = True
 
-        # ── Phase 3: Fetch & analyze JS files concurrently ───────────────────
+        # ── Phase 3: Fetch & analyze JS files concurrently (live streaming) ────
+        # Use a queue so each completed file immediately streams its events
+        # instead of waiting for all files to finish.
 
-        semaphore = asyncio.Semaphore(8)  # max 8 concurrent fetches
+        total = len(discovered_js)
+        semaphore = asyncio.Semaphore(6)  # max 6 concurrent fetches
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
 
-        async def _fetch_and_analyze(js_url: str, file_index: int, total: int) -> list[str]:
-            """Fetch one JS file, analyze it, yield SSE payloads as strings."""
-            events: list[str] = []
+        async def _fetch_and_enqueue(js_url: str, file_index: int) -> None:
+            """Fetch + analyze one JS file, push all events into the shared queue."""
+            nonlocal js_files_scanned, secrets_count, dom_xss_count, graphql_detected
             async with semaphore:
                 try:
-                    resp = await client.get(js_url, follow_redirects=True, timeout=10.0)
+                    resp = await client.get(js_url, follow_redirects=True, timeout=15.0)
                 except Exception as exc:
-                    events.append(_sse("progress", {
+                    await queue.put(_sse("progress", {
                         "phase": "analysis",
-                        "message": f"[{file_index}/{total}] Failed to fetch {js_url}: {exc}",
+                        "message": f"[{file_index}/{total}] Failed: {js_url[:60]} — {type(exc).__name__}",
                     }))
-                    return events
+                    return
 
                 ct = resp.headers.get("content-type", "")
-                # Skip non-text / binary
-                if resp.status_code != 200 or ("image" in ct or "font" in ct or "audio" in ct or "video" in ct):
-                    return events
+                if resp.status_code != 200 or any(x in ct for x in ("image", "font", "audio", "video")):
+                    return
 
-                # Size guard
                 raw = resp.content
                 if len(raw) > MAX_JS_BYTES:
-                    events.append(_sse("progress", {
+                    await queue.put(_sse("progress", {
                         "phase": "analysis",
-                        "message": f"[{file_index}/{total}] Skipping {js_url} — too large ({len(raw) // 1024} KB)",
+                        "message": f"[{file_index}/{total}] Skipping (too large {len(raw)//1024} KB): {js_url[:60]}",
                     }))
-                    return events
+                    return
 
                 try:
                     content = raw.decode("utf-8", errors="replace")
                 except Exception:
-                    return events
+                    return
 
-                events.append(_sse("progress", {
+                await queue.put(_sse("progress", {
                     "phase": "analysis",
-                    "message": f"[{file_index}/{total}] Analyzing {js_url}",
+                    "message": f"[{file_index}/{total}] Analyzing {js_url[:80]}",
                 }))
 
                 eps, secs, xss, gql = _analyze_js_content(content, js_url)
+                js_files_scanned += 1
 
                 for ep in eps:
-                    events.append(_sse("endpoint", {"url": ep["url"], "file": js_url, "line": ep["line"]}))
+                    await queue.put(_sse("endpoint", {"url": ep["url"], "file": js_url, "line": ep["line"]}))
+                    all_endpoints.append(ep)
 
                 for s in secs:
-                    events.append(_sse("finding", s))
+                    await queue.put(_sse("finding", s))
+                    all_findings.append(s)
+                    secrets_count += 1
 
                 for x in xss:
-                    events.append(_sse("finding", x))
+                    await queue.put(_sse("finding", x))
+                    all_findings.append(x)
+                    dom_xss_count += 1
 
                 if gql:
-                    events.append(_sse("_internal_gql", {"detected": True}))
+                    graphql_detected = True
 
                 # Source map detection
                 if request.include_source_maps:
@@ -501,47 +509,28 @@ async def _run_js_scan(
                                         "line_number": _line_number(content, map_match.start()),
                                         "recommendation": "Remove sourceMappingURL comments from production JS. Do not deploy .map files publicly.",
                                     }
-                                    events.append(_sse("finding", finding))
-                                    events.append(_sse("_internal_sourcemap", {}))
+                                    await queue.put(_sse("finding", finding))
+                                    all_findings.append(finding)
+                                    source_map_count += 1
                             except Exception:
                                 pass
+            # signal this task is done
+            await queue.put(None)
 
-                return events, eps, secs, xss, gql  # type: ignore[return-value]
+        # Launch all file tasks in the background
+        bg_tasks = [
+            asyncio.create_task(_fetch_and_enqueue(url, i + 1))
+            for i, url in enumerate(discovered_js)
+        ]
 
-        total = len(discovered_js)
-        tasks = [_fetch_and_analyze(url, i + 1, total) for i, url in enumerate(discovered_js)]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for res in results:
-            if isinstance(res, Exception):
-                continue
-            if not isinstance(res, tuple):
-                # old path — just events list
-                for ev in res:
-                    yield ev
-                continue
-
-            events_list, eps, secs, xss, gql = res
-            for ev in events_list:
-                # Intercept internal markers
-                if '"_internal_gql"' in ev:
-                    graphql_detected = True
-                    continue
-                if '"_internal_sourcemap"' in ev:
-                    source_map_count += 1
-                    continue
-                yield ev
-
-            all_endpoints.extend(eps)
-            for s in secs:
-                all_findings.append(s)
-                secrets_count += 1
-            for x in xss:
-                all_findings.append(x)
-                dom_xss_count += 1
-            js_files_scanned += 1
-            if gql:
-                graphql_detected = True
+        # Drain the queue — yield events live as each file completes
+        remaining = len(bg_tasks)
+        while remaining > 0:
+            item = await queue.get()
+            if item is None:
+                remaining -= 1
+            else:
+                yield item
 
         # ── Phase 4: GraphQL introspection check ─────────────────────────────
 
