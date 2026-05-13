@@ -117,6 +117,8 @@ BACKEND_CHANGED=false
 FRONTEND_CHANGED=false
 MIGRATIONS_EXIST=false
 
+TOOLS_CHANGED=false
+
 if [ "$OLD_COMMIT" != "$NEW_COMMIT" ]; then
   CHANGED=$(git diff --name-only "${OLD_COMMIT}" "${NEW_COMMIT}" 2>/dev/null || echo "")
 
@@ -134,11 +136,17 @@ if [ "$OLD_COMMIT" != "$NEW_COMMIT" ]; then
     FRONTEND_CHANGED=true
     info "Frontend source changed"
   fi
+
+  if echo "$CHANGED" | grep -qE '^(scripts/install-tools\.sh|platform/backend/Dockerfile)'; then
+    TOOLS_CHANGED=true
+    info "Tool installer changed — will reinstall binary tools"
+  fi
 else
   # Force rebuild everything when already up to date (manual re-apply)
   warn "No new commits — forcing full update."
   BACKEND_CHANGED=true
   FRONTEND_CHANGED=true
+  TOOLS_CHANGED=true
 fi
 
 if [ "$BACKEND_CHANGED" = false ] && [ "$FRONTEND_CHANGED" = false ]; then
@@ -156,6 +164,13 @@ if [ "$MODE" = "docker" ]; then
   fi
 
   # ── Rebuild changed images ──────────────────────────────────────────────────
+  if [ "$TOOLS_CHANGED" = true ]; then
+    header "Rebuilding Docker images (tool installer changed)"
+    # Force full rebuild so new tools baked into the Dockerfile are included
+    BACKEND_CHANGED=true
+    FRONTEND_CHANGED=false
+  fi
+
   if [ "$BACKEND_CHANGED" = true ] || [ "$FRONTEND_CHANGED" = true ]; then
     header "Rebuilding Docker images"
 
@@ -259,6 +274,19 @@ CELERY="$VENV_DIR/bin/celery"
 [ -f "$BACKEND_DIR/.env" ] || die ".env not found at $BACKEND_DIR/.env. Run ./setup.sh first."
 
 mkdir -p "$PIDS_DIR" "$LOGS_DIR"
+
+# ── Install / update binary tools ────────────────────────────────────────────
+if [ "$TOOLS_CHANGED" = true ]; then
+  header "Updating binary security tools"
+  INSTALL_SCRIPT="$REPO_ROOT/scripts/install-tools.sh"
+  if [ -f "$INSTALL_SCRIPT" ]; then
+    info "Running install-tools.sh --tools (binary tools only, skipping Python/Node)..."
+    bash "$INSTALL_SCRIPT" --tools
+    ok "Binary tools up to date"
+  else
+    warn "install-tools.sh not found — skipping binary tool update"
+  fi
+fi
 
 # ── Update Python dependencies ──────────────────────────────────────────────
 if [ "$BACKEND_CHANGED" = true ]; then
