@@ -696,7 +696,10 @@ async def _run_js_scan(
     started_at = datetime.now(timezone.utc).isoformat()
     loop = asyncio.get_running_loop()
     start_ts = loop.time()
-    target = request.target.rstrip("/")
+    target = request.target.strip().rstrip("/")
+    # Normalize: prepend https:// if no scheme given (e.g. "example.com" → "https://example.com")
+    if target and not target.startswith(("http://", "https://")):
+        target = "https://" + target
     origin = _base_origin(target)
 
     all_findings: list[dict] = []

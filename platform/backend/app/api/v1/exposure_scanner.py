@@ -371,9 +371,11 @@ async def run_exposure_scan(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="target is required",
         )
+    raw = payload.target.strip()
+    normalized = raw if raw.startswith(("http://", "https://")) else f"https://{raw}"
     return StreamingResponse(
         _run_exposure_scan(
-            target=payload.target.strip(),
+            target=normalized,
             check_git=payload.check_git,
             check_env=payload.check_env,
             check_backups=payload.check_backups,

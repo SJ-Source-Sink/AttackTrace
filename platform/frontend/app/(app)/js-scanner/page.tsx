@@ -520,6 +520,14 @@ export default function JsScannerPage() {
       return;
     }
 
+    // Normalize: add https:// if user typed a bare domain
+    const normalizedTarget = /^https?:\/\//i.test(target.trim())
+      ? target.trim()
+      : `https://${target.trim()}`;
+    if (normalizedTarget !== target.trim()) {
+      setTarget(normalizedTarget);
+    }
+
     setIsScanning(true);
     setProgressMessages([]);
     setFindings([]);
@@ -535,7 +543,7 @@ export default function JsScannerPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          target: target.trim(),
+          target: normalizedTarget,
           max_depth: parseInt(maxDepth),
           max_files: parseInt(maxFiles),
           include_source_maps: includeSourceMaps,
