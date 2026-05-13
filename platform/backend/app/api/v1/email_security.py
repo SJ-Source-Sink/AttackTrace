@@ -282,10 +282,30 @@ def _analyse_dmarc(domain: str) -> tuple[list[dict], dict]:
 
 def _analyse_dkim(domain: str) -> tuple[list[dict], dict]:
     findings: list[dict] = []
+    # Expanded selector list covering major ESPs and common custom names.
+    # Note: Amazon SES, Brevo, Klaviyo and others use random/auto-generated selectors
+    # that cannot be enumerated; a "not found" result may be a scanner limitation.
     selectors = [
-        "default", "google", "mail", "dkim", "k1",
-        "selector1", "selector2", "s1", "s2",
-        "email", "protonmail",
+        # Generic
+        "default", "dkim", "dkim1", "dkim2", "mail", "email", "postmaster",
+        # Google Workspace
+        "google", "20161025", "20230601",
+        # Microsoft 365 / Exchange Online
+        "selector1", "selector2",
+        # SendGrid
+        "s1", "s2", "sg", "smtpapi",
+        # Mailchimp / Mandrill
+        "k1", "k2", "mandrill1", "mte1", "mte2",
+        # Postmark
+        "pm1", "pm2", "20171214",
+        # Mailgun
+        "mx",
+        # Amazon SES (common custom names; random selectors can't be enumerated)
+        "ses", "amazonses", "amazon",
+        # Zoho / ProtonMail / Fastmail
+        "zoho", "protonmail", "fm1", "fm2", "fm3",
+        # Generic numeric / legacy
+        "ed1", "ed2", "mxvault", "key1", "key2",
     ]
     found_selectors: list[dict] = []
 
@@ -348,9 +368,14 @@ def _analyse_dkim(domain: str) -> tuple[list[dict], dict]:
     if not found_selectors:
         findings.append({
             "phase": "dkim",
-            "severity": "high",
-            "title": "No DKIM record found",
-            "detail": f"Checked {len(selectors)} common selectors — none returned a valid DKIM record.",
+            "severity": "medium",
+            "title": "No DKIM record found via common selectors",
+            "detail": (
+                f"Checked {len(selectors)} common DKIM selectors — none returned a valid record. "
+                "If you use Amazon SES, Klaviyo, Brevo, or another ESP with auto-generated selectors, "
+                "DKIM may still be configured. Verify by checking your ESP dashboard or running: "
+                "dig TXT <selector>._domainkey." + domain
+            ),
         })
 
     return findings, {"selectors_found": found_selectors}
@@ -505,12 +530,28 @@ async def _check_lookalike(
 # ── Score computation ─────────────────────────────────────────────────────────
 
 def _compute_score(findings: list[dict]) -> int:
-    """0–100: higher is better."""
+    """0–100: higher is better.
+
+    Lookalike-domain findings are threat intelligence (they reflect
+    what attackers have registered, not misconfiguration of this domain).
+    They are capped at 20 points total so they don't dominate the score.
+    All other findings are summed without cap.
+    """
     deductions = {"critical": 30, "high": 15, "medium": 7, "low": 3, "info": 0}
     total = 100
+    lookalike_deducted = 0
     for f in findings:
-        if f.get("severity") in deductions:
-            total -= deductions[f["severity"]]
+        sev = f.get("severity", "")
+        if sev not in deductions:
+            continue
+        if f.get("phase") == "lookalikes":
+            # Each lookalike domain is critical but cap total lookalike deduction
+            if lookalike_deducted < 20:
+                d = min(deductions[sev], 20 - lookalike_deducted)
+                lookalike_deducted += d
+                total -= d
+        else:
+            total -= deductions[sev]
     return max(0, min(100, total))
 
 

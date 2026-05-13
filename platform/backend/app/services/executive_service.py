@@ -3,13 +3,13 @@ Executive dashboard metrics service.
 Provides aggregated KPIs for the executive dashboard view.
 """
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from sqlalchemy import func, select, text
+from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import AsyncSessionLocal
 from app.models.db.asset import Asset
 from app.models.db.finding import Finding, FindingSeverity, FindingStatus
 from app.models.db.scan import ScanJob, ScanStatus
@@ -25,25 +25,18 @@ async def get_executive_metrics(db: AsyncSession, org_id: UUID) -> dict:
     """
     now = datetime.now(timezone.utc)
 
-    (
-        mttr_rows,
-        risk_30d,
-        risk_60d,
-        risk_90d,
-        new_recurring,
-        coverage_res,
-        open_critical_res,
-        sla_res,
-    ) = await asyncio.gather(
-        _mttr_by_severity(db, org_id),
-        _avg_risk_for_period(db, org_id, days=30),
-        _avg_risk_for_period(db, org_id, days=60),
-        _avg_risk_for_period(db, org_id, days=90),
-        _new_vs_recurring(db, org_id),
-        _coverage_percent(db, org_id, now),
-        _open_critical_count(db, org_id),
-        _sla_compliance(db, org_id),
-    )
+    # Use a fresh dedicated session to avoid concurrency issues with the
+    # request-scoped session (asyncpg does not allow concurrent queries on
+    # the same connection, and FastAPI may share the session across dependencies).
+    async with AsyncSessionLocal() as session:
+        mttr_rows         = await _mttr_by_severity(session, org_id)
+        risk_30d          = await _avg_risk_for_period(session, org_id, days=30)
+        risk_60d          = await _avg_risk_for_period(session, org_id, days=60)
+        risk_90d          = await _avg_risk_for_period(session, org_id, days=90)
+        new_recurring     = await _new_vs_recurring(session, org_id)
+        coverage_res      = await _coverage_percent(session, org_id, now)
+        open_critical_res = await _open_critical_count(session, org_id)
+        sla_res           = await _sla_compliance(session, org_id)
 
     return {
         "mttr_by_severity": mttr_rows,
@@ -93,12 +86,23 @@ async def _mttr_by_severity(db: AsyncSession, org_id: UUID) -> dict:
 
 
 async def _avg_risk_for_period(db: AsyncSession, org_id: UUID, days: int) -> float:
-    """Average risk_score (falling back to priority_score) for findings created in last N days."""
+    """
+    Average risk score for findings created in last N days.
+    Uses risk_score/priority_score if set; falls back to a severity-derived score:
+      critical=90, high=70, medium=45, low=20, info=5.
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    severity_score = case(
+        (Finding.severity == FindingSeverity.CRITICAL, 90.0),
+        (Finding.severity == FindingSeverity.HIGH,     70.0),
+        (Finding.severity == FindingSeverity.MEDIUM,   45.0),
+        (Finding.severity == FindingSeverity.LOW,      20.0),
+        else_=5.0,
+    )
     result = await db.execute(
         select(
             func.avg(
-                func.coalesce(Finding.risk_score, Finding.priority_score, 0.0)
+                func.coalesce(Finding.risk_score, Finding.priority_score, severity_score)
             )
         ).where(
             Finding.org_id == org_id,

@@ -551,84 +551,89 @@ export default function JsScannerPage() {
         );
       }
 
-      const reader = res.body!.getReader();
+      if (!res.body) {
+        throw new Error("Server returned no response body — streaming not supported");
+      }
+
+      const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let completed = false;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() ?? "";
+          buffer += decoder.decode(value, { stream: true });
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() ?? "";
 
-        for (const part of parts) {
-          const eventMatch = part.match(/^event: (\w+)/m);
-          const dataMatch = part.match(/^data: ([\s\S]+)/m);
-          if (!eventMatch || !dataMatch) continue;
+          for (const part of parts) {
+            if (!part.trim()) continue;
+            const eventMatch = part.match(/^event: (\w+)/m);
+            const dataMatch = part.match(/^data: (.+)/m);
+            if (!eventMatch || !dataMatch) continue;
 
-          const event = eventMatch[1];
-          let data: Record<string, unknown>;
-          try {
-            data = JSON.parse(dataMatch[1]);
-          } catch {
-            continue;
-          }
-
-          if (event === "start") {
-            setProgressMessages((prev) => [...prev, `Started scan on ${data.target}`]);
-          } else if (event === "progress") {
-            const msg = (data.message as string) ?? "";
-            setProgressMessages((prev) => {
-              const next = [...prev, msg];
-              setTimeout(
-                () => progressEndRef.current?.scrollIntoView({ behavior: "smooth" }),
-                0
-              );
-              return next.slice(-100); // keep last 100
-            });
-
-            // Update discovered URLs from discovery phase
-            if (data.phase === "discovery" && Array.isArray(data.urls)) {
-              setDiscoveredUrls(data.urls as string[]);
-              setJsFilesProgress({ current: 0, total: (data.urls as string[]).length });
+            const event = eventMatch[1];
+            let data: Record<string, unknown>;
+            try {
+              data = JSON.parse(dataMatch[1]);
+            } catch {
+              continue;
             }
 
-            // Track analysis progress
-            if (data.phase === "analysis") {
-              setJsFilesProgress((prev) => ({
+            if (event === "start") {
+              setProgressMessages((prev) => [...prev, `Started scan on ${data.target}`]);
+            } else if (event === "progress") {
+              const msg = (data.message as string) ?? "";
+              setProgressMessages((prev) => {
+                const next = [...prev, msg];
+                setTimeout(
+                  () => progressEndRef.current?.scrollIntoView({ behavior: "smooth" }),
+                  0
+                );
+                return next.slice(-100);
+              });
+              if (data.phase === "discovery" && Array.isArray(data.urls)) {
+                setDiscoveredUrls(data.urls as string[]);
+                setJsFilesProgress({ current: 0, total: (data.urls as string[]).length });
+              }
+              if (data.phase === "analysis") {
+                setJsFilesProgress((prev) => ({ ...prev, current: prev.current + 1 }));
+              }
+            } else if (event === "finding") {
+              setFindings((prev) => [...prev, data as unknown as JsFinding]);
+            } else if (event === "endpoint") {
+              setEndpoints((prev) => [
                 ...prev,
-                current: prev.current + 1,
-              }));
+                { url: data.url as string, file: data.file as string, line: (data.line as number) ?? 0 },
+              ]);
+            } else if (event === "complete") {
+              completed = true;
+              setSummary(data as unknown as ScanSummary);
+              setIsScanning(false);
+              toast.success(`Scan complete — ${data.js_files_scanned} files, ${data.secrets_found} secrets, ${data.endpoints_found} endpoints`);
+            } else if (event === "error") {
+              completed = true;
+              setIsScanning(false);
+              toast.error(`Scan error: ${data.message}`);
             }
-          } else if (event === "finding") {
-            setFindings((prev) => [...prev, data as unknown as JsFinding]);
-          } else if (event === "endpoint") {
-            setEndpoints((prev) => [
-              ...prev,
-              {
-                url: data.url as string,
-                file: data.file as string,
-                line: (data.line as number) ?? 0,
-              },
-            ]);
-          } else if (event === "complete") {
-            setSummary(data as unknown as ScanSummary);
-            setIsScanning(false);
-            toast.success(
-              `Scan complete — ${data.secrets_found} secrets, ${data.endpoints_found} endpoints`
-            );
-          } else if (event === "error") {
-            setIsScanning(false);
-            toast.error(`Scan error: ${data.message}`);
           }
+        }
+      } finally {
+        reader.releaseLock();
+        // Safety net: if stream closed without a complete/error event
+        if (!completed) {
+          setIsScanning(false);
+          toast.warning("Scan stream ended unexpectedly");
         }
       }
     } catch (err: unknown) {
-      if (err instanceof Error && err.name !== "AbortError") {
-        setIsScanning(false);
-        toast.error(`Scan failed: ${err.message}`);
+      if (err instanceof Error && err.name === "AbortError") {
+        // user cancelled — already handled by stopScan
+      } else {
+        toast.error(`Scan failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       setIsScanning(false);
     }

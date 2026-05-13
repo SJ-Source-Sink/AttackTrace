@@ -94,8 +94,9 @@ SECRET_PATTERNS = [
     # AWS
     {"name": "AWS Access Key", "pattern": r"AKIA[0-9A-Z]{16}", "severity": "critical"},
     {"name": "AWS Secret Key", "pattern": r"(?i)aws.{0,20}secret.{0,20}['\"][0-9a-zA-Z/+]{40}['\"]", "severity": "critical"},
-    # Generic API keys
-    {"name": "Generic API Key", "pattern": r"(?i)(api[_-]?key|apikey|api[_-]?secret)['\"\s:=]+([a-zA-Z0-9_\-]{20,})", "severity": "high"},
+    # Generic API keys — value_group=2 triggers entropy+digit check on the actual value
+    # require_digit=True filters out camelCase variable names (real keys almost always have digits)
+    {"name": "Generic API Key", "pattern": r"(?i)(api[_-]?key|apikey|api[_-]?secret)['\"\s:=]+([a-zA-Z0-9_\-]{20,})", "severity": "high", "value_group": 2, "min_entropy": 3.5, "require_digit": True},
     # JWT
     {"name": "JWT Token", "pattern": r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}", "severity": "high"},
     # Private keys
@@ -111,8 +112,8 @@ SECRET_PATTERNS = [
     {"name": "Google API Key", "pattern": r"AIza[0-9A-Za-z\-_]{35}", "severity": "high"},
     # Slack
     {"name": "Slack Token", "pattern": r"xox[baprs]-[0-9a-zA-Z\-]{10,}", "severity": "high"},
-    # Generic secrets
-    {"name": "Generic Secret", "pattern": r"(?i)(secret|password|passwd|pwd)['\"\s:=]+['\"]([^'\"]{8,})['\"]", "severity": "medium"},
+    # Generic secrets — value_group=2 triggers entropy check on the actual value
+    {"name": "Generic Secret", "pattern": r"(?i)(secret|password|passwd|pwd)['\"\s:=]+['\"]([^'\"]{8,})['\"]", "severity": "medium", "value_group": 2, "min_entropy": 3.0},
     # Database URLs
     {"name": "Database URL", "pattern": r"(?i)(postgres|mysql|mongodb|redis)://[^\s'\"]{10,}", "severity": "high"},
     # Private IP leakage
@@ -121,7 +122,7 @@ SECRET_PATTERNS = [
     {"name": "Source Map Exposed", "pattern": r"sourceMappingURL=(.+\.map)", "severity": "medium"},
 ]
 
-# Pre-compile patterns once
+# Pre-compile patterns once (preserve all fields including value_group, min_entropy)
 _COMPILED_PATTERNS = [
     {**p, "_re": re.compile(p["pattern"])}
     for p in SECRET_PATTERNS
@@ -151,8 +152,29 @@ SENSITIVE_PATHS = [
 MAX_FILE_SIZE = 1 * 1024 * 1024  # 1 MB
 REQUEST_TIMEOUT = 10.0
 
+# Known placeholder / test values that look like secrets but aren't
+_KNOWN_FAKE_VALUES = frozenset({
+    "your_api_key", "your_api_secret", "your_secret_key", "your_access_token",
+    "api_key_here", "insert_key_here", "replace_with_key", "placeholder",
+    "xxxxxxxxxxxxxxxxxxxx", "your-api-key-here", "changeme", "example",
+    "your_token_here", "api_key_value", "api_secret_value",
+    "abcdefghijklmnopqrstuvwxyz", "12345678901234567890",
+})
+
 
 # ── Helper utilities ───────────────────────────────────────────────────────────
+
+def _shannon_entropy(s: str) -> float:
+    """Compute Shannon entropy of a string. Real secrets typically > 3.5."""
+    if not s:
+        return 0.0
+    import math
+    freq: dict[str, int] = {}
+    for c in s:
+        freq[c] = freq.get(c, 0) + 1
+    n = len(s)
+    return -sum((f / n) * math.log2(f / n) for f in freq.values())
+
 
 def _truncate_match(m: str) -> str:
     """Truncate a secret match to first 8 chars for safe display."""
@@ -210,8 +232,28 @@ def _scan_content_for_secrets(content: str, source_url: str) -> list[dict]:
     seen: set[str] = set()
 
     for pat in _COMPILED_PATTERNS:
+        value_group: int | None = pat.get("value_group")
+        min_entropy: float = pat.get("min_entropy", 0.0)
+
+        require_digit: bool = pat.get("require_digit", False)
+
         for m in pat["_re"].finditer(content):
             raw = m.group(0)
+
+            # Entropy + fake-value filter for generic patterns with a value_group
+            if value_group is not None:
+                try:
+                    val = m.group(value_group)
+                except IndexError:
+                    val = raw
+                if val.lower() in _KNOWN_FAKE_VALUES:
+                    continue
+                if min_entropy > 0 and _shannon_entropy(val) < min_entropy:
+                    continue
+                # Real secrets almost always contain at least one digit
+                if require_digit and not any(c.isdigit() for c in val):
+                    continue
+
             dedup_key = f"{pat['name']}:{source_url}:{raw[:16]}"
             if dedup_key in seen:
                 continue

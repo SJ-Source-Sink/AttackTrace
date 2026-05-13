@@ -301,7 +301,8 @@ DOM_XSS_SINKS: list[dict] = [
     {"name": "Angular $sce.trustAsHtml",    "pattern": r"\$sce\.trustAsHtml\s*\(",             "severity": "high"},
     # Script injection
     {"name": "Dynamic script element",      "pattern": r"createElement\s*\(\s*['\"`]script['\"`]\s*\)", "severity": "critical"},
-    {"name": ".src assignment",             "pattern": r"\.src\s*=\s*(?![\s]*['\"`]['\"`])",  "severity": "medium"},
+    # Only flag .src = when the value is likely dynamic (not a string literal)
+    {"name": ".src assignment",             "pattern": r"\.src\s*=\s*(?!['\"`\s])(?!null\b)(?!void\b)(?!false\b)(?!true\b)(?!\d)",  "severity": "medium"},
 ]
 
 # ── DOM XSS sources ───────────────────────────────────────────────────────────
@@ -365,6 +366,44 @@ GRAPHQL_INTROSPECTION_QUERY = json.dumps({
 GRAPHQL_PATHS = ["/graphql", "/api/graphql", "/v1/graphql", "/graphiql", "/query", "/gql"]
 
 MAX_JS_BYTES = 3 * 1024 * 1024  # 3 MB
+
+# ── Known 3rd-party analytics / CDN domains ────────────────────────────────────
+# Findings from these files are heavily filtered — they legitimately read cookies,
+# URLs, and use dynamic script elements as part of their normal operation.
+KNOWN_ANALYTICS_DOMAINS: frozenset[str] = frozenset([
+    "google-analytics.com", "googletagmanager.com", "googlesyndication.com",
+    "google.com/recaptcha", "recaptcha.net",
+    "adobe-dtm.com", "adobedtm.com", "omtrdc.net", "demdex.net",
+    "2o7.net", "sc.omtrdc.net",
+    "amplitude.com", "hotjar.com", "fullstory.com", "mixpanel.com",
+    "segment.com", "heap.io", "mouseflow.com", "crazyegg.com",
+    "optimizely.com", "quantummetric.com", "contentsquare.com",
+    "datadome.co", "cloudflare.com", "cloudflareinsights.com",
+    "newrelic.com", "nr-data.net", "dynatrace.com", "datadog.com",
+    "cookielaw.org", "onetrust.com", "evidon.com", "trustarc.com",
+    "facebook.net", "fbcdn.net", "connect.facebook.net",
+    "twitter.com", "ads-twitter.com", "t.co",
+    "linkedin.com", "licdn.com",
+    "pinterest.com", "pinimg.com",
+    "doubleclick.net", "adsystem.com", "adnxs.com",
+    "moatads.com", "scorecardresearch.com", "comscore.com",
+    "chartbeat.com", "parsely.com",
+    "cdn.amplitude.com", "cdn.segment.com",
+])
+
+# Max findings reported per pattern per file (prevents flooding from minified files)
+_MAX_PER_PATTERN_PER_FILE = 5
+# For info-level sources, even tighter cap
+_MAX_SOURCE_PER_FILE = 3
+
+
+def _is_known_3rd_party(url: str) -> bool:
+    """Returns True if URL belongs to a known analytics/advertising CDN domain."""
+    try:
+        host = urlparse(url).netloc.lower()
+        return any(domain in host for domain in KNOWN_ANALYTICS_DOMAINS)
+    except Exception:
+        return False
 
 COMMON_JS_PATHS = [
     "/static/js/main.chunk.js",
@@ -461,11 +500,32 @@ def _analyze_js_content(
     has_graphql = False
     seen_endpoints: set[str] = set()
     seen_findings: set[str] = set()  # deduplicate by (name, line)
+    pattern_counts: dict[str, int] = {}  # pattern_name -> occurrences this file
+    is_3rd_party = _is_known_3rd_party(file_url)
 
     def _add_finding(f: dict) -> None:
-        key = f"{f['name']}:{f['line_number']}:{f.get('match', '')[:20]}"
+        fname = f.get("name", "")
+        ftype = f.get("type", "")
+
+        # Skip info-level dom_source findings entirely for known 3rd-party scripts
+        # (analytics/CDN scripts legitimately read cookies and URLs)
+        if is_3rd_party and ftype == "dom_source":
+            return
+
+        # Cap per pattern per file to prevent flooding from minified code
+        cap = _MAX_SOURCE_PER_FILE if ftype == "dom_source" else _MAX_PER_PATTERN_PER_FILE
+        count = pattern_counts.get(fname, 0) + 1
+        pattern_counts[fname] = count
+        if count > cap:
+            return  # suppress excess occurrences
+
+        key = f"{fname}:{f['line_number']}:{f.get('match', '')[:20]}"
         if key not in seen_findings:
             seen_findings.add(key)
+            # Annotate the last allowed finding with suppression note
+            if count == cap:
+                f = dict(f)
+                f["suppressed_note"] = f"Showing {cap} of multiple occurrences — remaining suppressed to reduce noise."
             findings.append(f)
 
     # ── Endpoints ──────────────────────────────────────────────────────────────
@@ -634,12 +694,14 @@ async def _run_js_scan(
     org_id: str,
 ) -> AsyncGenerator[str, None]:
     started_at = datetime.now(timezone.utc).isoformat()
-    start_ts = asyncio.get_event_loop().time()
+    loop = asyncio.get_running_loop()
+    start_ts = loop.time()
     target = request.target.rstrip("/")
     origin = _base_origin(target)
 
     all_findings: list[dict] = []
     all_endpoints: list[dict] = []
+    _global_endpoint_seen: set[str] = set()  # cross-file deduplication
     js_files_scanned = 0
     secrets_count = 0
     dom_xss_count = 0
@@ -765,8 +827,10 @@ async def _run_js_scan(
             eps, fds, gql = _analyze_js_content(block, label, beautify=False)
 
             for ep in eps:
-                yield _sse("endpoint", {"url": ep["url"], "file": label, "line": ep["line"]})
-                all_endpoints.append(ep)
+                if ep["url"] not in _global_endpoint_seen:
+                    _global_endpoint_seen.add(ep["url"])
+                    yield _sse("endpoint", {"url": ep["url"], "file": label, "line": ep["line"]})
+                    all_endpoints.append(ep)
 
             for f in fds:
                 yield _sse("finding", f)
@@ -786,79 +850,86 @@ async def _run_js_scan(
             nonlocal js_files_scanned, graphql_detected, source_map_count
             async with semaphore:
                 try:
-                    resp = await client.get(js_url, follow_redirects=True, timeout=20.0)
-                except Exception as exc:
+                    try:
+                        resp = await client.get(js_url, follow_redirects=True, timeout=20.0)
+                    except Exception as exc:
+                        await queue.put(_sse("progress", {
+                            "phase": "analysis",
+                            "message": f"[{file_index}/{total}] Failed: {js_url[:60]} — {type(exc).__name__}",
+                        }))
+                        return
+
+                    ct = resp.headers.get("content-type", "")
+                    if resp.status_code != 200 or any(x in ct for x in ("image", "font", "audio", "video")):
+                        return
+
+                    raw = resp.content
+                    if len(raw) > MAX_JS_BYTES:
+                        await queue.put(_sse("progress", {
+                            "phase": "analysis",
+                            "message": f"[{file_index}/{total}] Skipping (too large {len(raw)//1024} KB): {js_url[:60]}",
+                        }))
+                        return
+
+                    try:
+                        content = raw.decode("utf-8", errors="replace")
+                    except Exception:
+                        return
+
                     await queue.put(_sse("progress", {
                         "phase": "analysis",
-                        "message": f"[{file_index}/{total}] Failed: {js_url[:60]} — {type(exc).__name__}",
+                        "message": f"[{file_index}/{total}] Analyzing {js_url[:80]}",
                     }))
-                    return
 
-                ct = resp.headers.get("content-type", "")
-                if resp.status_code != 200 or any(x in ct for x in ("image", "font", "audio", "video")):
-                    return
+                    eps, fds, gql = await asyncio.get_running_loop().run_in_executor(
+                        None, _analyze_js_content, content, js_url, True
+                    )
+                    js_files_scanned += 1
 
-                raw = resp.content
-                if len(raw) > MAX_JS_BYTES:
-                    await queue.put(_sse("progress", {
-                        "phase": "analysis",
-                        "message": f"[{file_index}/{total}] Skipping (too large {len(raw)//1024} KB): {js_url[:60]}",
-                    }))
-                    return
+                    for ep in eps:
+                        if ep["url"] not in _global_endpoint_seen:
+                            _global_endpoint_seen.add(ep["url"])
+                            await queue.put(_sse("endpoint", {"url": ep["url"], "file": js_url, "line": ep["line"]}))
+                            all_endpoints.append(ep)
 
-                try:
-                    content = raw.decode("utf-8", errors="replace")
-                except Exception:
-                    return
+                    for f in fds:
+                        await queue.put(_sse("finding", f))
+                        all_findings.append(f)
+                        _count_finding(f)
 
-                await queue.put(_sse("progress", {
-                    "phase": "analysis",
-                    "message": f"[{file_index}/{total}] Analyzing {js_url[:80]}",
-                }))
+                    if gql:
+                        graphql_detected = True
 
-                eps, fds, gql = _analyze_js_content(content, js_url, beautify=True)
-                js_files_scanned += 1
-
-                for ep in eps:
-                    await queue.put(_sse("endpoint", {"url": ep["url"], "file": js_url, "line": ep["line"]}))
-                    all_endpoints.append(ep)
-
-                for f in fds:
-                    await queue.put(_sse("finding", f))
-                    all_findings.append(f)
-                    _count_finding(f)
-
-                if gql:
-                    graphql_detected = True
-
-                # Source map detection
-                if request.include_source_maps:
-                    map_match = re.search(r"//[#@]\s*sourceMappingURL=(.+)$", content, re.MULTILINE)
-                    if map_match:
-                        map_ref = map_match.group(1).strip()
-                        if not map_ref.startswith("data:"):
-                            map_url = _resolve_js_url(map_ref, js_url)
-                            if map_url:
-                                try:
-                                    map_resp = await client.get(map_url, timeout=10.0)
-                                    if map_resp.status_code == 200 and len(map_resp.content) > 100:
-                                        finding = {
-                                            "type": "source_map",
-                                            "name": "JavaScript Source Map Exposed",
-                                            "severity": "critical",
-                                            "file_url": map_url,
-                                            "match": map_url[:60] + "..." if len(map_url) > 60 else map_url,
-                                            "line_number": _line_number(content, map_match.start()),
-                                            "context": "",
-                                            "recommendation": "Remove sourceMappingURL from production builds. Never deploy .map files publicly — they expose full original source.",
-                                        }
-                                        await queue.put(_sse("finding", finding))
-                                        all_findings.append(finding)
-                                        source_map_count += 1
-                                except Exception:
-                                    pass
-
-            await queue.put(None)
+                    # Source map detection
+                    if request.include_source_maps:
+                        map_match = re.search(r"//[#@]\s*sourceMappingURL=(.+)$", content, re.MULTILINE)
+                        if map_match:
+                            map_ref = map_match.group(1).strip()
+                            if not map_ref.startswith("data:"):
+                                map_url = _resolve_js_url(map_ref, js_url)
+                                if map_url:
+                                    try:
+                                        map_resp = await client.get(map_url, timeout=10.0)
+                                        if map_resp.status_code == 200 and len(map_resp.content) > 100:
+                                            finding = {
+                                                "type": "source_map",
+                                                "name": "JavaScript Source Map Exposed",
+                                                "severity": "critical",
+                                                "file_url": map_url,
+                                                "match": map_url[:60] + "..." if len(map_url) > 60 else map_url,
+                                                "line_number": _line_number(content, map_match.start()),
+                                                "context": "",
+                                                "recommendation": "Remove sourceMappingURL from production builds. Never deploy .map files publicly — they expose full original source.",
+                                            }
+                                            await queue.put(_sse("finding", finding))
+                                            all_findings.append(finding)
+                                            source_map_count += 1
+                                    except Exception:
+                                        pass
+                finally:
+                    # Always signal completion so the queue consumer can decrement
+                    # its counter regardless of whether this file succeeded or was skipped.
+                    await queue.put(None)
 
         bg_tasks = [
             asyncio.create_task(_fetch_and_enqueue(url, i + 1))
@@ -908,7 +979,7 @@ async def _run_js_scan(
 
         # ── Complete ──────────────────────────────────────────────────────────
 
-        duration = round(asyncio.get_event_loop().time() - start_ts, 2)
+        duration = round(asyncio.get_running_loop().time() - start_ts, 2)
         completed_at = datetime.now(timezone.utc).isoformat()
 
         completion = {
@@ -943,6 +1014,23 @@ async def _run_js_scan(
         _save_scan_result(org_id, record)
 
 
+async def _safe_js_scan(
+    request: JSScanRequest,
+    scan_id: str,
+    org_id: str,
+) -> AsyncGenerator[str, None]:
+    """Wrapper that surfaces unhandled exceptions as SSE error events."""
+    import traceback
+    try:
+        async for chunk in _run_js_scan(request, scan_id, org_id):
+            yield chunk
+    except Exception as exc:
+        yield _sse("error", {
+            "message": f"{type(exc).__name__}: {exc}",
+            "trace": traceback.format_exc()[-600:],
+        })
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # API Endpoints
 # ──────────────────────────────────────────────────────────────────────────────
@@ -960,7 +1048,7 @@ async def scan_js(
         )
     scan_id = str(_uuid.uuid4())
     return StreamingResponse(
-        _run_js_scan(payload, scan_id=scan_id, org_id=str(org_id)),
+        _safe_js_scan(payload, scan_id=scan_id, org_id=str(org_id)),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

@@ -28,6 +28,9 @@ volumes:
     driver: local
   msra-src:
     driver: local
+  # Persist nuclei-templates between container restarts (~500MB, slow to re-download)
+  nuclei-templates:
+    driver: local
 
 services:
 
@@ -97,9 +100,11 @@ services:
       MSRA_URL: http://msra:5001
     ports:
       - "8000:8000"
-    # Mount source for hot-reload in development; uvicorn --reload watches /app
     volumes:
+      # Hot-reload: mount source so uvicorn --reload picks up changes immediately
       - ./platform/backend/app:/app/app
+      # Persist nuclei templates across restarts (avoids re-downloading ~500MB each time)
+      - nuclei-templates:/opt/nuclei-templates
     depends_on:
       postgres:
         condition: service_healthy
@@ -136,6 +141,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+    volumes:
+      - nuclei-templates:/opt/nuclei-templates
     depends_on:
       postgres:
         condition: service_healthy
