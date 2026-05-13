@@ -25,11 +25,12 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user, require_tool
 from app.models.db.audit import AuditLog
 from app.models.db.user import User
+from app.services.enrichment_service import enrich_cve, batch_enrich_cves, get_kev_catalog
 
 _settings = get_settings()
 
 # Cache CVSS scores to avoid hammering NVD for duplicate CVEs across scans
-_cvss_cache: dict[str, float | None] = {}
+_cvss_cache: dict[str, dict | None] = {}
 
 # Circuit breaker: skip NVD lookups after 3 consecutive failures for 5 minutes
 _cvss_fail_count = 0
@@ -37,11 +38,24 @@ _cvss_fail_until: float = 0.0
 
 _CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 
-async def _lookup_cvss(cve_id: str) -> float | None:
-    """Fetch CVSS v3 base score from NIST NVD (free tier, no API key required)."""
+
+async def _lookup_cvss(cve_id: str) -> dict:
+    """
+    Fetch CVSS scores from NIST NVD (free tier, no API key required).
+
+    Returns a dict:
+        {
+            "v3_score":  float | None,  # CVSS v3.1 or v3.0 base score
+            "v4_score":  float | None,  # CVSS v4.0 base score
+            "v4_vector": str   | None,  # CVSS v4.0 vector string
+        }
+    """
     cve_upper = cve_id.upper()
     if cve_upper in _cvss_cache:
-        return _cvss_cache[cve_upper]
+        cached = _cvss_cache[cve_upper]
+        return cached if cached is not None else {"v3_score": None, "v4_score": None, "v4_vector": None}
+
+    result: dict = {"v3_score": None, "v4_score": None, "v4_vector": None}
     try:
         url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_upper}"
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=4.0, read=8.0, write=4.0, pool=4.0)) as client:
@@ -51,25 +65,36 @@ async def _lookup_cvss(cve_id: str) -> float | None:
                 vulns = data.get("vulnerabilities", [])
                 if vulns:
                     metrics = vulns[0].get("cve", {}).get("metrics", {})
-                    # Try CVSS v3.1 first, then v3.0, then v2
+
+                    # CVSS v3.1 / v3.0 / v2 (pick highest-priority hit)
                     for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
                         entries = metrics.get(key, [])
                         if entries:
                             score = entries[0].get("cvssData", {}).get("baseScore")
                             if score is not None:
-                                if len(_cvss_cache) > 4096:
-                                    for k in list(_cvss_cache.keys())[:512]:
-                                        del _cvss_cache[k]
-                                _cvss_cache[cve_upper] = float(score)
-                                return float(score)
+                                result["v3_score"] = float(score)
+                                break
+
+                    # CVSS v4.0
+                    v40_entries = metrics.get("cvssMetricV40", [])
+                    if v40_entries:
+                        cvss_data = v40_entries[0].get("cvssData", {})
+                        raw_score = cvss_data.get("baseScore")
+                        raw_vector = cvss_data.get("vectorString")
+                        if raw_score is not None:
+                            result["v4_score"] = float(raw_score)
+                        if raw_vector:
+                            result["v4_vector"] = str(raw_vector)
+
     except Exception:
         pass
+
+    # Evict if cache is too large
     if len(_cvss_cache) > 4096:
-        # Evict oldest 512 entries
         for k in list(_cvss_cache.keys())[:512]:
             del _cvss_cache[k]
-    _cvss_cache[cve_upper] = None
-    return None
+    _cvss_cache[cve_upper] = result
+    return result
 
 
 def _extract_cves(finding: dict) -> list[str]:
@@ -323,23 +348,56 @@ async def _stream_nuclei(scan_id: str, req: NucleiScanRequest, request: Request)
             if kind == "out":
                 finding = _parse_nuclei_line(line)
                 if finding:
-                    # Extract CVE IDs synchronously; enrich CVSS async
+                    # Extract CVE IDs synchronously; enrich CVSS + EPSS + KEV async
                     cves = _extract_cves(finding)
                     finding["cve"] = cves
+
+                    # Default enrichment fields
+                    finding["cvss_score"] = None
+                    finding["cvss_v4_score"] = None
+                    finding["cvss_v4_vector"] = None
+                    finding["epss_score"] = None
+                    finding["epss_percentile"] = None
+                    finding["is_kev"] = False
+                    finding["kev_date_added"] = None
+
                     if cves:
                         global _cvss_fail_count, _cvss_fail_until
                         if time.monotonic() < _cvss_fail_until:
-                            cvss = None
+                            cvss_dict: dict = {"v3_score": None, "v4_score": None, "v4_vector": None}
                         else:
                             try:
-                                cvss = await asyncio.wait_for(_lookup_cvss(cves[0]), timeout=3.0)
+                                cvss_dict = await asyncio.wait_for(
+                                    _lookup_cvss(cves[0]), timeout=5.0
+                                )
                                 _cvss_fail_count = 0
                             except (asyncio.TimeoutError, Exception):
                                 _cvss_fail_count += 1
                                 if _cvss_fail_count >= 3:
-                                    _cvss_fail_until = time.monotonic() + 300  # 5 min
-                                cvss = None
-                        finding["cvss_score"] = cvss
+                                    _cvss_fail_until = time.monotonic() + 300
+                                cvss_dict = {"v3_score": None, "v4_score": None, "v4_vector": None}
+
+                        finding["cvss_score"] = cvss_dict.get("v3_score")
+                        finding["cvss_v4_score"] = cvss_dict.get("v4_score")
+                        finding["cvss_v4_vector"] = cvss_dict.get("v4_vector")
+
+                        # EPSS + KEV enrichment via enrichment_service
+                        try:
+                            enrichment = await asyncio.wait_for(
+                                enrich_cve(cves[0]), timeout=6.0
+                            )
+                            finding["epss_score"] = enrichment.get("epss_score")
+                            finding["epss_percentile"] = enrichment.get("epss_percentile")
+                            finding["is_kev"] = enrichment.get("is_kev", False)
+                            finding["kev_date_added"] = enrichment.get("kev_date_added")
+                            # Prefer enrichment_service CVSS v4 if our NVD call missed
+                            if finding["cvss_v4_score"] is None:
+                                finding["cvss_v4_score"] = enrichment.get("cvss_v4_score")
+                            if finding["cvss_v4_vector"] is None:
+                                finding["cvss_v4_vector"] = enrichment.get("cvss_v4_vector")
+                        except (asyncio.TimeoutError, Exception):
+                            pass  # leave defaults
+
                     findings.append(finding)
                     sev = finding.get("severity", "info").lower()
                     counts[sev] = counts.get(sev, 0) + 1
@@ -355,12 +413,23 @@ async def _stream_nuclei(scan_id: str, req: NucleiScanRequest, request: Request)
         await asyncio.gather(t1, t2, return_exceptions=True)
         await proc.wait()
 
+        # Build enrichment summary for the history record
+        kev_findings = [f for f in findings if f.get("is_kev")]
+        epss_max = max(
+            (f.get("epss_score") or 0.0 for f in findings if f.get("epss_score") is not None),
+            default=None,
+        )
         _scan_history[scan_id].update({
             "status": "completed" if proc.returncode == 0 else "failed",
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "findings": findings,
             "counts": counts,
             "exit_code": proc.returncode,
+            "enrichment_summary": {
+                "kev_count": len(kev_findings),
+                "max_epss_score": epss_max,
+                "findings_with_cvss_v4": sum(1 for f in findings if f.get("cvss_v4_score") is not None),
+            },
         })
 
         yield _sse("complete", {
@@ -369,6 +438,7 @@ async def _stream_nuclei(scan_id: str, req: NucleiScanRequest, request: Request)
             "counts": counts,
             "exit_code": proc.returncode,
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "enrichment_summary": _scan_history[scan_id].get("enrichment_summary", {}),
         })
 
     except Exception as exc:

@@ -20,6 +20,9 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user, require_tool
 from app.models.db.audit import AuditLog
 from app.models.db.user import User
+from app.services.enrichment_service import enrich_cve, batch_enrich_cves, get_kev_catalog
+
+_CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 
 router = APIRouter(prefix="/nmap", tags=["Nmap"])
 
@@ -29,17 +32,37 @@ _scan_history: dict[str, dict] = {}
 # ── Nuclei tag suggestions per open port ──────────────────────────────────────
 
 PORT_TO_NUCLEI_TAGS: dict[int, list[str]] = {
-    22: ["ssh"],
-    25: ["smtp"],
-    80: ["http", "web"],
-    443: ["ssl", "tls", "https"],
-    3306: ["mysql", "databases"],
-    5432: ["postgresql", "databases"],
-    6379: ["redis", "network"],
+    21:    ["ftp", "network"],
+    22:    ["ssh"],
+    23:    ["telnet", "network"],
+    25:    ["smtp"],
+    53:    ["dns", "network"],
+    80:    ["http", "web"],
+    110:   ["pop3", "network"],
+    111:   ["rpc", "network"],
+    135:   ["rpc", "windows"],
+    139:   ["smb", "network"],
+    161:   ["snmp", "network"],
+    389:   ["ldap", "network"],
+    443:   ["ssl", "tls", "https"],
+    445:   ["smb", "network", "windows"],
+    636:   ["ldap", "network"],
+    1433:  ["mssql", "databases"],
+    1521:  ["oracle", "databases"],
+    3306:  ["mysql", "databases"],
+    3389:  ["rdp", "windows"],
+    4443:  ["https", "web"],
+    5432:  ["postgresql", "databases"],
+    5900:  ["vnc", "network"],
+    6379:  ["redis", "network"],
+    6443:  ["kubernetes", "network"],
+    8080:  ["http", "web"],
+    8443:  ["ssl", "tls"],
+    8888:  ["http", "web"],
+    9000:  ["network"],
+    9090:  ["http", "web"],
+    9200:  ["elasticsearch", "network"],
     27017: ["mongodb", "databases"],
-    8080: ["http", "web"],
-    8443: ["ssl", "tls"],
-    9200: ["elasticsearch", "network"],
 }
 
 
@@ -55,13 +78,15 @@ def _suggest_nuclei_tags(hosts: list[dict]) -> list[str]:
     return sorted(tags)
 
 SCAN_PRESETS: dict[str, list[str]] = {
-    "quick": ["-T4", "-F"],
-    "full_port": ["-T4", "-p-"],
-    "service_version": ["-sV", "-T4"],
-    "os_detection": ["-O", "-T4"],
-    "stealth_syn": ["-sS", "-T4"],
-    "aggressive": ["-A", "-T4"],
-    "custom": [],
+    "quick":          ["-T4", "-F"],
+    "full_port":      ["-T4", "-p-"],
+    "service_version":["-sV", "-T4"],
+    "service_enum":   ["-sV", "--script=banner,default", "-T4"],
+    "nse_vuln":       ["-sV", "--script=vuln,safe,auth,discovery", "-T4"],
+    "os_detection":   ["-O", "-T4"],
+    "stealth_syn":    ["-sS", "-T4"],
+    "aggressive":     ["-A", "-T4"],
+    "custom":         [],
 }
 
 # Presets that send raw packets — require CAP_NET_RAW or root
@@ -152,22 +177,42 @@ def _build_nmap_cmd(req: NmapScanRequest) -> list[str]:
 
 
 def _parse_nmap_output(raw: str) -> list[dict]:
-    """Parse nmap text output into structured host/port/service records."""
-    hosts = []
+    """
+    Parse nmap text output into structured host/port/service records.
+
+    Also extracts CVE IDs from NSE script output lines (e.g. vuln scripts).
+    Each host gains a top-level ``cve_ids`` list (deduplicated, sorted).
+    Each port entry also carries ``nse_scripts`` (list of script output lines)
+    and ``cve_ids`` extracted from those scripts.
+    """
+    hosts: list[dict] = []
     current_host: dict | None = None
+    current_port: dict | None = None  # last port we parsed (for NSE output attribution)
+
+    # All CVE IDs seen for the current host (for host-level aggregation)
+    host_cves: set[str] = set()
+
+    def _finish_host() -> None:
+        nonlocal current_host, current_port, host_cves
+        if current_host:
+            current_host["cve_ids"] = sorted(host_cves)
+            hosts.append(current_host)
+        current_host = None
+        current_port = None
+        host_cves = set()
 
     for line in raw.splitlines():
-        line = line.strip()
+        stripped = line.strip()
 
-        host_match = re.match(r"Nmap scan report for (.+)", line)
+        host_match = re.match(r"Nmap scan report for (.+)", stripped)
         if host_match:
-            if current_host:
-                hosts.append(current_host)
+            _finish_host()
             current_host = {
                 "host": host_match.group(1),
                 "ports": [],
                 "os": None,
                 "status": "up",
+                "cve_ids": [],
             }
             continue
 
@@ -176,28 +221,43 @@ def _parse_nmap_output(raw: str) -> list[dict]:
 
         # Port line: 80/tcp   open   http    Apache httpd 2.4
         port_match = re.match(
-            r"(\d+)/(tcp|udp)\s+(open|closed|filtered)\s+(\S+)?\s*(.*)?", line
+            r"(\d+)/(tcp|udp)\s+(open|closed|filtered)\s+(\S+)?\s*(.*)?", stripped
         )
         if port_match:
-            current_host["ports"].append(
-                {
-                    "port": int(port_match.group(1)),
-                    "protocol": port_match.group(2),
-                    "state": port_match.group(3),
-                    "service": port_match.group(4) or "",
-                    "version": port_match.group(5).strip() if port_match.group(5) else "",
-                }
-            )
+            current_port = {
+                "port": int(port_match.group(1)),
+                "protocol": port_match.group(2),
+                "state": port_match.group(3),
+                "service": port_match.group(4) or "",
+                "version": port_match.group(5).strip() if port_match.group(5) else "",
+                "nse_scripts": [],
+                "cve_ids": [],
+            }
+            current_host["ports"].append(current_port)
             continue
 
         # OS detection
-        os_match = re.match(r"OS details: (.+)", line)
-        if os_match and current_host:
+        os_match = re.match(r"OS details: (.+)", stripped)
+        if os_match:
             current_host["os"] = os_match.group(1)
+            continue
 
-    if current_host:
-        hosts.append(current_host)
+        # NSE script output: lines indented under a port OR host-level scripts.
+        # NSE lines typically start with "|" or "| " — capture them for CVE extraction.
+        if stripped.startswith("|") or stripped.startswith("_"):
+            # Extract any CVE IDs from this NSE output line
+            cves_in_line = [m.upper() for m in _CVE_PATTERN.findall(stripped)]
+            if cves_in_line:
+                host_cves.update(cves_in_line)
+                if current_port is not None:
+                    current_port["cve_ids"] = sorted(
+                        set(current_port["cve_ids"]) | set(cves_in_line)
+                    )
+            # Record the raw NSE line on the current port (if any)
+            if current_port is not None:
+                current_port["nse_scripts"].append(stripped)
 
+    _finish_host()
     return hosts
 
 
@@ -249,6 +309,22 @@ async def _stream_nmap(scan_id: str, req: NmapScanRequest, request: Request) -> 
 
         suggested_tags = _suggest_nuclei_tags(hosts)
 
+        # Collect all CVE IDs found by NSE scripts across all hosts
+        all_nse_cves: list[str] = []
+        for host in hosts:
+            all_nse_cves.extend(host.get("cve_ids", []))
+        all_nse_cves = sorted(set(all_nse_cves))
+
+        # Enrich NSE CVE findings with EPSS + KEV data
+        nse_enrichment: dict[str, dict] = {}
+        if all_nse_cves:
+            try:
+                nse_enrichment = await asyncio.wait_for(
+                    batch_enrich_cves(all_nse_cves), timeout=15.0
+                )
+            except (asyncio.TimeoutError, Exception):
+                pass  # best-effort; leave empty
+
         _scan_history[scan_id].update({
             "status": "completed" if proc.returncode == 0 else "failed",
             "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -256,6 +332,8 @@ async def _stream_nmap(scan_id: str, req: NmapScanRequest, request: Request) -> 
             "hosts": hosts,
             "exit_code": proc.returncode,
             "suggested_nuclei_tags": suggested_tags,
+            "nse_cve_ids": all_nse_cves,
+            "nse_enrichment": nse_enrichment,
         })
 
         yield _sse("complete", {
@@ -264,6 +342,8 @@ async def _stream_nmap(scan_id: str, req: NmapScanRequest, request: Request) -> 
             "exit_code": proc.returncode,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "suggested_nuclei_tags": suggested_tags,
+            "nse_cve_ids": all_nse_cves,
+            "nse_enrichment": nse_enrichment,
         })
 
     except Exception as exc:

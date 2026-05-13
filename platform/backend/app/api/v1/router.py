@@ -69,6 +69,60 @@ except ImportError:
     _log.warning("mcp_scanner module not found — MCP Scanner disabled")
     mcp_scanner_router = None
 
+try:
+    from app.api.v1.js_scanner import router as js_scanner_router
+except ImportError:
+    _log.warning("js_scanner module not found — JS Scanner disabled")
+    js_scanner_router = None
+
+try:
+    from app.api.v1.secrets import router as secrets_router
+except ImportError:
+    _log.warning("secrets module not found — Secret Scanner disabled")
+    secrets_router = None
+
+try:
+    from app.api.v1.cspm import router as cspm_router
+except ImportError:
+    _log.warning("cspm module not found — CSPM Scanner disabled")
+    cspm_router = None
+
+try:
+    from app.api.v1.exposure_scanner import router as exposure_router
+except ImportError:
+    _log.warning("exposure_scanner module not found — Exposure Scanner disabled")
+    exposure_router = None
+
+try:
+    from app.api.v1.email_security import router as email_security_router
+except ImportError:
+    _log.warning("email_security module not found — Email Security Scanner disabled")
+    email_security_router = None
+
+try:
+    from app.api.v1.iac_scanner import router as iac_router
+except ImportError:
+    _log.warning("iac_scanner module not found — IaC Scanner disabled")
+    iac_router = None
+
+try:
+    from app.api.v1.supply_chain import router as supply_chain_router
+except ImportError:
+    _log.warning("supply_chain module not found — Supply Chain Scanner disabled")
+    supply_chain_router = None
+
+try:
+    from app.api.v1.container_scanner import router as container_router
+except ImportError:
+    _log.warning("container_scanner module not found — Container Scanner disabled")
+    container_router = None
+
+try:
+    from app.api.v1.api_scanner import router as api_scanner_router
+except ImportError:
+    _log.warning("api_scanner module not found — API Security Scanner disabled")
+    api_scanner_router = None
+
 api_router = APIRouter()
 
 api_router.include_router(auth_router)
@@ -108,3 +162,21 @@ if ai_scanner_router:
     api_router.include_router(ai_scanner_router)
 if mcp_scanner_router:
     api_router.include_router(mcp_scanner_router)
+if js_scanner_router:
+    api_router.include_router(js_scanner_router)
+if secrets_router:
+    api_router.include_router(secrets_router)
+if cspm_router:
+    api_router.include_router(cspm_router)
+if exposure_router:
+    api_router.include_router(exposure_router)
+if email_security_router:
+    api_router.include_router(email_security_router)
+if iac_router:
+    api_router.include_router(iac_router)
+if supply_chain_router:
+    api_router.include_router(supply_chain_router)
+if container_router:
+    api_router.include_router(container_router)
+if api_scanner_router:
+    api_router.include_router(api_scanner_router)

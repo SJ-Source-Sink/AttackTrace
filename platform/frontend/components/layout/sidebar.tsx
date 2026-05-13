@@ -36,6 +36,14 @@ import {
   Bot,
   Link2,
   Target,
+  Key,
+  Package,
+  Mail,
+  Container,
+  FileCode,
+  Wifi,
+  ServerCrash,
+  ScanLine,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -184,6 +192,63 @@ const cloudItems: NavItem[] = [
     href: "/cloud",
     icon: Cloud,
   },
+  {
+    label: "CSPM Scanner",
+    href: "/cspm",
+    icon: ServerCrash,
+    badge: "New",
+  },
+];
+
+const securityScannerItems: NavItem[] = [
+  {
+    label: "Secret Scanner",
+    href: "/secrets",
+    icon: Key,
+    badge: "New",
+  },
+  {
+    label: "JS Analysis",
+    href: "/js-scanner",
+    icon: FileCode,
+    badge: "New",
+  },
+  {
+    label: "Exposed Files",
+    href: "/exposure",
+    icon: ScanLine,
+    badge: "New",
+  },
+  {
+    label: "Email Security",
+    href: "/email-security",
+    icon: Mail,
+    badge: "New",
+  },
+  {
+    label: "IaC Scanner",
+    href: "/iac",
+    icon: FileCode,
+    badge: "New",
+  },
+  {
+    label: "Supply Chain",
+    href: "/supply-chain",
+    icon: Package,
+    badge: "New",
+  },
+  {
+    label: "Container / K8s",
+    href: "/container",
+    icon: Container,
+    badge: "New",
+  },
+  {
+    label: "API Security",
+    href: "/api-scanner",
+    icon: Wifi,
+    badge: "New",
+  },
 ];
 
 const intelligenceItems: NavItem[] = [
@@ -289,6 +354,7 @@ export function Sidebar({ className }: SidebarProps) {
   const visibleMobileItems = filterItems(mobileItems);
   const visibleAttackSuiteItems = filterItems(attackSuiteItems);
   const visibleCloudItems = filterItems(cloudItems);
+  const visibleSecurityScannerItems = filterItems(securityScannerItems);
   const visibleIntelligenceItems = filterItems(intelligenceItems);
 
   return (
@@ -380,6 +446,21 @@ export function Sidebar({ className }: SidebarProps) {
             </div>
             <div className="space-y-0.5">
               {visibleCloudItems.map((item) => (
+                <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {visibleSecurityScannerItems.length > 0 && (
+          <div className="mb-4">
+            <div className="px-3 pb-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                Security Scanners
+              </p>
+            </div>
+            <div className="space-y-0.5">
+              {visibleSecurityScannerItems.map((item) => (
                 <NavLink key={item.href} item={item} isActive={isActive(item.href)} />
               ))}
             </div>
