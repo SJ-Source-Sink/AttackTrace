@@ -20,6 +20,11 @@ import {
   CheckCircle2,
   Clock,
   Database,
+  MessageSquare,
+  Radio,
+  Settings2,
+  Variable,
+  Bug,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -43,7 +48,9 @@ const API_BASE =
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type FindingType = "secret" | "dom_xss" | "source_map" | "graphql";
+type FindingType =
+  | "secret" | "dom_xss" | "dom_source" | "source_map" | "graphql"
+  | "prototype_pollution" | "postmessage" | "websocket" | "service_worker" | "env_leak";
 type Severity = "critical" | "high" | "medium" | "low" | "info";
 
 interface JsFinding {
@@ -54,6 +61,7 @@ interface JsFinding {
   match: string;
   line_number: number;
   recommendation: string;
+  context?: string;
 }
 
 interface JsEndpoint {
@@ -69,6 +77,8 @@ interface ScanSummary {
   dom_xss_sinks: number;
   source_maps_exposed: number;
   graphql_issues: number;
+  prototype_pollution: number;
+  env_leaks: number;
   duration_seconds: number;
 }
 
@@ -116,12 +126,34 @@ function SeverityBadge({ severity }: { severity: string }) {
 
 // ─── Finding type icon ────────────────────────────────────────────────────────
 
+const FINDING_TYPE_META: Record<string, { icon: React.ElementType; color: string; label: string }> = {
+  secret:             { icon: Key,          color: "text-red-400",     label: "Secret" },
+  dom_xss:            { icon: Zap,          color: "text-orange-400",  label: "DOM XSS Sink" },
+  dom_source:         { icon: AlertTriangle,color: "text-yellow-400",  label: "XSS Source" },
+  source_map:         { icon: FileCode2,    color: "text-purple-400",  label: "Source Map" },
+  graphql:            { icon: Database,     color: "text-pink-400",    label: "GraphQL" },
+  prototype_pollution:{ icon: Bug,          color: "text-red-300",     label: "Proto Pollution" },
+  postmessage:        { icon: MessageSquare,color: "text-cyan-400",    label: "PostMessage" },
+  websocket:          { icon: Radio,        color: "text-emerald-400", label: "WebSocket" },
+  service_worker:     { icon: Settings2,    color: "text-indigo-400",  label: "Service Worker" },
+  env_leak:           { icon: Variable,     color: "text-amber-400",   label: "Env Leak" },
+};
+
 function FindingTypeIcon({ type }: { type: string }) {
-  if (type === "secret") return <Key className="h-3.5 w-3.5 text-red-400" />;
-  if (type === "dom_xss") return <Zap className="h-3.5 w-3.5 text-orange-400" />;
-  if (type === "source_map") return <FileCode2 className="h-3.5 w-3.5 text-purple-400" />;
-  if (type === "graphql") return <Database className="h-3.5 w-3.5 text-pink-400" />;
-  return <ShieldAlert className="h-3.5 w-3.5 text-zinc-400" />;
+  const meta = FINDING_TYPE_META[type];
+  if (!meta) return <ShieldAlert className="h-3.5 w-3.5 text-zinc-400" />;
+  const Icon = meta.icon;
+  return <Icon className={cn("h-3.5 w-3.5 shrink-0", meta.color)} />;
+}
+
+function FindingTypeBadge({ type }: { type: string }) {
+  const meta = FINDING_TYPE_META[type];
+  if (!meta) return null;
+  return (
+    <span className={cn("text-[9px] font-semibold uppercase tracking-wider", meta.color)}>
+      {meta.label}
+    </span>
+  );
 }
 
 // ─── Finding card ─────────────────────────────────────────────────────────────
@@ -139,6 +171,7 @@ function FindingCard({ finding }: { finding: JsFinding }) {
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-semibold text-zinc-200">{finding.name}</span>
             <SeverityBadge severity={finding.severity} />
+            <FindingTypeBadge type={finding.type} />
           </div>
           <p className="text-[11px] text-zinc-500 mt-0.5 font-mono truncate">
             {finding.file_url}
@@ -154,13 +187,21 @@ function FindingCard({ finding }: { finding: JsFinding }) {
         )}
       </button>
       {open && (
-        <div className="border-t border-zinc-800 px-4 py-3 space-y-2">
+        <div className="border-t border-zinc-800 px-4 py-3 space-y-3">
           <div>
             <p className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">Match</p>
-            <code className="text-xs font-mono text-zinc-300 bg-zinc-800 px-2 py-1 rounded">
+            <code className="text-xs font-mono text-zinc-300 bg-zinc-800 px-2 py-1 rounded break-all">
               {finding.match}
             </code>
           </div>
+          {finding.context && (
+            <div>
+              <p className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">Code Context</p>
+              <pre className="text-[11px] font-mono text-zinc-400 bg-zinc-800/60 px-3 py-2 rounded overflow-x-auto whitespace-pre-wrap max-h-32">
+                {finding.context}
+              </pre>
+            </div>
+          )}
           <div>
             <p className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">Recommendation</p>
             <p className="text-xs text-zinc-400">{finding.recommendation}</p>
@@ -255,15 +296,17 @@ function EndpointsList({ endpoints }: { endpoints: JsEndpoint[] }) {
 
 function SummaryStrip({ summary }: { summary: ScanSummary }) {
   const stats = [
-    { label: "Secrets", value: summary.secrets_found, color: "text-red-400", Icon: Key },
-    { label: "Endpoints", value: summary.endpoints_found, color: "text-blue-400", Icon: Globe },
-    { label: "DOM XSS", value: summary.dom_xss_sinks, color: "text-orange-400", Icon: Zap },
-    { label: "Source Maps", value: summary.source_maps_exposed, color: "text-purple-400", Icon: FileCode2 },
-    { label: "GraphQL", value: summary.graphql_issues, color: "text-pink-400", Icon: Database },
-    { label: "JS Files", value: summary.js_files_scanned, color: "text-zinc-300", Icon: Layers },
+    { label: "Secrets",      value: summary.secrets_found,       color: "text-red-400",     Icon: Key },
+    { label: "Endpoints",    value: summary.endpoints_found,     color: "text-blue-400",    Icon: Globe },
+    { label: "DOM XSS",      value: summary.dom_xss_sinks,       color: "text-orange-400",  Icon: Zap },
+    { label: "Proto Pollut", value: summary.prototype_pollution ?? 0, color: "text-red-300", Icon: Bug },
+    { label: "Env Leaks",    value: summary.env_leaks ?? 0,      color: "text-amber-400",   Icon: Variable },
+    { label: "Source Maps",  value: summary.source_maps_exposed, color: "text-purple-400",  Icon: FileCode2 },
+    { label: "GraphQL",      value: summary.graphql_issues,      color: "text-pink-400",    Icon: Database },
+    { label: "JS Files",     value: summary.js_files_scanned,    color: "text-zinc-300",    Icon: Layers },
   ];
   return (
-    <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+    <div className="grid grid-cols-4 sm:grid-cols-8 gap-2">
       {stats.map(({ label, value, color, Icon }) => (
         <div
           key={label}
@@ -600,9 +643,14 @@ export default function JsScannerPage() {
   // ── Grouped findings ────────────────────────────────────────────────────────
 
   const secrets = findings.filter((f) => f.type === "secret");
-  const domXss = findings.filter((f) => f.type === "dom_xss");
+  const domXss = findings.filter((f) => f.type === "dom_xss" || f.type === "dom_source");
   const sourceMaps = findings.filter((f) => f.type === "source_map");
   const graphqlFindings = findings.filter((f) => f.type === "graphql");
+  const protoPollution = findings.filter((f) => f.type === "prototype_pollution");
+  const postmessageFindings = findings.filter((f) => f.type === "postmessage");
+  const websocketFindings = findings.filter((f) => f.type === "websocket");
+  const swFindings = findings.filter((f) => f.type === "service_worker");
+  const envLeaks = findings.filter((f) => f.type === "env_leak");
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
@@ -610,7 +658,7 @@ export default function JsScannerPage() {
     <div className="space-y-6">
       <PageHeader
         title="JavaScript Analyzer"
-        description="Discover API endpoints, secrets, DOM XSS sinks, and source maps in JavaScript bundles"
+        description="Discover endpoints, secrets, DOM XSS, prototype pollution, env leaks, postMessage issues, and more"
       />
 
       {/* Tab switcher */}
@@ -756,6 +804,8 @@ export default function JsScannerPage() {
                   <StatRow label="Secrets" value={secrets.length} color="text-red-400" />
                   <StatRow label="Endpoints" value={endpoints.length} color="text-blue-400" />
                   <StatRow label="DOM XSS" value={domXss.length} color="text-orange-400" />
+                  <StatRow label="Proto Pollution" value={protoPollution.length} color="text-red-300" />
+                  <StatRow label="Env Leaks" value={envLeaks.length} color="text-amber-400" />
                   <StatRow label="Source Maps" value={sourceMaps.length} color="text-purple-400" />
                   {summary && (
                     <div className="pt-1 border-t border-zinc-800">
@@ -838,6 +888,56 @@ export default function JsScannerPage() {
                 icon={<Database className="h-4 w-4 text-pink-400" />}
                 findings={graphqlFindings}
                 color="text-pink-400"
+              />
+            )}
+
+            {/* Prototype Pollution */}
+            {protoPollution.length > 0 && (
+              <FindingSection
+                title="Prototype Pollution"
+                icon={<Bug className="h-4 w-4 text-red-300" />}
+                findings={protoPollution}
+                color="text-red-300"
+              />
+            )}
+
+            {/* Environment Leaks */}
+            {envLeaks.length > 0 && (
+              <FindingSection
+                title="Environment Variable Leaks"
+                icon={<Variable className="h-4 w-4 text-amber-400" />}
+                findings={envLeaks}
+                color="text-amber-400"
+              />
+            )}
+
+            {/* PostMessage */}
+            {postmessageFindings.length > 0 && (
+              <FindingSection
+                title="PostMessage Security"
+                icon={<MessageSquare className="h-4 w-4 text-cyan-400" />}
+                findings={postmessageFindings}
+                color="text-cyan-400"
+              />
+            )}
+
+            {/* WebSocket */}
+            {websocketFindings.length > 0 && (
+              <FindingSection
+                title="WebSocket Security"
+                icon={<Radio className="h-4 w-4 text-emerald-400" />}
+                findings={websocketFindings}
+                color="text-emerald-400"
+              />
+            )}
+
+            {/* Service Worker */}
+            {swFindings.length > 0 && (
+              <FindingSection
+                title="Service Worker"
+                icon={<Settings2 className="h-4 w-4 text-indigo-400" />}
+                findings={swFindings}
+                color="text-indigo-400"
               />
             )}
 
