@@ -495,41 +495,66 @@ def _is_spa_fallback(response: httpx.Response, fallback_size: int) -> bool:
 
 # ── Login Manager ─────────────────────────────────────────────────────────────
 
-async def _perform_login(client: httpx.AsyncClient, cfg: LoginConfig,
-                         target: str) -> dict[str, str]:
-    """Returns auth headers to inject for authenticated requests."""
+async def _perform_login(
+    client: httpx.AsyncClient,
+    cfg: LoginConfig,
+    target: str,
+) -> dict:
+    """
+    Properly authenticate against the target and return session credentials.
+
+    Returns a dict with one of:
+      {"Authorization": "Bearer <token>"}              — JWT/bearer token
+      {"__cookies__": {name: value, ...},              — session cookies
+       "__cookie_header__": "name=val; name2=val2",
+       "__login_debug__": [...]}                       — debug trace
+      {}                                               — login failed
+
+    Form login flow:
+      1. GET the login URL (follow redirects to reach the real login page)
+      2. Parse ALL <form> elements — find the one with a password field
+      3. Resolve the form's action URL (relative → absolute)
+      4. Collect ALL hidden input fields (CSRF tokens, nonce, _method, etc.)
+      5. Override the username/password fields with user-supplied values
+      6. POST to the form action URL
+      7. Validate success: landed on a different URL or got new session cookies
+    """
+    debug: list[str] = []
+
     if not cfg.enabled:
         return {}
 
     if cfg.login_type == "bearer":
+        debug.append("Mode: bearer token")
         return {"Authorization": f"Bearer {cfg.bearer_token}"}
 
     if cfg.login_type == "basic":
+        debug.append("Mode: HTTP Basic Auth")
         creds = base64.b64encode(f"{cfg.username}:{cfg.password}".encode()).decode()
         return {"Authorization": f"Basic {creds}"}
 
     if cfg.login_type == "cookie":
+        debug.append("Mode: pre-supplied cookie string")
         return {"Cookie": cfg.cookie}
 
+    # ── REST JSON login ──────────────────────────────────────────────────────
     if cfg.login_type == "rest_json":
-        login_url = cfg.login_url or f"{target}/api/login"
+        login_url = cfg.login_url.strip() or f"{target}/api/login"
+        debug.append(f"Mode: REST JSON POST → {login_url}")
         try:
-            payload = {
-                cfg.username_field: cfg.username,
-                cfg.password_field: cfg.password,
-            }
+            body = {cfg.username_field: cfg.username, cfg.password_field: cfg.password}
+            debug.append(f"Fields: {list(body.keys())}")
             lr = await client.post(
-                login_url,
-                json=payload,
+                login_url, json=body,
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
-                timeout=10,
-                follow_redirects=True,
+                timeout=12, follow_redirects=True,
             )
+            debug.append(f"Response: HTTP {lr.status_code}")
             if lr.status_code < 400:
+                # 1. Dot-path traversal (e.g. "authentication.token")
                 try:
                     data = lr.json()
-                    # Navigate dot-path like "authentication.token"
-                    token = data
+                    token: object = data
                     for part in cfg.token_path.split("."):
                         if isinstance(token, dict):
                             token = token.get(part)
@@ -537,57 +562,236 @@ async def _perform_login(client: httpx.AsyncClient, cfg: LoginConfig,
                             token = None
                             break
                     if token and isinstance(token, str):
-                        return {"Authorization": f"Bearer {token}"}
-                    # Fallback: scan top-level keys
-                    for key in ["access_token", "token", "accessToken", "jwt", "id_token"]:
-                        if key in data and isinstance(data[key], str):
-                            return {"Authorization": f"Bearer {data[key]}"}
-                except Exception:
-                    pass
-        except httpx.HTTPError:
-            pass
-
-    if cfg.login_type == "form":
-        login_url = cfg.login_url or f"{target}/login"
-        try:
-            # First get CSRF token if present
-            r = await client.get(login_url, timeout=10)
-            csrf = ""
-            for name in ["csrf_token", "csrfmiddlewaretoken", "_csrf", "authenticity_token"]:
-                m = re.search(
-                    rf'<input[^>]*name=["\']?{re.escape(name)}["\']?[^>]*value=["\']([^"\']+)["\']',
-                    r.text, re.IGNORECASE)
-                if m:
-                    csrf = m.group(1)
-                    break
-
-            payload = {
-                cfg.username_field: cfg.username,
-                cfg.password_field: cfg.password,
-            }
-            if csrf:
-                payload["csrf_token"] = csrf
-                payload["csrfmiddlewaretoken"] = csrf
-
-            lr = await client.post(login_url, data=payload, timeout=10,
-                                   follow_redirects=True)
-
-            cookies = dict(lr.cookies)
+                        debug.append(f"Token found at path '{cfg.token_path}'")
+                        return {"Authorization": f"Bearer {token}", "__login_debug__": debug}
+                    # 2. Scan common token keys
+                    for key in ["access_token", "token", "accessToken", "jwt",
+                                "id_token", "auth_token", "idToken", "sessionToken"]:
+                        if isinstance(data, dict) and key in data and isinstance(data[key], str):
+                            debug.append(f"Token found in key '{key}'")
+                            return {"Authorization": f"Bearer {data[key]}", "__login_debug__": debug}
+                    # 3. Nested: data.data.token etc.
+                    if isinstance(data, dict):
+                        for nested_key in ["data", "result", "user", "auth"]:
+                            if nested_key in data and isinstance(data[nested_key], dict):
+                                inner = data[nested_key]
+                                for key in ["access_token", "token", "jwt", "id_token"]:
+                                    if key in inner and isinstance(inner[key], str):
+                                        debug.append(f"Token found at {nested_key}.{key}")
+                                        return {"Authorization": f"Bearer {inner[key]}", "__login_debug__": debug}
+                except Exception as ex:
+                    debug.append(f"JSON parse error: {ex}")
+            # 4. Session cookies from REST login (some APIs use cookies)
+            cookies = dict(client.cookies)
             if cookies:
-                return {"__cookies__": cookies}
+                debug.append(f"REST login returned cookies: {list(cookies.keys())}")
+                return {"__cookies__": cookies, "__cookie_header__": _cookies_to_header(cookies),
+                        "__login_debug__": debug}
+            debug.append(f"REST JSON login: no token or cookie in response (HTTP {lr.status_code})")
+        except httpx.HTTPError as ex:
+            debug.append(f"REST JSON login HTTP error: {ex}")
+        return {"__login_debug__": debug}
 
-            # Check for JWT in response JSON
-            try:
-                data = lr.json()
-                for key in ["access_token", "token", "accessToken", "jwt", "id_token"]:
-                    if key in data:
-                        return {"Authorization": f"Bearer {data[key]}"}
-            except Exception:
-                pass
-        except httpx.HTTPError:
+    # ── HTML Form login ──────────────────────────────────────────────────────
+    if cfg.login_type == "form":
+        login_url = cfg.login_url.strip() or f"{target}/login"
+        debug.append(f"Mode: HTML form POST")
+        debug.append(f"Login URL: {login_url}")
+
+        # Step 1: GET the login page (follow redirects — some sites /login → /auth/login)
+        try:
+            page_r = await client.get(login_url, timeout=12, follow_redirects=True)
+        except httpx.HTTPError as ex:
+            return {"__login_debug__": [f"Cannot GET login page: {ex}"]}
+
+        actual_login_url = str(page_r.url)
+        debug.append(f"Login page final URL: {actual_login_url}")
+        debug.append(f"Login page status: HTTP {page_r.status_code}")
+
+        # Step 2: Parse ALL <form> elements — find the one with a password field
+        html = page_r.text
+        form_action = actual_login_url
+        form_data: dict[str, str] = {}
+        form_found = False
+
+        # Extract each <form ...>...</form> block
+        form_blocks = list(re.finditer(
+            r'<form\b([^>]*)>(.*?)</form>',
+            html, re.DOTALL | re.IGNORECASE
+        ))
+        debug.append(f"Forms found on page: {len(form_blocks)}")
+
+        for form_match in form_blocks:
+            form_attrs_str = form_match.group(1)
+            form_body = form_match.group(2)
+
+            # Only process forms with a password-type input
+            has_password = re.search(
+                r'<input\b[^>]*type=["\']password["\']', form_body, re.IGNORECASE
+            )
+            if not has_password:
+                continue
+
+            form_found = True
+            debug.append("Found login form (has password field)")
+
+            # Resolve form action
+            action_m = re.search(r'\baction=["\']([^"\']+)["\']', form_attrs_str, re.IGNORECASE)
+            if action_m:
+                raw_action = action_m.group(1).strip()
+                from urllib.parse import urljoin
+                form_action = urljoin(actual_login_url, raw_action)
+            else:
+                form_action = actual_login_url
+            debug.append(f"Form action URL: {form_action}")
+
+            # Step 3: Collect ALL input fields from this form
+            for input_m in re.finditer(r'<input\b([^>]*)>', form_body, re.IGNORECASE):
+                attrs = input_m.group(1)
+
+                # Extract name (both quoted and unquoted)
+                name_m = re.search(r'\bname=["\']?([^"\'>\s]+)["\']?', attrs, re.IGNORECASE)
+                if not name_m:
+                    continue
+                field_name = name_m.group(1)
+
+                # Extract value (handle both quoted forms and empty)
+                value_m = re.search(r'\bvalue=["\']([^"\']*)["\']', attrs, re.IGNORECASE)
+                field_value = value_m.group(1) if value_m else ""
+
+                # Extract type
+                type_m = re.search(r'\btype=["\']?([^"\'>\s]+)["\']?', attrs, re.IGNORECASE)
+                field_type = type_m.group(1).lower() if type_m else "text"
+
+                if field_type == "submit":
+                    continue  # skip submit buttons
+
+                # Identify if this is the username/password field
+                field_lower = field_name.lower()
+                is_user_field = (
+                    field_name == cfg.username_field
+                    or field_lower in ("email", "login", "user", "username",
+                                       "user_login", "userlogin", "userid", "user_id",
+                                       "email_address", "emailaddress")
+                    or (field_type in ("email", "text") and
+                        any(kw in field_lower for kw in ["user", "email", "login", "name"]))
+                )
+                is_pass_field = (
+                    field_name == cfg.password_field
+                    or field_lower in ("password", "pass", "passwd", "secret", "pwd")
+                    or field_type == "password"
+                )
+
+                if is_user_field:
+                    form_data[field_name] = cfg.username
+                    debug.append(f"Username → field '{field_name}' = '{cfg.username}'")
+                elif is_pass_field:
+                    form_data[field_name] = cfg.password
+                    debug.append(f"Password → field '{field_name}' (hidden)")
+                else:
+                    # Include all other fields (hidden CSRF tokens, next URL, etc.)
+                    form_data[field_name] = field_value
+                    if field_value:
+                        debug.append(f"Hidden field: '{field_name}' = '{field_value[:40]}'")
+
+            # Also collect <textarea> and <select> elements as hidden data
+            for sel_m in re.finditer(r'<select\b([^>]*)>.*?</select>', form_body,
+                                     re.DOTALL | re.IGNORECASE):
+                name_m = re.search(r'\bname=["\']?([^"\'>\s]+)', sel_m.group(1))
+                if name_m and name_m.group(1) not in form_data:
+                    form_data[name_m.group(1)] = ""
+
+            break  # Use first form with password field
+
+        if not form_found:
+            debug.append("WARNING: No form with password field found on login page. "
+                         "Attempting direct POST with supplied field names.")
+            form_data = {cfg.username_field: cfg.username, cfg.password_field: cfg.password}
+
+        # Always ensure username and password are set (may override detected fields)
+        form_data[cfg.username_field] = cfg.username
+        form_data[cfg.password_field] = cfg.password
+
+        debug.append(f"POST to: {form_action}")
+        debug.append(f"Form fields: {[k for k in form_data if k not in (cfg.password_field, 'password', 'pass', 'passwd')]}")
+
+        # Step 4: POST the login form
+        try:
+            lr = await client.post(
+                form_action, data=form_data, timeout=12, follow_redirects=True,
+            )
+        except httpx.HTTPError as ex:
+            return {"__login_debug__": debug + [f"Login POST failed: {ex}"]}
+
+        post_final_url = str(lr.url)
+        debug.append(f"POST response: HTTP {lr.status_code}")
+        debug.append(f"Final URL after POST: {post_final_url}")
+
+        # Step 5: Check for success
+
+        # CRITICAL FIX: use client.cookies (accumulates across ALL redirects),
+        # NOT lr.cookies (only the last response's Set-Cookie headers).
+        all_cookies = dict(client.cookies)
+        debug.append(f"Session cookies after login: {list(all_cookies.keys()) or 'none'}")
+
+        # Success signal 1: we have session cookies
+        if all_cookies:
+            # Verify we're not still on the login page (login failed silently)
+            still_on_login = (
+                post_final_url.rstrip("/") == login_url.rstrip("/")
+                or post_final_url.rstrip("/") == actual_login_url.rstrip("/")
+            )
+            if still_on_login:
+                # Could be a login error page — check for error indicators
+                error_signals = re.search(
+                    r'(invalid|incorrect|wrong|failed|error|unauthorized|credentials)',
+                    lr.text[:3000], re.IGNORECASE
+                )
+                if error_signals:
+                    debug.append(f"WARNING: Redirected back to login page with error signal "
+                                 f"'{error_signals.group(1)}'. Login may have failed.")
+                    return {"__login_debug__": debug}
+            debug.append("Login SUCCESS — session cookies captured")
+            return {
+                "__cookies__": all_cookies,
+                "__cookie_header__": _cookies_to_header(all_cookies),
+                "__login_debug__": debug,
+            }
+
+        # Success signal 2: JWT / token in response body
+        try:
+            data = lr.json()
+            for key in ["access_token", "token", "accessToken", "jwt", "id_token", "auth_token"]:
+                if key in data and isinstance(data[key], str):
+                    debug.append(f"Login SUCCESS — token in JSON key '{key}'")
+                    return {"Authorization": f"Bearer {data[key]}", "__login_debug__": debug}
+        except Exception:
             pass
+
+        # Success signal 3: redirected away from login page (no cookies, but session in server)
+        if (post_final_url.rstrip("/") != login_url.rstrip("/")
+                and post_final_url.rstrip("/") != actual_login_url.rstrip("/")):
+            debug.append(f"Redirected to {post_final_url} — server may use server-side session "
+                         f"but sent no Set-Cookie. Cookie jar may already be populated by httpx.")
+            # One more attempt: try reading cookies now (some servers set them on redirect)
+            all_cookies = dict(client.cookies)
+            if all_cookies:
+                debug.append(f"Cookies now present: {list(all_cookies.keys())}")
+                return {
+                    "__cookies__": all_cookies,
+                    "__cookie_header__": _cookies_to_header(all_cookies),
+                    "__login_debug__": debug,
+                }
+
+        debug.append("Login FAILED — no session cookies, no token, still on login page")
+        return {"__login_debug__": debug}
 
     return {}
+
+
+def _cookies_to_header(cookies: dict[str, str]) -> str:
+    """Convert cookie dict to Cookie header string."""
+    return "; ".join(f"{k}={v}" for k, v in cookies.items())
 
 
 # ── AI Strategy Planner ───────────────────────────────────────────────────────
@@ -4474,24 +4678,35 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, ai_config:
         if req.login.enabled:
             yield _sse("progress", {"message": "🔐 Performing login...", "module": "login"})
             try:
-                auth_headers = await _perform_login(client, req.login, req.target)
+                auth_result = await _perform_login(client, req.login, req.target)
+
+                # Emit debug trace first so user can see what the parser found
+                for dbg_msg in auth_result.pop("__login_debug__", []):
+                    yield _sse("progress", {"message": f"  [login] {dbg_msg}", "module": "login"})
+
+                # Strip __cookie_header__ — we use client.cookies directly
+                auth_result.pop("__cookie_header__", None)
+
+                auth_headers = auth_result
+
                 if "__cookies__" in auth_headers:
                     for ck_name, ck_val in auth_headers.pop("__cookies__").items():
                         client.cookies.set(ck_name, ck_val)
                     if auth_headers:
                         client.headers.update(auth_headers)
                     yield _sse("progress", {
-                        "message": "✅ Login successful. Auth type: cookie",
+                        "message": "✅ Login successful — session cookies applied",
                         "module": "login"
                     })
                 elif auth_headers:
                     client.headers.update(auth_headers)
+                    auth_type = next(iter(auth_headers), "unknown")
                     yield _sse("progress", {
-                        "message": f"✅ Login successful. Auth type: {list(auth_headers.keys())[0]}",
+                        "message": f"✅ Login successful — auth type: {auth_type}",
                         "module": "login"
                     })
                 else:
-                    yield _sse("progress", {"message": "⚠️ Login attempted but no session captured.", "module": "login"})
+                    yield _sse("progress", {"message": "⚠️ Login attempted but no session captured — scan will run unauthenticated", "module": "login"})
             except Exception as e:
                 yield _sse("progress", {"message": f"Login error: {e}", "module": "login"})
 
@@ -4515,10 +4730,13 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, ai_config:
                         token_path=req.account2.token_path,
                     )
                     acc2_auth = await _perform_login(client, acc2_cfg, req.target)
+                    for dbg_msg in acc2_auth.pop("__login_debug__", []):
+                        yield _sse("progress", {"message": f"  [acct2] {dbg_msg}", "module": "login"})
+                    acc2_auth.pop("__cookie_header__", None)
                     if acc2_auth:
                         acc2_headers.update(acc2_auth)
                         yield _sse("progress", {
-                            "message": f"✅ Account 2 login successful (REST JSON).",
+                            "message": "✅ Account 2 login successful (REST JSON).",
                             "module": "login"
                         })
                     else:
@@ -4535,6 +4753,9 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, ai_config:
                         login_type="form",
                     )
                     acc2_auth = await _perform_login(client, acc2_cfg, req.target)
+                    for dbg_msg in acc2_auth.pop("__login_debug__", []):
+                        yield _sse("progress", {"message": f"  [acct2] {dbg_msg}", "module": "login"})
+                    acc2_auth.pop("__cookie_header__", None)
                     if acc2_auth:
                         acc2_headers.update(acc2_auth)
                 except Exception:
@@ -4769,13 +4990,15 @@ async def test_auth_connection(
             result["tech_stack"] = cr.tech_stack
             # Test auth
             if payload.login.enabled:
-                auth_headers = await _perform_login(client, payload.login, payload.target)
+                auth_result = await _perform_login(client, payload.login, payload.target)
+                auth_result.pop("__login_debug__", None)
+                auth_result.pop("__cookie_header__", None)
                 cookies_to_set = {}
-                if "__cookies__" in auth_headers:
-                    cookies_to_set = auth_headers.pop("__cookies__")
-                if auth_headers or cookies_to_set:
+                if "__cookies__" in auth_result:
+                    cookies_to_set = auth_result.pop("__cookies__")
+                if auth_result or cookies_to_set:
                     result["auth_success"] = True
-                    result["auth_type"] = list(auth_headers.keys())[0] if auth_headers else "cookie"
+                    result["auth_type"] = list(auth_result.keys())[0] if auth_result else "cookie"
                 else:
                     result["auth_success"] = False
                     result["error"] = "Login attempt returned no auth credentials"
