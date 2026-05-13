@@ -196,7 +196,6 @@ const cloudItems: NavItem[] = [
     label: "CSPM Scanner",
     href: "/cspm",
     icon: ServerCrash,
-    badge: "New",
   },
 ];
 
@@ -205,49 +204,41 @@ const securityScannerItems: NavItem[] = [
     label: "Secret Scanner",
     href: "/secrets",
     icon: Key,
-    badge: "New",
   },
   {
     label: "JS Analysis",
     href: "/js-scanner",
     icon: FileCode,
-    badge: "New",
   },
   {
     label: "Exposed Files",
     href: "/exposure",
     icon: ScanLine,
-    badge: "New",
   },
   {
     label: "Email Security",
     href: "/email-security",
     icon: Mail,
-    badge: "New",
   },
   {
     label: "IaC Scanner",
     href: "/iac",
     icon: FileCode,
-    badge: "New",
   },
   {
     label: "Supply Chain",
     href: "/supply-chain",
     icon: Package,
-    badge: "New",
   },
   {
     label: "Container / K8s",
     href: "/container",
     icon: Container,
-    badge: "New",
   },
   {
     label: "API Security",
     href: "/api-scanner",
     icon: Wifi,
-    badge: "New",
   },
 ];
 
