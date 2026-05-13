@@ -28,4 +28,6 @@ weasyprint>=62.0
 # Scanner-specific deps
 jsbeautifier>=1.15.1   # JS Analysis scanner — beautifies minified JS for accurate pattern matching
 boto3>=1.34.0          # CSPM scanner — AWS API access
-checkov>=3.2.0         # IaC scanner — static analysis for Terraform/CloudFormation/K8s
+# NOTE: checkov is intentionally NOT here — it has destructive transitive deps
+# (downgrades urllib3 2.x→1.x which breaks httpx, and networkx 3.x→2.x).
+# checkov is installed as a standalone CLI tool via install-tools.sh and the Dockerfile.
