@@ -469,12 +469,34 @@ async def export_findings(
     if fmt == "csv":
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["id", "title", "severity", "status", "affected_asset", "cvss_score", "created_at"])
+        writer.writerow([
+            "id", "title", "severity", "status", "affected_asset", "cvss_score",
+            "cve", "kev_status", "epss_score", "risk_score",
+            "compliance_tags", "sla_deadline",
+            "ai_severity", "ai_confidence", "ai_reasoning",
+            "false_positive", "suppressed", "ticket_ref", "created_at",
+        ])
         for f in findings:
             writer.writerow([
-                str(f.id), f.title, f.severity.value, f.status.value,
-                f.affected_asset or "", f.cvss_score or "",
-                f.created_at.isoformat() if f.created_at else ""
+                str(f.id),
+                f.title,
+                f.severity.value,
+                f.status.value,
+                f.affected_asset or "",
+                f.cvss_score or "",
+                "|".join(f.cve or []),
+                "yes" if getattr(f, "kev_status", False) else "no",
+                getattr(f, "epss_score", "") or "",
+                getattr(f, "risk_score", "") or "",
+                "|".join(getattr(f, "compliance_tags", None) or []),
+                f.sla_deadline.isoformat() if getattr(f, "sla_deadline", None) else "",
+                f.ai_severity.value if getattr(f, "ai_severity", None) else "",
+                f.ai_confidence or "" if getattr(f, "ai_confidence", None) else "",
+                (f.ai_reasoning or "").replace("\n", " ") if getattr(f, "ai_reasoning", None) else "",
+                "yes" if f.false_positive else "no",
+                "yes" if f.suppressed else "no",
+                f.ticket_ref or "",
+                f.created_at.isoformat() if f.created_at else "",
             ])
         output.seek(0)
         return StreamingResponse(
@@ -552,7 +574,27 @@ async def bulk_update_status(
         .values(status=target_status, updated_at=datetime.now(timezone.utc))
     )
     result = await db.execute(stmt)
-    return {"updated": result.rowcount}
+    updated_count = result.rowcount
+
+    # Write a single bulk-action audit log entry listing all affected finding IDs
+    if updated_count > 0:
+        log = AuditLog(
+            org_id=org_id,
+            user_id=current_user.id,
+            action="finding.bulk_status_changed",
+            resource_type="finding_bulk",
+            resource_id=f"{updated_count}_findings",
+            before_state=None,
+            after_state={
+                "new_status": payload.status,
+                "finding_ids": [str(u) for u in uuids],
+                "count": updated_count,
+            },
+            ip_address=_get_client_ip(request),
+        )
+        db.add(log)
+
+    return {"updated": updated_count}
 
 
 @router.get(
@@ -811,6 +853,96 @@ async def list_comments(
     }
 
 
+
+
+@router.get(
+    "/sla/compliance",
+    summary="Get org-level SLA compliance metrics",
+    description=(
+        "Returns how many findings per severity were remediated within SLA, "
+        "breached SLA, or are still pending. Provides org-level health metrics "
+        "for executive reporting."
+    ),
+)
+async def sla_compliance(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+    scan_job_id: Optional[str] = None,
+) -> dict:
+    from sqlalchemy import case as _case
+
+    now = datetime.now(timezone.utc)
+
+    base_q = select(
+        Finding.severity,
+        Finding.status,
+        Finding.sla_deadline,
+    ).where(
+        Finding.org_id == org_id,
+        Finding.false_positive == False,
+        Finding.suppressed == False,
+    )
+
+    if scan_job_id:
+        try:
+            base_q = base_q.where(Finding.scan_job_id == UUID(scan_job_id))
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": {"code": "INVALID_UUID", "message": "Invalid scan_job_id"}},
+            )
+
+    result = await db.execute(base_q)
+    rows = result.all()
+
+    remediated_statuses = {FindingStatus.REMEDIATED}
+    active_statuses = {FindingStatus.OPEN, FindingStatus.IN_PROGRESS}
+
+    severities = ["critical", "high", "medium", "low", "info"]
+    compliance: dict = {
+        sev: {"within_sla": 0, "breached_sla": 0, "overdue": 0, "total": 0}
+        for sev in severities
+    }
+    totals = {"within_sla": 0, "breached_sla": 0, "overdue": 0, "total": 0}
+
+    for row in rows:
+        sev_key = row.severity.value
+        bucket = compliance[sev_key]
+        bucket["total"] += 1
+        totals["total"] += 1
+
+        if row.status in remediated_statuses:
+            # Remediated: was it within the SLA window?
+            if row.sla_deadline is None or now <= row.sla_deadline:
+                bucket["within_sla"] += 1
+                totals["within_sla"] += 1
+            else:
+                bucket["breached_sla"] += 1
+                totals["breached_sla"] += 1
+        elif row.status in active_statuses:
+            if row.sla_deadline and now > row.sla_deadline:
+                bucket["overdue"] += 1
+                totals["overdue"] += 1
+
+    # Compute compliance percentage per severity
+    for sev_key, bucket in compliance.items():
+        denominator = bucket["within_sla"] + bucket["breached_sla"]
+        bucket["compliance_pct"] = (
+            round(bucket["within_sla"] / denominator * 100, 1) if denominator > 0 else None
+        )
+
+    overall_denominator = totals["within_sla"] + totals["breached_sla"]
+    overall_pct = (
+        round(totals["within_sla"] / overall_denominator * 100, 1)
+        if overall_denominator > 0 else None
+    )
+
+    return {
+        "overall": {**totals, "compliance_pct": overall_pct},
+        "by_severity": compliance,
+        "as_of": now.isoformat(),
+    }
 
 
 # --- Helpers ---

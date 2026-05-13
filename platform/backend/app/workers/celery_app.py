@@ -17,7 +17,12 @@ celery_app = Celery(
     "attacktrace_platform",
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND,
-    include=["app.workers.scan_worker", "app.workers.schedule_worker", "app.workers.mobile_worker"],
+    include=[
+        "app.workers.scan_worker",
+        "app.workers.schedule_worker",
+        "app.workers.mobile_worker",
+        "app.workers.maintenance_worker",
+    ],
 )
 
 celery_app.conf.update(
@@ -39,6 +44,7 @@ celery_app.conf.update(
         "app.workers.scan_worker.triage_scan_findings": {"queue": "ai"},
         "app.workers.schedule_worker.check_scheduled_scans": {"queue": "default"},
         "app.workers.mobile_worker.run_mobile_scan": {"queue": "scans"},
+        "app.workers.maintenance_worker.expire_stale_suppressions": {"queue": "default"},
     },
     task_default_queue="default",
     broker_connection_retry_on_startup=True,
@@ -65,6 +71,12 @@ celery_app.conf.update(
         "check-scheduled-scans": {
             "task": "app.workers.schedule_worker.check_scheduled_scans",
             "schedule": 60.0,  # every 60 seconds
+        },
+        "expire-stale-suppressions-hourly": {
+            # Clear suppressed=True on findings whose suppressed_until has passed.
+            # Runs hourly; low urgency (findings are suppressed at worst 1h too long).
+            "task": "app.workers.maintenance_worker.expire_stale_suppressions",
+            "schedule": 3600.0,  # every hour
         },
     },
 )

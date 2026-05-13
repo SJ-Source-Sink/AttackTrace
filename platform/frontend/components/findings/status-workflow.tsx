@@ -192,7 +192,11 @@ export function StatusWorkflow({ finding }: StatusWorkflowProps) {
             </Button>
             <Button
               onClick={handleAcceptRisk}
-              disabled={!acceptRiskData.reason || !acceptRiskData.approver}
+              disabled={
+                !acceptRiskData.reason?.trim() ||
+                acceptRiskData.reason.trim().length < 10 ||
+                !acceptRiskData.approver?.trim()
+              }
               className="bg-yellow-600 hover:bg-yellow-700"
             >
               Accept Risk
