@@ -337,14 +337,14 @@ if [ -z "${MSRA_DIR:-}" ]; then
   done
 fi
 if [ -n "${MSRA_DIR:-}" ] && [ -f "$MSRA_DIR/server.py" ]; then
-  # Install MSRA dependencies if requirements.txt present
+  # Install MSRA dependencies into the venv
   if [ -f "$MSRA_DIR/requirements.txt" ]; then
     info "Installing MSRA dependencies..."
-    pip3 install -q -r "$MSRA_DIR/requirements.txt" 2>/dev/null || true
+    "$PIP" install -q -r "$MSRA_DIR/requirements.txt" 2>/dev/null || true
   fi
   info "Starting MSRA mobile scanner sidecar..."
   cd "$MSRA_DIR"
-  python3 server.py > "$LOGS_DIR/msra.log" 2>&1 &
+  MSRA_DB="$MSRA_DIR/msra.db" "$PY" server.py > "$LOGS_DIR/msra.log" 2>&1 &
   echo $! > "$PIDS_DIR/msra.pid"
   ok "MSRA started (pid $(cat "$PIDS_DIR/msra.pid")) → logs/msra.log"
   cd "$REPO_ROOT"

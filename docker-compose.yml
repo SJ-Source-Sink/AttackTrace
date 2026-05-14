@@ -26,8 +26,6 @@ volumes:
     driver: local
   msra-data:
     driver: local
-  msra-src:
-    driver: local
   # Persist nuclei-templates between container restarts (~500MB, slow to re-download)
   nuclei-templates:
     driver: local
@@ -202,26 +200,23 @@ services:
     image: python:3.11-slim
     restart: unless-stopped
     working_dir: /msra
-    # Clone MSRA on first start, install deps, then launch the Flask server
+    # Use bundled MSRA from tools/msra — no external clone needed
     command: >
       bash -c "
-        if [ ! -f server.py ]; then
-          apt-get update -qq && apt-get install -y -qq git &&
-          git clone --depth=1 https://github.com/BaymaxPop23/MSRA.git . ;
-        fi &&
         pip install -q -r requirements.txt &&
         python server.py
       "
     environment:
       FLASK_ENV: production
       PORT: "5001"
+      MSRA_DB: /msra/data/msra.db
       # Pass through Anthropic key for MSRA AI triage if configured
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
     ports:
       - "5001:5001"
     volumes:
+      - ./tools/msra:/msra:ro
       - msra-data:/msra/data
-      - msra-src:/msra
     networks:
       - attacktrace-network
     healthcheck:
@@ -229,7 +224,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 60s
+      start_period: 30s
 
   # ─── Celery Monitoring ───────────────────────────────────────────────────────
 
