@@ -83,3 +83,10 @@ tsconfig.tsbuildinfo
 
 # Generated reports
 *_report.html
+tools/msra/msra/__pycache__/
+tools/msra/msra.db
+tools/msra/msra.db-shm
+tools/msra/msra.db-wal
+tools/msra/**/__pycache__/
+tools/msra/**/*.pyc
+tools/msra/data/

@@ -203,6 +203,8 @@ services:
     # Use bundled MSRA from tools/msra — no external clone needed
     command: >
       bash -c "
+        apt-get update -qq &&
+        apt-get install -y -qq --no-install-recommends libpango-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 libffi-dev libjpeg-dev libpng-dev curl &&
         pip install -q -r requirements.txt &&
         python server.py
       "

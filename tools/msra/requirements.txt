@@ -1,2 +1,29 @@
+# MSRA - Requirements
+#
+# Core dependencies: None (stdlib only for scanner)
+# Web server: Flask
 flask>=3.0.0
-reportlab>=4.0.0
+
+# External tools required:
+#   - jadx: APK decompilation (https://github.com/skylot/jadx)
+#   - adb: Android Debug Bridge (Android SDK)
+
+# ── PDF export (Feature 8) ────────────────────────────────────────────────
+# Requires system libraries: libpango, libcairo, libgdk-pixbuf
+# macOS:  brew install pango cairo gdk-pixbuf
+# Ubuntu: apt install libpango-1.0-0 libcairo2 libgdk-pixbuf-2.0-0
+weasyprint>=60.0
+
+# ── Semgrep (Feature 4) ───────────────────────────────────────────────────
+# Install separately for enhanced detection (AST-aware Java/Kotlin rules)
+# pip install semgrep
+# or: brew install semgrep
+# Semgrep is optional — MSRA falls back silently if not installed.
+# Disable: python server.py --no-semgrep
+
+# ── Optional: enhanced dynamic analysis ──────────────────────────────────
+# uiautomator2>=3.0.0   # UI automation (recommended)
+# frida-tools>=12.0.0   # Runtime instrumentation (requires frida-server on device)
+# mitmproxy>=10.0.0     # Traffic interception and analysis
+# To install all optional dynamic analysis dependencies:
+# pip install uiautomator2 frida-tools mitmproxy

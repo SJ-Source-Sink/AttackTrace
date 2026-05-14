@@ -337,6 +337,12 @@ if [ -z "${MSRA_DIR:-}" ]; then
   done
 fi
 if [ -n "${MSRA_DIR:-}" ] && [ -f "$MSRA_DIR/server.py" ]; then
+  # Install system libraries for weasyprint (PDF export) on Linux
+  if [[ "$(uname -s)" == "Linux" ]] && command -v apt-get >/dev/null 2>&1; then
+    info "Installing MSRA system dependencies (weasyprint)..."
+    sudo apt-get install -y -qq --no-install-recommends \
+      libpango-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 2>/dev/null || true
+  fi
   # Install MSRA dependencies into the venv
   if [ -f "$MSRA_DIR/requirements.txt" ]; then
     info "Installing MSRA dependencies..."
