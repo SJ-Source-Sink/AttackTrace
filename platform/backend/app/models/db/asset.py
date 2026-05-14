@@ -47,6 +47,11 @@ class Asset(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         UniqueConstraint("org_id", "value", "asset_type", name="uq_asset_org_value_type"),
         Index("idx_asset_org_value", "org_id", "value"),
         Index("idx_asset_org_type", "org_id", "asset_type"),
+        # Partial index for per-scan asset lookups (created by enterprise_hardening_001)
+        Index(
+            "idx_asset_org_scan", "org_id", "scan_job_id",
+            postgresql_where="scan_job_id IS NOT NULL",
+        ),
     )
 
     org_id: Mapped[UUID] = mapped_column(

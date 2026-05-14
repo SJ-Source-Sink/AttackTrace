@@ -56,6 +56,20 @@ class Finding(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Index("idx_finding_org_severity", "org_id", "severity"),
         # org_id + status: open/in-progress filter
         Index("idx_finding_org_status", "org_id", "status"),
+        # assignment index (created by add_assigned_to_findings migration)
+        Index("idx_finding_assigned_to", "assigned_to"),
+        # unique constraint on (org_id, dedup_hash) for atomic deduplication
+        # (created by enterprise_hardening_001 as a partial unique index)
+        Index(
+            "uq_finding_org_dedup_hash", "org_id", "dedup_hash",
+            unique=True,
+            postgresql_where="dedup_hash IS NOT NULL",
+        ),
+        # partial index: open critical/high findings for dashboard KPI queries
+        Index(
+            "idx_finding_org_open_critical_high", "org_id", "created_at",
+            postgresql_where="status = 'OPEN' AND severity IN ('CRITICAL', 'HIGH')",
+        ),
     )
 
     org_id: Mapped[UUID] = mapped_column(

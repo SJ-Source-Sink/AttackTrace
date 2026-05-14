@@ -13,6 +13,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -47,6 +48,12 @@ class ScanJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """
 
     __tablename__ = "scan_jobs"
+
+    __table_args__ = (
+        # Composite index for status-filtered org scan list queries
+        # (created by enterprise_hardening_001 migration)
+        Index("idx_scan_org_status_created", "org_id", "status", "created_at"),
+    )
 
     org_id: Mapped[UUID] = mapped_column(
         PGUUID(as_uuid=True),
@@ -109,6 +116,10 @@ class ScanJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     # Celery task ID for cancellation
     celery_task_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    # Optimistic locking — incremented by the worker on each state transition
+    # (added by enterprise_hardening_001 migration)
+    row_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
 
     # Relationships — lazy="raise" prevents accidental sync lazy loads in async context.
     # passive_deletes=True tells SQLAlchemy to rely on the DB-level ondelete="CASCADE"

@@ -35,12 +35,14 @@ if config.config_file_name is not None:
 from app.models.db.base import Base  # noqa: F401 — registers Base.metadata
 
 # Individual model modules — import so their Table objects register on Base.metadata
-from app.models.db import asset   # noqa: F401
-from app.models.db import audit   # noqa: F401
-from app.models.db import finding # noqa: F401
-from app.models.db import org     # noqa: F401
-from app.models.db import scan    # noqa: F401
-from app.models.db import user    # noqa: F401
+from app.models.db import asset            # noqa: F401
+from app.models.db import audit            # noqa: F401
+from app.models.db import finding          # noqa: F401
+from app.models.db import mobile           # noqa: F401
+from app.models.db import org              # noqa: F401
+from app.models.db import scan             # noqa: F401
+from app.models.db import suppression_rule # noqa: F401
+from app.models.db import user             # noqa: F401
 
 # MetaData object used by Alembic for autogenerate comparisons
 target_metadata = Base.metadata
