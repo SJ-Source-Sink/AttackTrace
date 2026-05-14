@@ -12,6 +12,11 @@ Changes:
 from alembic import op
 import sqlalchemy as sa
 
+revision = "ai_gateway_config_001"
+down_revision = "enterprise_hardening_001"
+branch_labels = None
+depends_on = None
+
 
 def _col_exists(conn, table: str, col: str) -> bool:
     result = conn.execute(
