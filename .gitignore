@@ -89,4 +89,6 @@ tools/msra/msra.db-shm
 tools/msra/msra.db-wal
 tools/msra/**/__pycache__/
 tools/msra/**/*.pyc
-tools/msra/data/
+tools/msra/data/custom/
+tools/msra/data/crawled/
+tools/msra/data/community/
