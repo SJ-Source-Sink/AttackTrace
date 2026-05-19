@@ -116,8 +116,8 @@ header "Detecting changes"
 BACKEND_CHANGED=false
 FRONTEND_CHANGED=false
 MIGRATIONS_EXIST=false
-
 TOOLS_CHANGED=false
+MSRA_CHANGED=false
 
 if [ "$OLD_COMMIT" != "$NEW_COMMIT" ]; then
   CHANGED=$(git diff --name-only "${OLD_COMMIT}" "${NEW_COMMIT}" 2>/dev/null || echo "")
@@ -141,15 +141,21 @@ if [ "$OLD_COMMIT" != "$NEW_COMMIT" ]; then
     TOOLS_CHANGED=true
     info "Tool installer changed — will reinstall binary tools"
   fi
+
+  if echo "$CHANGED" | grep -qE '^tools/msra/'; then
+    MSRA_CHANGED=true
+    info "MSRA source changed"
+  fi
 else
   # Force rebuild everything when already up to date (manual re-apply)
   warn "No new commits — forcing full update."
   BACKEND_CHANGED=true
   FRONTEND_CHANGED=true
   TOOLS_CHANGED=true
+  MSRA_CHANGED=true
 fi
 
-if [ "$BACKEND_CHANGED" = false ] && [ "$FRONTEND_CHANGED" = false ]; then
+if [ "$BACKEND_CHANGED" = false ] && [ "$FRONTEND_CHANGED" = false ] && [ "$MSRA_CHANGED" = false ]; then
   ok "No service rebuilds needed."
 fi
 
@@ -411,6 +417,41 @@ if [ "$FRONTEND_CHANGED" = true ]; then
     > "$LOGS_DIR/frontend.log" 2>&1 &
   echo $! > "$PIDS_DIR/frontend.pid"
   ok "Frontend restarted (pid $(cat "$PIDS_DIR/frontend.pid"))"
+fi
+
+# ── MSRA — always ensure it is running; restart if source changed ─────────────
+MSRA_DIR=""
+for candidate in "$REPO_ROOT/tools/msra" "$REPO_ROOT/../MSRA" "$HOME/MSRA" "/opt/msra" "/opt/MSRA"; do
+  [ -f "$candidate/server.py" ] && { MSRA_DIR="$candidate"; break; }
+done
+
+if [ -n "$MSRA_DIR" ]; then
+  # Check if already running and healthy
+  MSRA_RUNNING=false
+  if [ -f "$PIDS_DIR/msra.pid" ] && kill -0 "$(cat "$PIDS_DIR/msra.pid")" 2>/dev/null; then
+    if curl -sf http://localhost:5001/api/dashboard/stats >/dev/null 2>&1; then
+      MSRA_RUNNING=true
+    fi
+  fi
+
+  if [ "$MSRA_CHANGED" = true ] || [ "$MSRA_RUNNING" = false ]; then
+    if [ "$MSRA_RUNNING" = false ]; then
+      info "MSRA not running — starting it..."
+    else
+      info "Restarting MSRA (source changed)..."
+    fi
+    restart_service msra 5001
+    "$PIP" install -q -r "$MSRA_DIR/requirements.txt" 2>/dev/null || true
+    cd "$MSRA_DIR"
+    MSRA_DB="$MSRA_DIR/msra.db" "$PY" server.py > "$LOGS_DIR/msra.log" 2>&1 &
+    echo $! > "$PIDS_DIR/msra.pid"
+    ok "MSRA started (pid $(cat "$PIDS_DIR/msra.pid")) → logs/msra.log"
+    cd "$REPO_ROOT"
+  else
+    ok "MSRA healthy (no restart needed)"
+  fi
+else
+  warn "MSRA server.py not found — mobile scanner unavailable"
 fi
 
 # ── Health check ──────────────────────────────────────────────────────────────
