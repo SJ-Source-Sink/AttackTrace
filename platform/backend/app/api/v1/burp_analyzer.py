@@ -1345,10 +1345,31 @@ async def verify_request(
 
 # ─── History helpers ──────────────────────────────────────────────────────────
 
+_UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
+
+
+def _validate_uuid(value: str, label: str) -> str:
+    if not _UUID_RE.match(value):
+        raise ValueError(f"Invalid {label}: must be a UUID")
+    return value
+
+
 def _burp_history_dir(org_id: str) -> pathlib.Path:
-    d = pathlib.Path(_settings.ATTACKTRACE_WORKSPACE_DIR) / "burp-analyzer" / str(org_id)
+    _validate_uuid(org_id, "org_id")
+    base = pathlib.Path(_settings.ATTACKTRACE_WORKSPACE_DIR) / "burp-analyzer"
+    d = base / org_id
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _safe_analysis_path(org_id: str, analysis_id: str) -> pathlib.Path:
+    """Build and confine the analysis file path to the org's history directory."""
+    _validate_uuid(analysis_id, "analysis_id")
+    base = _burp_history_dir(org_id)
+    candidate = (base / f"{analysis_id}.json").resolve()
+    if not candidate.is_relative_to(base.resolve()):
+        raise ValueError("Path traversal detected")
+    return candidate
 
 
 def _save_burp_analysis(
@@ -1373,7 +1394,7 @@ def _save_burp_analysis(
         "param_graph": param_graph,
         "auth_flows": auth_flows,
     }
-    (_burp_history_dir(org_id) / f"{aid}.json").write_text(json.dumps(record))
+    _safe_analysis_path(org_id, aid).write_text(json.dumps(record))
     return aid
 
 
@@ -1400,7 +1421,10 @@ def _list_burp_history(org_id: str) -> list[dict]:
 
 
 def _get_burp_analysis(org_id: str, analysis_id: str) -> Optional[dict]:
-    f = _burp_history_dir(org_id) / f"{analysis_id}.json"
+    try:
+        f = _safe_analysis_path(org_id, analysis_id)
+    except ValueError:
+        return None
     if not f.exists():
         return None
     try:
@@ -1410,7 +1434,10 @@ def _get_burp_analysis(org_id: str, analysis_id: str) -> Optional[dict]:
 
 
 def _delete_burp_analysis(org_id: str, analysis_id: str) -> bool:
-    f = _burp_history_dir(org_id) / f"{analysis_id}.json"
+    try:
+        f = _safe_analysis_path(org_id, analysis_id)
+    except ValueError:
+        return False
     if f.exists():
         f.unlink()
         return True
