@@ -6077,11 +6077,80 @@ async def analyze_burp_file(
     model = ai_config.get("model") or settings.AI_MODEL
 
     return StreamingResponse(
-        run_burp_analysis(content, ai_analysis, api_key, base_url=base_url, model=model),
+        run_burp_analysis(
+            content, ai_analysis, api_key,
+            base_url=base_url, model=model,
+            org_id=str(org_id),
+            filename=file.filename or "burp_history.xml",
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.get("/burp/history")
+async def list_burp_history(
+    current_user: Annotated[User, Depends(require_tool("burp_analyzer"))] = None,
+    org_id: UUID = Depends(get_current_org_id),
+):
+    """List all saved Burp analysis runs for this org."""
+    from app.api.v1.burp_analyzer import _list_burp_history
+    return _list_burp_history(str(org_id))
+
+
+@router.get("/burp/history/{analysis_id}")
+async def get_burp_analysis_detail(
+    analysis_id: str,
+    current_user: Annotated[User, Depends(require_tool("burp_analyzer"))] = None,
+    org_id: UUID = Depends(get_current_org_id),
+):
+    """Retrieve full results of a past Burp analysis."""
+    from app.api.v1.burp_analyzer import _get_burp_analysis
+    data = _get_burp_analysis(str(org_id), analysis_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    return data
+
+
+@router.delete("/burp/history/{analysis_id}")
+async def delete_burp_analysis(
+    analysis_id: str,
+    current_user: Annotated[User, Depends(require_tool("burp_analyzer"))] = None,
+    org_id: UUID = Depends(get_current_org_id),
+):
+    """Delete a saved Burp analysis."""
+    from app.api.v1.burp_analyzer import _delete_burp_analysis
+    if not _delete_burp_analysis(str(org_id), analysis_id):
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    return {"deleted": True}
+
+
+@router.post("/burp/verify")
+async def verify_burp_test_case(
+    request: Request,
+    current_user: Annotated[User, Depends(require_tool("burp_analyzer"))] = None,
+):
+    """
+    Active replay: inject a payload into a real request and confirm whether
+    the finding is real. verify_ssl defaults to True; set to False only for
+    targets with self-signed certificates in controlled lab environments.
+    """
+    from app.api.v1.burp_analyzer import verify_request
+    body = await request.json()
+    return await verify_request(
+        endpoint_str=body.get("endpoint", ""),
+        method=body.get("method", "GET"),
+        vuln_type=body.get("vuln_type", ""),
+        param=body.get("param", ""),
+        payload=body.get("payload", ""),
+        inject_in=body.get("inject_in", "query"),
+        body_params=body.get("body_params", {}),
+        auth_headers=body.get("auth_headers", {}),
+        original_status=body.get("original_status", 200),
+        req_timeout=min(int(body.get("timeout", 10)), 30),
+        verify_ssl=bool(body.get("verify_ssl", True)),
     )

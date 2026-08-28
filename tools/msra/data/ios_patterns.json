@@ -1,0 +1,855 @@
+{
+  "schema_version": "1.0.0",
+  "platform": "ios",
+  "patterns": [
+    {
+      "id": "ios-ats-disabled",
+      "title": "App Transport Security Fully Disabled",
+      "severity": "High",
+      "category": "Network Security",
+      "description": "NSAllowsArbitraryLoads is set to true, completely disabling App Transport Security for all network connections. This allows the app to communicate over unencrypted HTTP with any server, exposing all transmitted data to interception. On public Wi-Fi or any network where an attacker has positioned themselves between the device and server, all API responses, authentication tokens, and user data travel in plaintext.",
+      "attack_path": "Attacker sets up a rogue Wi-Fi hotspot or performs ARP spoofing on a shared network. Because ATS is off, the app connects over HTTP without certificate validation. Attacker uses mitmproxy to read all traffic — login credentials, session tokens, PII — in real time. No SSL stripping required.",
+      "remediation": "Remove NSAllowsArbitraryLoads or set it to false. Migrate all endpoints to HTTPS with valid TLS 1.2+ certificates. If a third-party SDK requires HTTP, scope the exception to that specific domain using NSExceptionDomains with the narrowest possible settings.",
+      "cwe": ["CWE-319", "CWE-757"],
+      "references": [
+        "https://developer.apple.com/documentation/bundleresources/information_property_list/nsapptransportsecurity",
+        "https://owasp.org/www-project-mobile-top-10/2016-risks/m3-insecure-communication"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "plist_key",
+        "key_path": "NSAppTransportSecurity.NSAllowsArbitraryLoads",
+        "check": "true"
+      }
+    },
+    {
+      "id": "ios-ats-web-content",
+      "title": "ATS Disabled for Web Content (WKWebView)",
+      "severity": "Medium",
+      "category": "Network Security",
+      "description": "NSAllowsArbitraryLoadsInWebContent disables ATS specifically for web content rendered inside WKWebView. Pages loaded in the web view can fetch resources over plain HTTP, enabling mixed-content attacks and XSS injection via network-level interception even when the main app API traffic is protected.",
+      "attack_path": "Attacker intercepts the HTTP page loaded inside the WKWebView and injects malicious JavaScript. The injected script uses any postMessage bridges or native interfaces exposed to the WebView to exfiltrate data or invoke privileged app functionality. The native app layer is unaware the web content has been tampered with.",
+      "remediation": "Remove NSAllowsArbitraryLoadsInWebContent. Ensure all URLs loaded in WKWebView use HTTPS. Apply a strict Content Security Policy in loaded web pages and avoid exposing sensitive WKScriptMessageHandler interfaces.",
+      "cwe": ["CWE-319", "CWE-829"],
+      "references": [
+        "https://developer.apple.com/documentation/bundleresources/information_property_list/nsapptransportsecurity/nsallowsarbitraryloadsinwebcontent"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "plist_key",
+        "key_path": "NSAppTransportSecurity.NSAllowsArbitraryLoadsInWebContent",
+        "check": "true"
+      }
+    },
+    {
+      "id": "ios-ats-exception-domains",
+      "title": "ATS Exception Domains Configured",
+      "severity": "Medium",
+      "category": "Network Security",
+      "description": "NSExceptionDomains defines per-domain ATS overrides such as allowing insecure HTTP, disabling certificate validation, or lowering the minimum TLS version. Each exception widens the attack surface by permitting weaker security for specific hostnames. Broad exceptions (e.g., *.example.com) can encompass many hosts beyond what the developer intended.",
+      "attack_path": "If an exception domain permits HTTP or disables forward secrecy, an attacker who controls DNS for that domain (or performs DNS spoofing) can respond with a server that does not use TLS. The app connects in cleartext because the domain is whitelisted. Sensitive data destined for a CDN or analytics endpoint is captured.",
+      "remediation": "Review each NSExceptionDomains entry and remove or tighten exceptions. Prefer HTTPS with valid certificates for all domains. If a legacy endpoint truly requires an exception, set NSExceptionAllowsInsecureHTTPLoads to false and only relax NSExceptionMinimumTLSVersion.",
+      "cwe": ["CWE-295", "CWE-319"],
+      "references": [
+        "https://developer.apple.com/documentation/bundleresources/information_property_list/nsapptransportsecurity/nsexceptiondomains"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "plist_key",
+        "key_path": "NSAppTransportSecurity.NSExceptionDomains",
+        "check": "not_empty"
+      }
+    },
+    {
+      "id": "ios-ats-media-loads",
+      "title": "ATS Disabled for Media Loads",
+      "severity": "Medium",
+      "category": "Network Security",
+      "description": "NSAllowsArbitraryLoadsForMedia bypasses ATS for media fetched via AVFoundation APIs. An attacker can intercept the unencrypted media stream and either eavesdrop on video/audio content or inject malicious media data. Media streams often contain sensitive content (e.g., health app recordings, financial video calls).",
+      "attack_path": "Attacker performs a MITM attack and replaces legitimate media content with a crafted file exploiting a media parsing vulnerability in AVFoundation. Alternatively, they capture the unencrypted stream to harvest private user media. Vulnerable on any untrusted network.",
+      "remediation": "Remove NSAllowsArbitraryLoadsForMedia. Host all media on HTTPS endpoints. If content is delivered via HLS, ensure the .m3u8 manifest and all segment URLs use HTTPS.",
+      "cwe": ["CWE-319"],
+      "references": [
+        "https://developer.apple.com/documentation/bundleresources/information_property_list/nsapptransportsecurity/nsallowsarbitraryloadsformedia"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "plist_key",
+        "key_path": "NSAppTransportSecurity.NSAllowsArbitraryLoadsForMedia",
+        "check": "true"
+      }
+    },
+    {
+      "id": "ios-file-sharing",
+      "title": "iTunes File Sharing Enabled",
+      "severity": "Medium",
+      "category": "Data Storage",
+      "description": "UIFileSharingEnabled exposes the app's Documents directory via iTunes and Apple Configurator. Anyone with physical access to the device or the ability to connect to it (e.g., in a corporate MDM context or via a compromised USB port) can browse, download, and replace any file stored in Documents — including databases, user data, cached tokens, and configuration files.",
+      "attack_path": "Attacker gains physical access to the device or connects via USB to a trusted computer. Using iTunes or iMazing, they browse the app's Documents folder and download SQLite databases or cached credentials stored there. They can also upload crafted files to exploit path traversal or unsafe deserialization bugs in the app.",
+      "remediation": "Set UIFileSharingEnabled to false or remove it. Store sensitive files in the Library directory instead of Documents. Encrypt sensitive files at rest using the iOS Data Protection API with NSFileProtectionComplete.",
+      "cwe": ["CWE-284", "CWE-922"],
+      "references": [
+        "https://developer.apple.com/library/archive/documentation/FileManagement/Conceptual/FileSystemProgrammingGuide/FileSystemOverview/FileSystemOverview.html"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "plist_key",
+        "key_path": "UIFileSharingEnabled",
+        "check": "true"
+      }
+    },
+    {
+      "id": "ios-itunes-sharing",
+      "title": "Document Browser / Open-in Support Enabled",
+      "severity": "Low",
+      "category": "Data Storage",
+      "description": "UISupportsDocumentBrowser allows the app to appear in the Files app and exposes its document storage for browsing by other apps. Files in the accessible locations can be read by any app with access to the Files app, and the attack surface for cross-app document tampering is increased.",
+      "attack_path": "A malicious app installed on the same device can use the document picker to access files created by this app if the user grants Files access. Sensitive exported documents (e.g., reports, exports containing PII) could be read or replaced by the attacker app.",
+      "remediation": "Set UISupportsDocumentBrowser to false if the app does not genuinely need document browser integration. Encrypt documents before writing them and validate file integrity on read.",
+      "cwe": ["CWE-284"],
+      "references": [
+        "https://developer.apple.com/documentation/uikit/view_controllers/adding_a_document_browser_to_your_app"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "plist_key",
+        "key_path": "UISupportsDocumentBrowser",
+        "check": "true"
+      }
+    },
+    {
+      "id": "ios-url-schemes",
+      "title": "Custom URL Schemes Registered",
+      "severity": "Medium",
+      "category": "IPC Security",
+      "description": "The app registers one or more custom URL schemes (e.g., myapp://) via CFBundleURLTypes. Any app or web page on the device can invoke these schemes and pass arbitrary parameters. If the app processes URL parameters without validation — navigating to paths, loading URLs, or performing actions — it is vulnerable to deep-link injection attacks.",
+      "attack_path": "Attacker crafts a malicious web page or app that opens myapp://reset-password?token=attacker_controlled. If the app trusts this token and skips server-side verification, the attacker can hijack account flows. More critically, a scheme handler that opens a WebView with the supplied URL can be abused to load attacker-controlled content (XSS, JavaScript injection).",
+      "remediation": "Validate all URL scheme parameters server-side. Never use scheme parameters to construct file paths or load web content directly. Implement a URL allowlist for any WebView loading triggered by scheme handlers. Prefer Universal Links over custom URL schemes for security-critical flows.",
+      "cwe": ["CWE-939", "CWE-20"],
+      "references": [
+        "https://developer.apple.com/documentation/xcode/defining-a-custom-url-scheme-for-your-app",
+        "https://owasp.org/www-project-mobile-top-10/2016-risks/m1-improper-platform-usage"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "plist_key",
+        "key_path": "CFBundleURLTypes",
+        "check": "not_empty"
+      }
+    },
+    {
+      "id": "ios-background-modes",
+      "title": "Background Execution Modes Declared",
+      "severity": "Low",
+      "category": "Privacy",
+      "description": "UIBackgroundModes declares that the app can continue executing in the background. Background-capable apps increase the attack surface: a compromised app can silently exfiltrate data, monitor location, or communicate with a C2 server even while the user is not actively using it.",
+      "attack_path": "If the app is compromised via a malicious update or supply chain attack, the background mode allows persistent operation. An attacker can use the background location or VoIP mode to continually beacon device GPS coordinates or maintain a persistent WebSocket to a command-and-control server without any user interaction.",
+      "remediation": "Limit background modes to only those strictly necessary. Avoid continuous background location when visit monitoring or significant-change location suffices. Review background tasks for any network communication that should not occur without user consent.",
+      "cwe": ["CWE-250"],
+      "references": [
+        "https://developer.apple.com/documentation/bundleresources/information_property_list/uibackgroundmodes"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "plist_key",
+        "key_path": "UIBackgroundModes",
+        "check": "not_empty"
+      }
+    },
+    {
+      "id": "ios-encryption-exempt",
+      "title": "App Declares Non-Exempt Encryption as Absent",
+      "severity": "Medium",
+      "category": "Cryptography",
+      "description": "ITSAppUsesNonExemptEncryption is set to false, indicating that the app does not use non-exempt encryption. If the app actually does use encryption (TLS, AES, etc.) this is a false declaration that could indicate compliance issues. More importantly, apps that incorrectly declare this may have chosen not to use encryption to avoid export documentation requirements — leaving data unprotected at rest.",
+      "attack_path": "If the app stores sensitive data without encryption (to remain compliant with the false declaration), an attacker with physical device access or a backup extraction can read databases, preference files, and cached data in plaintext. On jailbroken devices, the unprotected files are trivially accessible.",
+      "remediation": "Accurately declare encryption usage. If the app uses HTTPS or any iOS encryption APIs, set ITSAppUsesNonExemptEncryption to true and complete the required ERN documentation. Ensure sensitive data at rest is protected with NSFileProtectionComplete.",
+      "cwe": ["CWE-311"],
+      "references": [
+        "https://developer.apple.com/documentation/bundleresources/information_property_list/itsappusesnonexemptencryption"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "plist_key",
+        "key_path": "ITSAppUsesNonExemptEncryption",
+        "check": "false"
+      }
+    },
+    {
+      "id": "ios-query-schemes",
+      "title": "LSApplicationQueriesSchemes Declared",
+      "severity": "Info",
+      "category": "IPC Security",
+      "description": "LSApplicationQueriesSchemes lists URL schemes the app can query to detect whether other apps are installed. This can be used for fingerprinting: by checking for the presence of banking apps, health apps, or VPN clients, the app gains information about the user's installed software that may constitute a privacy violation.",
+      "attack_path": "A malicious or compromised version of this app iterates through LSApplicationQueriesSchemes to build a profile of installed apps on the device. This information can be exfiltrated to a remote server to fingerprint the device, target phishing campaigns, or identify security tools (VPN clients, authenticator apps) the user relies on.",
+      "remediation": "Only include schemes that are strictly necessary for app functionality. Remove any schemes used solely for analytics or third-party SDK fingerprinting. Review SDK documentation to understand what schemes are added automatically.",
+      "cwe": ["CWE-200"],
+      "references": [
+        "https://developer.apple.com/documentation/bundleresources/information_property_list/lsapplicationqueriesschemes"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "plist_key",
+        "key_path": "LSApplicationQueriesSchemes",
+        "check": "not_empty"
+      }
+    },
+    {
+      "id": "ios-ats-local-networking",
+      "title": "ATS Disabled for Local Networking",
+      "severity": "Low",
+      "category": "Network Security",
+      "description": "NSAllowsLocalNetworking permits unencrypted HTTP connections to local network hosts (.local mDNS names and unqualified hostnames). On shared Wi-Fi networks (cafes, offices), local network traffic is visible to other devices. Sensitive data sent to local printers, IoT devices, or companion apps may be intercepted.",
+      "attack_path": "Attacker connects to the same Wi-Fi network. Using a passive sniffer, they capture plaintext traffic from the app to local network endpoints (e.g., a smart home hub or local server). If the local server handles authentication tokens or control commands, the attacker can capture and replay them.",
+      "remediation": "Remove NSAllowsLocalNetworking. Use TLS even for local network communications. If connecting to devices that do not support TLS, evaluate whether certificate pinning or mutual TLS with a locally-generated certificate authority is feasible.",
+      "cwe": ["CWE-319"],
+      "references": [
+        "https://developer.apple.com/documentation/bundleresources/information_property_list/nsapptransportsecurity/nsallowslocalnetworking"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "plist_key",
+        "key_path": "NSAppTransportSecurity.NSAllowsLocalNetworking",
+        "check": "true"
+      }
+    },
+    {
+      "id": "ios-hardcoded-aws-key",
+      "title": "Hardcoded AWS Access Key ID",
+      "severity": "Critical",
+      "category": "Hardcoded Secrets",
+      "description": "An AWS Access Key ID (beginning with AKIA) is embedded in the binary. AWS access keys grant programmatic access to AWS services. If an attacker extracts this key from the binary they can access S3 buckets, invoke Lambda functions, query DynamoDB, or perform any other AWS action that the associated IAM role permits — potentially leading to full cloud infrastructure compromise.",
+      "attack_path": "Attacker downloads the IPA from the App Store or a third-party source. Using a tool like `strings` or a Mach-O binary editor, they extract the AKIA key. They configure the AWS CLI with the stolen key and enumerate accessible resources: `aws s3 ls`, `aws iam get-user`. If the key has broad permissions, they exfiltrate S3 data, spin up EC2 instances for crypto mining, or pivot deeper into the infrastructure.",
+      "remediation": "Immediately rotate the exposed AWS key in the IAM console. Remove all hardcoded credentials from source code. Use temporary credentials via AWS STS AssumeRole, obtain them from a backend API that authenticates the mobile client, or use Amazon Cognito Identity Pools for mobile-to-AWS access.",
+      "cwe": ["CWE-798", "CWE-312"],
+      "references": [
+        "https://docs.aws.amazon.com/general/latest/gr/aws-security-credentials.html",
+        "https://owasp.org/www-project-mobile-top-10/2016-risks/m2-insecure-data-storage"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "AKIA[0-9A-Z]{16}"
+      }
+    },
+    {
+      "id": "ios-hardcoded-aws-secret",
+      "title": "Hardcoded AWS Secret Access Key",
+      "severity": "Critical",
+      "category": "Hardcoded Secrets",
+      "description": "An AWS Secret Access Key pattern has been detected in binary strings. The secret key is the password component of AWS credentials — combined with the access key ID it grants full API access to AWS services. A 40-character base64 string near the word 'secret' or 'aws' is a strong indicator of an embedded secret.",
+      "attack_path": "Attacker extracts the binary from the IPA and runs `strings` to locate the AWS secret. Paired with an AKIA key found nearby in the binary or in Info.plist, they authenticate to AWS and gain access to the cloud backend. Full compromise of backend databases, file storage, and server infrastructure is possible with permissive IAM policies.",
+      "remediation": "Rotate all AWS credentials immediately. Implement a secrets management solution (AWS Secrets Manager, HashiCorp Vault). Never embed long-lived cloud credentials in mobile app binaries. Use short-lived, narrowly scoped STS tokens fetched at runtime from an authenticated backend.",
+      "cwe": ["CWE-798", "CWE-312"],
+      "references": [
+        "https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "(?i)aws.{0,20}secret.{0,20}[A-Za-z0-9+/]{40}"
+      }
+    },
+    {
+      "id": "ios-hardcoded-private-key",
+      "title": "Hardcoded Private Key Material",
+      "severity": "Critical",
+      "category": "Hardcoded Secrets",
+      "description": "A PEM-encoded private key (RSA, EC, or OpenSSH) has been found embedded in the binary. Private keys embedded in a distributed app binary can be extracted by any user who downloads the app, completely defeating the purpose of asymmetric cryptography. The attacker can impersonate the server, decrypt TLS traffic if the key is used for a certificate, or forge signed tokens.",
+      "attack_path": "Attacker extracts the IPA and parses the binary. Using `strings` or a hex editor, they locate and extract the PEM block (-----BEGIN PRIVATE KEY-----). With the private key, they can: decrypt previously intercepted TLS sessions (if it matches a server cert), sign arbitrary JWTs or API requests the server trusts, or impersonate the app to the backend API.",
+      "remediation": "Remove all private key material from the app binary. Private keys for server certificates must live on the server only. For client certificate authentication, use the iOS Secure Enclave or Keychain to generate key pairs on-device — the private key never leaves the secure hardware.",
+      "cwe": ["CWE-321", "CWE-798"],
+      "references": [
+        "https://developer.apple.com/documentation/security/certificate_key_and_trust_services/keys/storing_keys_in_the_secure_enclave"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY"
+      }
+    },
+    {
+      "id": "ios-hardcoded-stripe-key",
+      "title": "Hardcoded Stripe Live Secret Key",
+      "severity": "Critical",
+      "category": "Hardcoded Secrets",
+      "description": "A Stripe live secret key (sk_live_...) is embedded in the binary. Stripe secret keys allow the holder to create charges, access customer payment methods, issue refunds, and retrieve full card data for any customer in the account. Exposure leads to financial fraud, data theft, and regulatory liability under PCI DSS.",
+      "attack_path": "Attacker extracts the IPA and searches the binary for 'sk_live_'. Using the extracted key with the Stripe API, they enumerate customers (`stripe customers list`), retrieve stored card data, create fraudulent charges to stored payment methods, and exfiltrate the full customer and transaction database — all without any credentials beyond the embedded key.",
+      "remediation": "Immediately roll the Stripe secret key in the Stripe Dashboard. Never place secret keys in mobile apps. Stripe publishable keys (pk_live_) are safe for mobile use. For server-side operations (creating payment intents, subscribing customers), call your own backend which securely stores the secret key. Use Stripe's mobile SDKs with publishable keys only.",
+      "cwe": ["CWE-798"],
+      "references": [
+        "https://stripe.com/docs/keys",
+        "https://stripe.com/docs/security/guide"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "sk_live_[0-9a-zA-Z]{24,}"
+      }
+    },
+    {
+      "id": "ios-hardcoded-google-key",
+      "title": "Hardcoded Google API Key",
+      "severity": "High",
+      "category": "Hardcoded Secrets",
+      "description": "A Google API key (AIza...) is embedded in the binary. Depending on the APIs enabled for this key, an attacker can make authenticated requests to Google Maps, Cloud Vision, Cloud NLP, Firebase, or other Google Cloud services. Uncapped keys lead to quota exhaustion (service disruption) and potentially large unexpected billing charges.",
+      "attack_path": "Attacker extracts the API key and calls Google's API endpoints directly. If the key is not restricted by HTTP referrer, IP, or bundle ID, they can invoke any enabled Google Cloud API at will. For Firebase keys, the attacker can read/write Firestore or Realtime Database if security rules are weak, access Cloud Storage, or send push notifications.",
+      "remediation": "Restrict the API key in Google Cloud Console: limit it to the specific APIs needed and restrict it by iOS bundle ID. For Firebase, use GoogleService-Info.plist restrictions and enforce strong Firebase Security Rules. Rotate any unrestricted key that may have been abused.",
+      "cwe": ["CWE-798"],
+      "references": [
+        "https://cloud.google.com/docs/authentication/api-keys",
+        "https://firebase.google.com/docs/projects/api-keys"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "AIza[0-9A-Za-z\\-_]{35}"
+      }
+    },
+    {
+      "id": "ios-hardcoded-password",
+      "title": "Hardcoded Password in Binary",
+      "severity": "High",
+      "category": "Hardcoded Secrets",
+      "description": "A string matching the pattern of a hardcoded password assignment (e.g., password=\"secret\") was found in binary strings. Hardcoded passwords are a critical vulnerability: they cannot be rotated without releasing a new app version, and are trivially extracted from any distributed binary. They are often shared credentials used to access backend databases or APIs.",
+      "attack_path": "Attacker extracts the IPA and runs `strings` on the binary, grepping for 'password='. They find a plaintext credential used to authenticate with a backend database, admin panel, or internal API. Since the credential is hardcoded, it is the same across all installs and across app versions, making it permanently compromised once exposed.",
+      "remediation": "Remove all hardcoded passwords. Use certificate-based mutual TLS for app-to-server authentication. If passwords must be used, fetch them at runtime from a secrets manager after authenticating the device. Store any cached credentials in the iOS Keychain with appropriate protection class.",
+      "cwe": ["CWE-259", "CWE-798"],
+      "references": [
+        "https://owasp.org/www-project-mobile-top-10/2016-risks/m2-insecure-data-storage"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "(?i)(password|passwd|pwd)\\s*[=:]\\s*[\"'][^\"']{4,}[\"']"
+      }
+    },
+    {
+      "id": "ios-hardcoded-secret",
+      "title": "Hardcoded API Key or Auth Token",
+      "severity": "High",
+      "category": "Hardcoded Secrets",
+      "description": "A string matching the pattern of a hardcoded secret, API key, or authentication token was found in the binary. These credentials provide direct access to backend systems and third-party APIs. Once embedded in a binary, they are effectively public — anyone can extract them using basic reverse engineering tools.",
+      "attack_path": "Attacker uses radare2, Hopper, or `strings` to extract API keys from the binary. They use the key to authenticate directly to the backend API, bypassing any app-level rate limiting or fraud detection. If the token is a JWT secret or HMAC key, they can forge tokens to impersonate any user, including admins.",
+      "remediation": "Eliminate hardcoded credentials from the binary. Implement runtime secret delivery: authenticate the device/user first, then fetch scoped credentials from a secure backend endpoint. Use short-lived tokens with appropriate expiry. For third-party SDKs, use SDK initialization patterns that accept keys at runtime.",
+      "cwe": ["CWE-798", "CWE-321"],
+      "references": [
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-STORAGE/MASTG-TEST-0010/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "(?i)(secret|api_key|apikey|auth_token)\\s*[=:]\\s*[\"'][^\"']{8,}[\"']"
+      }
+    },
+    {
+      "id": "ios-nslog-sensitive",
+      "title": "NSLog Logging Sensitive Data",
+      "severity": "High",
+      "category": "Data Leakage",
+      "description": "NSLog calls appear to log sensitive data (passwords, tokens, secrets, or auth values). On iOS, NSLog output is visible in the device system log, which can be read by any app with the com.apple.diagnostics.read entitlement on older OS versions, and is also visible to anyone with physical device access via Xcode Console or idevicesyslog. Sensitive values logged here persist in system logs beyond the app session.",
+      "attack_path": "An attacker with physical access or an MDM-enrolled device can connect to the device and stream system logs using `idevicesyslog` or Xcode. They search the logs for auth tokens, session IDs, or passwords logged by the app during normal operation. On jailbroken devices, any app can read system logs, allowing a co-installed malicious app to harvest credentials.",
+      "remediation": "Remove all NSLog calls that include sensitive data. Use a logging framework (OSLog, CocoaLumberjack) with log levels, and ensure sensitive data is never passed to log functions at any level. Strip all logging statements at the build level for release configurations.",
+      "cwe": ["CWE-532", "CWE-359"],
+      "references": [
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-STORAGE/MASTG-TEST-0012/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "(?i)NSLog.*(?:password|token|secret|key|auth)"
+      }
+    },
+    {
+      "id": "ios-uiwebview",
+      "title": "Deprecated UIWebView Usage Detected",
+      "severity": "Medium",
+      "category": "Injection",
+      "description": "The binary references UIWebView, which Apple deprecated in iOS 12 and removed from the App Store review guidelines. UIWebView does not support modern security features available in WKWebView: it cannot enforce content security policies, lacks process isolation, has a shared cookie and credential store with the app, and is vulnerable to known CVEs. JavaScript injected into UIWebView executes in the app's process context.",
+      "attack_path": "If the app loads attacker-influenced URLs in UIWebView (via deep links, push notification payloads, or network responses), the attacker can inject JavaScript that executes in the app context. Using UIWebView's JavaScript bridge (stringByEvaluatingJavaScript), injected scripts can read the app's DOM, exfiltrate cookies, and invoke any Objective-C methods exposed via JSContext.",
+      "remediation": "Replace all UIWebView instances with WKWebView. WKWebView runs in a separate process, supports CSP, and has a separate data store that can be configured per-instance. When migrating, audit all JavaScript bridge (WKScriptMessageHandler) exposure.",
+      "cwe": ["CWE-79", "CWE-1104"],
+      "references": [
+        "https://developer.apple.com/documentation/webkit/wkwebview",
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-PLATFORM/MASTG-TEST-0071/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "UIWebView"
+      }
+    },
+    {
+      "id": "ios-keychain-always",
+      "title": "Keychain Items Accessible When Device Locked",
+      "severity": "High",
+      "category": "Data Storage",
+      "description": "The binary uses kSecAttrAccessibleAlways, which means Keychain items are accessible even when the device is locked. These items can be read without the user authenticating, making them vulnerable to extraction on a powered-off or rebooting device via advanced forensic tools and iOS exploits that access the Keychain before user unlock.",
+      "attack_path": "An attacker using a forensic tool (Cellebrite UFED, GrayKey) against a seized device can extract Keychain items with kSecAttrAccessibleAlways protection before the device is unlocked. Unlike items protected by kSecAttrAccessibleWhenUnlocked, these are encrypted only with the device UID key, which forensic tools can access. Auth tokens stored with this protection class are fully recoverable.",
+      "remediation": "Replace kSecAttrAccessibleAlways with kSecAttrAccessibleWhenUnlocked or kSecAttrAccessibleWhenUnlockedThisDeviceOnly. For highly sensitive items (passwords, tokens), use kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly with TouchID/FaceID protection via SecAccessControl.",
+      "cwe": ["CWE-311", "CWE-312"],
+      "references": [
+        "https://developer.apple.com/documentation/security/ksecattraccessiblealways",
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-STORAGE/MASTG-TEST-0011/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "kSecAttrAccessibleAlways\\b"
+      }
+    },
+    {
+      "id": "ios-keychain-always-device",
+      "title": "Keychain Items Accessible Always (This Device Only)",
+      "severity": "Medium",
+      "category": "Data Storage",
+      "description": "kSecAttrAccessibleAlwaysThisDeviceOnly allows Keychain items to be read even when the device is locked. While the This Device Only restriction prevents iCloud Keychain sync, the items are still accessible during the device boot sequence before user authentication — a weaker protection than WhenUnlocked variants.",
+      "attack_path": "On a jailbroken device, an attacker process running as root can access the Keychain at any time regardless of protection class, because Keychain decryption keys are available to the kernel. Items with AlwaysThisDeviceOnly are equally vulnerable on jailbroken devices as WhenUnlocked items. Forensic tools that exploit kernel bugs can similarly access these items before unlock.",
+      "remediation": "Use kSecAttrAccessibleWhenUnlockedThisDeviceOnly instead. This provides device-bound storage while requiring the device to be unlocked before access, preventing extraction during the locked state.",
+      "cwe": ["CWE-311"],
+      "references": [
+        "https://developer.apple.com/documentation/security/ksecattraccessiblealwaysthisdeviceonly"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "kSecAttrAccessibleAlwaysThisDeviceOnly"
+      }
+    },
+    {
+      "id": "ios-md5-usage",
+      "title": "MD5 Hash Function Usage",
+      "severity": "High",
+      "category": "Cryptography",
+      "description": "The binary uses MD5 hashing (via CommonCrypto CC_MD5 or .md5()). MD5 is cryptographically broken: collision attacks are practical and preimage attacks are feasible with sufficient compute. MD5 must not be used for any security-relevant purpose: password hashing, digital signatures, integrity verification, or certificate fingerprinting.",
+      "attack_path": "If the app uses MD5 to hash passwords before storage or transmission, an attacker who obtains the hash database can crack passwords using precomputed rainbow tables in seconds. If MD5 is used to verify file integrity, an attacker can construct a malicious file with the same MD5 hash as a legitimate file, causing the app to accept tampered content.",
+      "remediation": "Replace all security-sensitive MD5 usage with SHA-256 or SHA-3. For password hashing, use bcrypt, scrypt, or PBKDF2 with a high iteration count. For checksums where collision resistance matters, use SHA-256.",
+      "cwe": ["CWE-327", "CWE-328"],
+      "references": [
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-CRYPTO/MASTG-TEST-0060/",
+        "https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-131Ar2.pdf"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "(?:CC_MD5|CommonDigest.*MD5|\\.md5\\(\\))"
+      }
+    },
+    {
+      "id": "ios-sha1-usage",
+      "title": "SHA-1 Hash Function Usage",
+      "severity": "Medium",
+      "category": "Cryptography",
+      "description": "The binary uses SHA-1 hashing. SHA-1 is deprecated and known to be vulnerable to collision attacks (SHAttered, 2017). NIST deprecated SHA-1 for digital signatures in 2011. While still acceptable for non-security-critical checksums, any use of SHA-1 for certificate fingerprinting, HMAC, or password hashing is insecure.",
+      "attack_path": "Chosen-prefix collision attacks against SHA-1 are now practical. An attacker can create two files with the same SHA-1 hash. If the app uses SHA-1 to verify downloaded content or compare certificate hashes, the attacker can substitute a malicious payload that produces the same hash as a legitimate one, bypassing integrity checks.",
+      "remediation": "Migrate SHA-1 usage to SHA-256 or SHA-3. The migration path in CommonCrypto is straightforward: replace CC_SHA1 with CC_SHA256. Update any hash comparison logic to handle the larger digest size.",
+      "cwe": ["CWE-327"],
+      "references": [
+        "https://shattered.io/",
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-CRYPTO/MASTG-TEST-0060/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "(?:CC_SHA1|CommonDigest.*SHA1)"
+      }
+    },
+    {
+      "id": "ios-3des-usage",
+      "title": "Triple-DES (3DES) Cipher Usage",
+      "severity": "Medium",
+      "category": "Cryptography",
+      "description": "The binary uses Triple-DES (3DES / TDEA). 3DES has a 64-bit block size, making it vulnerable to birthday attacks (Sweet32) when large amounts of data are encrypted with the same key. NIST disallowed 3DES for new applications in 2017 and deprecated all 3DES usage in 2023. Its effective key strength is also lower than modern alternatives.",
+      "attack_path": "If the app uses 3DES for bulk data encryption or TLS cipher suites, an attacker who can observe roughly 32GB of ciphertext encrypted under the same key can perform a Sweet32 birthday attack to recover plaintext blocks. This is particularly relevant for long-lived VPN or secure channel sessions.",
+      "remediation": "Replace 3DES with AES-256-GCM (authenticated encryption). AES has a 128-bit block size, eliminating birthday attack concerns at practical data volumes, and is hardware-accelerated on all modern iOS devices via the AES coprocessor.",
+      "cwe": ["CWE-326"],
+      "references": [
+        "https://sweet32.info/",
+        "https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-67r2.pdf"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "(?:kCCAlgorithm3DES|3DES)"
+      }
+    },
+    {
+      "id": "ios-hardcoded-http-url",
+      "title": "Cleartext HTTP URL in Binary",
+      "severity": "Medium",
+      "category": "Network Security",
+      "description": "A hardcoded HTTP (non-HTTPS) URL was found in the binary. Even if ATS is not globally disabled, specific HTTP URLs embedded in code can result in cleartext connections. This includes API endpoints, resource URLs, and tracking pixels that may carry sensitive parameters.",
+      "attack_path": "The app connects to a hardcoded http:// URL, sending any query parameters, headers, and POST body in cleartext. On a network where the attacker has MITM position (shared Wi-Fi, malicious router), they intercept the request, extract authentication tokens or user data from the URL or body, and can modify the response to inject malicious content.",
+      "remediation": "Replace all http:// URLs with https://. Audit the codebase for string constants, configuration files, and deep-link handlers that might construct HTTP URLs dynamically.",
+      "cwe": ["CWE-319"],
+      "references": [
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-NETWORK/MASTG-TEST-0044/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "http://[a-zA-Z0-9\\-\\.]{4,}/[^\\s\"']{0,100}"
+      }
+    },
+    {
+      "id": "ios-uipasteboard",
+      "title": "General Pasteboard Access",
+      "severity": "Medium",
+      "category": "Privacy",
+      "description": "The app accesses UIPasteboard.general, the system-wide shared clipboard. The general pasteboard is accessible to all apps on the device. If the app writes sensitive data (passwords, tokens, credit card numbers) to the pasteboard, any other app can read it. In iOS 14+, apps reading the pasteboard display a banner, but this is only a user notice — it does not prevent access.",
+      "attack_path": "User copies a password or OTP from a password manager. A malicious background app monitors UIPasteboard.general using a UIPasteboardChanged notification or periodic polling. It reads and exfiltrates the copied password before the user pastes it. Conversely, if this app writes an auth token to the clipboard for 'easy copy', a co-installed malicious app captures it silently.",
+      "remediation": "Avoid writing sensitive data to UIPasteboard.general. If clipboard functionality is needed for passwords, use a private UIPasteboard with a name scoped to your app group. Clear clipboard contents after a short timeout if sensitive data was written. Never read user passwords from the clipboard without explicit user action.",
+      "cwe": ["CWE-200", "CWE-359"],
+      "references": [
+        "https://developer.apple.com/documentation/uikit/uipasteboard",
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-STORAGE/MASTG-TEST-0014/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "UIPasteboard\\s*\\.\\s*general"
+      }
+    },
+    {
+      "id": "ios-realm-unencrypted",
+      "title": "Realm Database Opened Without Encryption",
+      "severity": "Medium",
+      "category": "Data Storage",
+      "description": "The binary contains a call to Realm() without an encryption key, creating an unencrypted Realm database. Realm databases are stored as files on the device filesystem. On jailbroken devices or after a full backup extraction, the database file can be opened directly, exposing all stored records in plaintext.",
+      "attack_path": "Attacker with physical device access extracts a full backup using iMazing or iTunes. The unencrypted .realm file is located in the app's Documents or Library directory. Using the Realm Browser tool, the attacker opens the database and reads all stored data — user profiles, cached API responses, messages, and any other persisted objects.",
+      "remediation": "Initialize Realm with an encryption key stored in the iOS Keychain: `let config = Realm.Configuration(encryptionKey: key); let realm = try Realm(configuration: config)`. Generate the key securely on first launch and store it with kSecAttrAccessibleWhenUnlockedThisDeviceOnly protection.",
+      "cwe": ["CWE-311", "CWE-312"],
+      "references": [
+        "https://www.mongodb.com/docs/realm/sdk/swift/realm-files/encrypt-a-realm/",
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-STORAGE/MASTG-TEST-0001/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "Realm\\(\\)"
+      }
+    },
+    {
+      "id": "ios-sqlite-unencrypted",
+      "title": "SQLite Database Opened Without Encryption",
+      "severity": "Medium",
+      "category": "Data Storage",
+      "description": "The binary calls sqlite3_open (unencrypted SQLite). Unless an encrypted SQLite library (SQLCipher) is also used, all data written to the SQLite database is stored in plaintext. Database files in the app's sandbox are accessible from full device backups and on jailbroken devices.",
+      "attack_path": "Attacker extracts a full device backup and locates .sqlite or .db files in the app sandbox. Using the DB Browser for SQLite, they open the database and read all tables — potentially containing user messages, financial transactions, health data, or cached credentials. No password or decryption is required for standard sqlite3_open.",
+      "remediation": "Replace sqlite3_open with SQLCipher's sqlite3_open for at-rest encryption. Store the database encryption key in the iOS Keychain with kSecAttrAccessibleWhenUnlockedThisDeviceOnly. Alternatively, consider Core Data with NSPersistentStoreFileProtectionKey set to NSFileProtectionComplete.",
+      "cwe": ["CWE-311"],
+      "references": [
+        "https://www.zetetic.net/sqlcipher/",
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-STORAGE/MASTG-TEST-0001/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "sqlite3_open\\b"
+      }
+    },
+    {
+      "id": "ios-debug-code",
+      "title": "Debug Flag or Test Mode Enabled in Binary",
+      "severity": "Medium",
+      "category": "Code Quality",
+      "description": "A string indicating a debug flag or test mode (e.g., DEBUG_MODE=true, TEST_MODE=true) was found in the binary. Debug builds often bypass security controls: certificate pinning may be disabled, additional logging active, mock authentication active, and internal diagnostic endpoints exposed. Shipping a debug/test-mode binary to production users is a significant security risk.",
+      "attack_path": "Attacker installs the app and discovers that debug mode is active by triggering diagnostic endpoints or observing verbose logging. Certificate pinning is disabled in debug mode, allowing MITM interception. Test accounts or backdoor credentials may be active. Internal admin functionality, normally hidden, may be accessible via undocumented UI paths or URL schemes.",
+      "remediation": "Use #if DEBUG Swift compiler directives to exclude all debug code from release builds. Verify that production builds are compiled with the Release configuration and all debug flags are false. Implement automated checks in your CI pipeline to detect debug symbols and flags in release artifacts.",
+      "cwe": ["CWE-489"],
+      "references": [
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-CODE/MASTG-TEST-0086/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "(?i)(TESTING|DEBUG_MODE|TEST_MODE|debugFlag)\\s*=\\s*true"
+      }
+    },
+    {
+      "id": "ios-firebase-config",
+      "title": "Firebase Project Configuration in Binary",
+      "severity": "Info",
+      "category": "Configuration",
+      "description": "Firebase project identifiers are present in the binary, indicating the app uses Firebase services. While Firebase configuration is expected, misconfigured Firebase Security Rules can allow any authenticated (or even unauthenticated) user to read or write the entire database or Cloud Storage bucket.",
+      "attack_path": "Attacker extracts the Firebase project ID from the binary or GoogleService-Info.plist. They create a free Firebase account and use the Firebase client SDK or REST API to directly query the Firestore or Realtime Database. If security rules permit ('allow read, write: if true'), they read all user data and overwrite records without any app-level authorization check.",
+      "remediation": "Audit Firebase Security Rules and enforce authentication checks. Deploy rules following least-privilege: users should only access their own data. Test rules using the Firebase Rules Simulator. Enable Firebase App Check to restrict API access to verified app instances only.",
+      "cwe": ["CWE-200"],
+      "references": [
+        "https://firebase.google.com/docs/rules",
+        "https://firebase.google.com/docs/app-check"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "(?i)firebase.*project_id|google-services"
+      }
+    },
+    {
+      "id": "ios-jailbreak-no-detect",
+      "title": "Jailbreak-Related Strings Present",
+      "severity": "Info",
+      "category": "Tampering & Reverse Engineering",
+      "description": "Jailbreak-related strings (Cydia, Substrate, MobileSubstrate, jailbreak) are present in the binary. These strings may indicate jailbreak detection code, or may be artifacts of jailbreak bypass code. This finding requires manual review: presence alone is not definitive, but the absence of effective jailbreak detection in high-assurance apps is a security concern.",
+      "attack_path": "If jailbreak detection is implemented via simple string checks or file existence checks, an attacker using Frida or a jailbreak bypass tweak (Liberty Lite, A-Bypass) can hook the detection routines and return false. On a jailbroken device, the attacker then has full access to the app's memory, Keychain items, and network traffic, bypassing all app-level security controls.",
+      "remediation": "Implement multi-layered jailbreak detection that checks for: Cydia URL scheme (cydia://), presence of suspicious files (/bin/bash, /etc/apt), sandbox escape via file write to /private, dynamic library injection via dyld, and integrity of the app bundle. Use a commercial RASP solution for production-grade protection. Accept that jailbreak detection can be bypassed and layer it with other controls.",
+      "cwe": ["CWE-693"],
+      "references": [
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-RESILIENCE/MASTG-TEST-0088/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "(?i)(cydia|substrate|MobileSubstrate|jailbreak)"
+      }
+    },
+    {
+      "id": "ios-frida-gadget",
+      "title": "Frida Gadget / Instrumentation Framework Detected",
+      "severity": "Info",
+      "category": "Tampering & Reverse Engineering",
+      "description": "References to Frida or FridaGadget were found in the binary. Frida is a dynamic instrumentation toolkit used for runtime analysis, hooking, and bypassing security controls. Its presence could indicate that the app has been repackaged with the Frida gadget for analysis or tampering, or that the app detects Frida's presence.",
+      "attack_path": "If a Frida gadget has been injected into the binary (common in repackaged apps distributed through unofficial stores), any user who installs it gives the gadget operator full instrumentation access: hooking Keychain APIs, intercepting network calls, modifying in-memory values, and extracting decrypted data at runtime. The user is unaware their data is being intercepted.",
+      "remediation": "Implement Frida detection by checking for: the frida-agent dylib in loaded libraries, the frida-server on default port 27042, suspicious thread names, and pipe handles used by Frida. Use binary integrity checks (code signing verification at runtime) to detect gadget injection.",
+      "cwe": ["CWE-693"],
+      "references": [
+        "https://frida.re/",
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-RESILIENCE/MASTG-TEST-0092/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "(?i)(frida|fridagadget|FridaGadget)"
+      }
+    },
+    {
+      "id": "ios-ats-bypass-code",
+      "title": "ATS Bypass in Source Code",
+      "severity": "High",
+      "category": "Network Security",
+      "description": "A string matching an ATS bypass pattern (allowsArbitraryLoads set to true in code) was found in the binary. Unlike Info.plist configuration, this indicates that the app may be programmatically disabling ATS at runtime, which allows arbitrary HTTP connections outside of the plist configuration.",
+      "attack_path": "The app modifies NSURLSessionConfiguration or creates custom URL sessions that bypass ATS at runtime. An attacker performing MITM on the network can intercept any HTTP connections made through these bypass sessions, including API calls that the developer intended to be secure but are accidentally routed through the bypass session.",
+      "remediation": "Remove runtime ATS bypass code. All session configurations should use default ATS enforcement. If a specific endpoint requires HTTP, configure the exception in Info.plist rather than programmatically, so it is reviewed during App Store submission.",
+      "cwe": ["CWE-319"],
+      "references": [
+        "https://developer.apple.com/documentation/foundation/nsurlsessionconfiguration"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "(?i)allowsArbitraryLoads.*true"
+      }
+    },
+    {
+      "id": "ios-hardcoded-ip",
+      "title": "Hardcoded Private IP Address",
+      "severity": "Low",
+      "category": "Configuration",
+      "description": "A hardcoded private IP address (RFC 1918: 192.168.x.x, 10.x.x.x, or 172.16-31.x.x) was found in the binary. This commonly indicates development or staging server addresses left in a production binary, or direct connection to infrastructure that should be accessed via a hostname.",
+      "attack_path": "If the app connects directly to a hardcoded IP address on a corporate or VPN network, an attacker who gains access to that network segment can impersonate the server (no hostname-based certificate validation), intercept the communication, or perform a denial-of-service against the IP. Additionally, the IP address leaks information about the internal network topology.",
+      "remediation": "Replace all hardcoded IP addresses with environment-appropriate hostnames resolved via DNS. Ensure the production configuration does not include development/staging IPs. Use build-time configuration to select the appropriate server address per environment.",
+      "cwe": ["CWE-547"],
+      "references": [
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-NETWORK/MASTG-TEST-0044/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "\\b(?:192\\.168|10\\.\\d{1,3}|172\\.(?:1[6-9]|2\\d|3[01]))\\.\\d{1,3}\\.\\d{1,3}\\b"
+      }
+    },
+    {
+      "id": "ios-pie-disabled",
+      "title": "Position Independent Executable (PIE) Disabled",
+      "severity": "High",
+      "category": "Binary Protections",
+      "description": "The main binary is not compiled as a Position Independent Executable. PIE is required for Address Space Layout Randomization (ASLR) to work. Without PIE, the binary is loaded at a fixed, predictable memory address on every run. This makes return-oriented programming (ROP) and code-reuse attacks trivially exploitable because attacker-controlled data can reference fixed absolute addresses.",
+      "attack_path": "If a memory corruption vulnerability (buffer overflow, use-after-free) exists in the binary or a framework it uses, ASLR would normally prevent reliable exploitation by randomizing code locations. With PIE disabled, all code gadgets are at fixed addresses. An attacker who discovers a single memory corruption bug can write a reliable exploit that works on every device running this app, without any information leak primitive.",
+      "remediation": "Enable PIE by adding -pie to the linker flags in Xcode build settings (GENERATE_MASTER_OBJECT_FILE = YES, and ensure the deployment target is iOS 4.3+). All modern Xcode projects have PIE enabled by default — investigate any custom Makefile or linker script that might be disabling it.",
+      "cwe": ["CWE-693", "CWE-119"],
+      "references": [
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-CODE/MASTG-TEST-0085/",
+        "https://developer.apple.com/documentation/xcode/build-settings-reference"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_flag",
+        "flag": "pie",
+        "value": false
+      }
+    },
+    {
+      "id": "ios-stack-canary-missing",
+      "title": "Stack Smashing Protection (Stack Canary) Missing",
+      "severity": "High",
+      "category": "Binary Protections",
+      "description": "The binary does not import ___stack_chk_fail, indicating it was compiled without stack canaries (-fstack-protector). Stack canaries place a randomized value on the stack between local variables and the saved return address. If a stack buffer overflow overwrites the canary, the program detects the corruption and aborts before the attacker can redirect execution.",
+      "attack_path": "A stack buffer overflow in any function of this binary allows an attacker to overwrite the saved return address directly. Without a canary to detect the overwrite, the corrupted return address is used when the function returns. Combined with a ROP chain (possible because PIE may also be absent), the attacker achieves arbitrary code execution. On iOS, this could mean Keychain exfiltration, URL scheme triggering, or sandbox escape via kernel exploits.",
+      "remediation": "Compile with -fstack-protector-all to enable stack canaries for all functions. In Xcode, set OTHER_CFLAGS to include -fstack-protector-all. This is enabled by default in modern Xcode; investigate any code that overrides compiler flags.",
+      "cwe": ["CWE-693", "CWE-121"],
+      "references": [
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-CODE/MASTG-TEST-0085/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_flag",
+        "flag": "stack_canary",
+        "value": false
+      }
+    },
+    {
+      "id": "ios-arc-disabled",
+      "title": "Automatic Reference Counting (ARC) Not Detected",
+      "severity": "Medium",
+      "category": "Binary Protections",
+      "description": "The binary does not import _objc_release, suggesting it was compiled without Automatic Reference Counting (ARC). Code compiled without ARC is more prone to memory management bugs: use-after-free, double-free, and dangling pointer vulnerabilities. These memory safety issues are often exploitable for arbitrary code execution.",
+      "attack_path": "Manual memory management in Objective-C without ARC introduces use-after-free vulnerabilities. An attacker who can trigger the vulnerable code path can craft heap spray or type confusion attacks. On iOS, such vulnerabilities have historically been used in sandbox escapes and jailbreak chains.",
+      "remediation": "Migrate all Objective-C code to use ARC. In Xcode, set CLANG_ENABLE_OBJC_ARC = YES. For legacy third-party code that cannot be migrated, use -fobjc-arc for individual files in Build Phases. Consider migrating legacy Objective-C to Swift, which has built-in memory safety guarantees.",
+      "cwe": ["CWE-119", "CWE-416"],
+      "references": [
+        "https://developer.apple.com/library/archive/releasenotes/ObjectiveC/RN-TransitioningToARC/Introduction/Introduction.html",
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-CODE/MASTG-TEST-0085/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_flag",
+        "flag": "arc",
+        "value": false
+      }
+    },
+    {
+      "id": "ios-binary-unencrypted",
+      "title": "Binary Not Encrypted (DRM Missing)",
+      "severity": "High",
+      "category": "Tampering & Reverse Engineering",
+      "description": "The main executable does not have FairPlay DRM encryption applied (cryptid = 0). Apps downloaded from the App Store are normally encrypted with FairPlay. An unencrypted binary indicates the app was distributed outside the App Store, decrypted using a tool like frida-ios-dump or Clutch, or never submitted to the App Store. Decrypted binaries are far easier to reverse engineer with static analysis tools.",
+      "attack_path": "Attacker loads the unencrypted binary directly into Ghidra, IDA Pro, or Hopper without any decryption step. They can decompile the full application logic, locate certificate pinning code and patch it, extract hardcoded secrets, understand the authentication protocol, and produce a modified IPA that bypasses security controls. The low barrier to static analysis accelerates all other attack paths.",
+      "remediation": "Ensure the app is distributed exclusively through the App Store, which applies FairPlay encryption automatically. If this IPA is from a legitimate internal enterprise distribution, investigate the signing and packaging process. Implement additional obfuscation (LLVM obfuscator, string encryption) as defense-in-depth, since FairPlay can be stripped from apps running on jailbroken devices.",
+      "cwe": ["CWE-693"],
+      "references": [
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-RESILIENCE/MASTG-TEST-0087/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_flag",
+        "flag": "encrypted",
+        "value": false
+      }
+    },
+    {
+      "id": "ios-debuggable",
+      "title": "Application is Debuggable (get-task-allow)",
+      "severity": "Critical",
+      "category": "Tampering & Reverse Engineering",
+      "description": "The get-task-allow entitlement is set to true. This entitlement permits any process with taskport to attach a debugger to this app. In a production build, this should never be true — it is automatically added to debug builds by Xcode and must be stripped before release. A production app with get-task-allow=true can be attached to with lldb by any process that can obtain task port rights, including other apps on a jailbroken device.",
+      "attack_path": "On a jailbroken device, an attacker runs `taskpolicy` or a custom tool to attach lldb to the running app process. With debugger access, they can: dump all process memory (including Keychain values decrypted in memory), set breakpoints on cryptographic functions to extract keys, modify app state to bypass authentication, and exfiltrate secrets without triggering any detection.",
+      "remediation": "Ensure production builds are signed with a distribution provisioning profile, not a development profile. Distribution profiles do not include get-task-allow. Audit your CI/CD pipeline to verify release IPA files use the AppStore or Enterprise distribution entitlements. Never ship a build signed with a development certificate to end users.",
+      "cwe": ["CWE-489", "CWE-693"],
+      "references": [
+        "https://developer.apple.com/documentation/bundleresources/entitlements/get-task-allow",
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-RESILIENCE/MASTG-TEST-0086/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "entitlement",
+        "key": "get-task-allow",
+        "check": "true"
+      }
+    },
+    {
+      "id": "ios-aps-dev",
+      "title": "Push Notifications Using Development (Sandbox) Environment",
+      "severity": "Medium",
+      "category": "Configuration",
+      "description": "The aps-environment entitlement is present, indicating the app uses Apple Push Notification service (APNs). Review whether this is the 'development' or 'production' value. A production app using the development APNs environment may fail to receive push notifications for all users. More critically, the APNs device token is environment-specific; a token from the development environment cannot receive notifications from the production environment, potentially silencing security alerts or OTP messages.",
+      "attack_path": "If the app silently fails to deliver push-based OTPs or security alerts (due to APNs environment mismatch), an attacker performing account takeover can exploit the window of silence — the user does not receive the 'new login detected' push notification because it was sent to the wrong APNs environment. This is a reliability-based security degradation.",
+      "remediation": "Verify that the aps-environment entitlement value is 'production' in all App Store and enterprise distribution builds. Only development builds should use the development environment. Automate this check in your release pipeline.",
+      "cwe": ["CWE-16"],
+      "references": [
+        "https://developer.apple.com/documentation/bundleresources/entitlements/aps-environment"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "entitlement",
+        "key": "aps-environment",
+        "check": "exists"
+      }
+    },
+    {
+      "id": "ios-keychain-sharing",
+      "title": "Keychain Access Group Sharing Configured",
+      "severity": "Low",
+      "category": "Data Storage",
+      "description": "The keychain-access-groups entitlement is present, meaning Keychain items can be shared between multiple apps from the same developer team. Shared Keychain groups allow any app in the group to read all items added to the shared group. If one app in the group is compromised, all Keychain items in the shared group are exposed.",
+      "attack_path": "If a less security-critical app in the same team shares a Keychain access group with a banking or authentication app, and the less-critical app has a vulnerability (e.g., a malicious SDK), the attacker can read auth tokens or credentials stored in the shared Keychain group from the less-secure app context.",
+      "remediation": "Minimize Keychain sharing. Only share Keychain groups between apps that genuinely require shared credentials. Review which items are stored in shared vs. app-private groups. Use app-specific groups ($(AppIdentifierPrefix)$(CFBundleIdentifier)) for sensitive items and only shared groups for items explicitly designed to be shared.",
+      "cwe": ["CWE-284"],
+      "references": [
+        "https://developer.apple.com/documentation/security/keychain_services/keychain_items/sharing_access_to_keychain_items_among_a_collection_of_apps"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "entitlement",
+        "key": "keychain-access-groups",
+        "check": "exists"
+      }
+    },
+    {
+      "id": "ios-app-groups",
+      "title": "App Groups Configured (Shared Container)",
+      "severity": "Info",
+      "category": "IPC Security",
+      "description": "The com.apple.security.application-groups entitlement enables a shared container directory accessible by multiple apps and app extensions (Today widgets, keyboard extensions, etc.) in the same team. Data written to the shared container is accessible by all apps in the group, including potentially less-secure extensions.",
+      "attack_path": "A malicious keyboard extension that is part of the same app group can read files written to the shared container by the main app. If the main app caches API responses, session data, or user credentials in the shared container (rather than the Keychain), a compromised extension exfiltrates this data to a remote server.",
+      "remediation": "Audit what data is written to the shared App Group container. Store sensitive data in the Keychain, not the shared container. If sharing data between extensions is required, use NSFileProtectionComplete on shared files and validate the integrity of data read from the shared container.",
+      "cwe": ["CWE-284"],
+      "references": [
+        "https://developer.apple.com/documentation/foundation/nsfilemanager/1412643-containerurl"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "entitlement",
+        "key": "com.apple.security.application-groups",
+        "check": "exists"
+      }
+    },
+    {
+      "id": "ios-ssl-pinning-bypass",
+      "title": "Certificate Pinning Bypass Code Detected",
+      "severity": "High",
+      "category": "Network Security",
+      "description": "Strings indicating SSL/TLS certificate pinning bypass code were found in the binary (e.g., references to allowInvalidCertificates, trustedCertificates set to empty, or custom TrustKit bypass). If certificate pinning is disabled or bypassable, an attacker performing a MITM attack can present any certificate and intercept all HTTPS traffic from the app, regardless of ATS settings.",
+      "attack_path": "Attacker sits on the network path and presents a self-signed or attacker-controlled certificate. The app, lacking or having bypassable certificate pinning, accepts the certificate and completes the TLS handshake. All subsequent HTTP requests — including authentication, session tokens, and PII — are visible to the attacker in plaintext via their intercepting proxy.",
+      "remediation": "Implement certificate pinning using TrustKit or a custom URLSessionDelegate that validates the server's public key hash against a pinned set. Ensure pinning is active in all build configurations including release. Include a backup pin and implement a pin rotation strategy to avoid bricking users when certs rotate.",
+      "cwe": ["CWE-295"],
+      "references": [
+        "https://github.com/datatheorem/TrustKit",
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-NETWORK/MASTG-TEST-0046/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "(?i)(allowInvalidCertificates|pinnedCertificates\\s*=\\s*\\[\\s*\\]|evaluateServerTrust.*false|kCFStreamSSLValidatesCertificateChain.*false)"
+      }
+    },
+    {
+      "id": "ios-nstemporarydirectory-sensitive",
+      "title": "Sensitive Data Written to Temporary Directory",
+      "severity": "Medium",
+      "category": "Data Storage",
+      "description": "The binary references NSTemporaryDirectory, which is a world-readable (by the app's process) temporary directory whose contents persist across app restarts and may be included in device backups. Sensitive data written to the temporary directory without proper file protection attributes is exposed if the device is backed up unencrypted or if the app does not reliably clean up after itself.",
+      "attack_path": "Attacker extracts an unencrypted iTunes backup. Temporary directory contents are included in the backup under the app's container. Sensitive files written there — exported documents, decrypted content, cached API payloads — are readable without any device unlock or decryption. On a jailbroken device, the temp directory is directly accessible to any root process.",
+      "remediation": "Avoid writing sensitive data to NSTemporaryDirectory. If temporary files must contain sensitive content, apply NSFileProtectionComplete file attributes immediately after creation and delete the file as soon as it is no longer needed. Implement a startup routine to purge any leftover temporary files from previous sessions.",
+      "cwe": ["CWE-276", "CWE-312"],
+      "references": [
+        "https://developer.apple.com/documentation/foundation/1409211-nstemporarydirectory",
+        "https://mas.owasp.org/MASTG/tests/ios/MASVS-STORAGE/MASTG-TEST-0001/"
+      ],
+      "enabled": true,
+      "detection": {
+        "type": "binary_string",
+        "pattern": "NSTemporaryDirectory"
+      }
+    }
+  ]
+}

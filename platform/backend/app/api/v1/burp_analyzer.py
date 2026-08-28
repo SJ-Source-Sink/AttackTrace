@@ -17,13 +17,15 @@ from __future__ import annotations
 
 import base64
 import json
+import pathlib
 import re
+import time as _time
 import uuid
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 # ─── Attack Suite pattern library ────────────────────────────────────────────
 # Re-use the same 5700+ bug-bounty patterns the scanner uses so payloads,
@@ -1053,6 +1055,368 @@ def find_interesting_endpoints(profiles: list[EndpointProfile]) -> list[dict]:
     return interesting[:50]
 
 
+# ─── Parameter correlation graph ─────────────────────────────────────────────
+
+def build_param_graph(profiles: list[EndpointProfile]) -> list[dict]:
+    """Map each parameter to every endpoint that uses it, scored by risk × coverage."""
+    _HIGH_RISK = frozenset(
+        p.lower() for p in
+        list(IDOR_ID_PARAMS) + list(SQLI_TEST_PARAMS) + list(SSRF_PARAMS) + list(REDIRECT_PARAMS)
+    )
+
+    param_map: dict[str, list[dict]] = defaultdict(list)
+    for profile in profiles:
+        ep_entry = {
+            "endpoint": f"{profile.method} {profile.path}",
+            "full_url": profile.full_url,
+            "method": profile.method,
+            "auth": sorted(profile.auth_types),
+        }
+        for param in profile.all_params:
+            param_map[param.lower()].append(ep_entry)
+
+    correlations = []
+    for param, endpoints in param_map.items():
+        if len(endpoints) < 2:
+            continue
+        is_high_risk = param in _HIGH_RISK
+        score = len(endpoints) * (3 if is_high_risk else 1)
+        correlations.append({
+            "param": param,
+            "endpoint_count": len(endpoints),
+            "endpoints": endpoints[:12],
+            "is_high_risk": is_high_risk,
+            "risk_score": score,
+        })
+
+    correlations.sort(key=lambda x: -x["risk_score"])
+    return correlations[:30]
+
+
+# ─── Auth flow tracer ─────────────────────────────────────────────────────────
+
+_JWT_RE = re.compile(r'eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{5,}')
+_LOGIN_PATTERNS = ["/login", "/signin", "/auth", "/token", "/session", "/oauth", "/jwt"]
+
+
+def _decode_jwt_segment(seg: str) -> dict:
+    try:
+        seg += "=" * (4 - len(seg) % 4)
+        return json.loads(base64.b64decode(seg).decode("utf-8", errors="replace"))
+    except Exception:
+        return {}
+
+
+def trace_auth_flows(items: list[BurpItem], profiles: list[EndpointProfile]) -> dict:
+    """Trace JWT issuance → usage and surface auth coverage gaps."""
+    # 1. Find JWT-issuing endpoints
+    token_flows: dict[str, dict] = {}
+
+    for item in items:
+        if item.method not in ("POST", "PUT") or item.status_code not in (200, 201):
+            continue
+        if not any(p in item.path.lower() for p in _LOGIN_PATTERNS):
+            continue
+        m = _JWT_RE.search(item.resp_body or "")
+        if not m:
+            continue
+
+        token = m.group(0)
+        prefix = token[:50]
+        if prefix in token_flows:
+            continue
+
+        parts = token.split(".")
+        header  = _decode_jwt_segment(parts[0]) if len(parts) > 0 else {}
+        payload = _decode_jwt_segment(parts[1]) if len(parts) > 1 else {}
+
+        token_flows[prefix] = {
+            "token_preview": token[:25] + "…",
+            "issuer_path":   item.path,
+            "issuer_method": item.method,
+            "alg":           header.get("alg", "unknown"),
+            "claims":        {k: payload[k] for k in ("sub", "role", "exp", "iss", "admin", "is_admin") if k in payload},
+            "usage_count":   0,
+            "used_by":       [],
+        }
+
+    # 2. Count token usage
+    for item in items:
+        auth = item.req_headers.get("authorization", "")
+        m = _JWT_RE.search(auth)
+        if not m:
+            continue
+        prefix = m.group(0)[:50]
+        if prefix in token_flows:
+            token_flows[prefix]["usage_count"] += 1
+            norm = _normalise_path(item.path)
+            if norm not in token_flows[prefix]["used_by"]:
+                token_flows[prefix]["used_by"].append(norm)
+
+    for v in token_flows.values():
+        v["used_by"] = v["used_by"][:15]
+
+    # 3. Auth coverage gaps
+    _SENSITIVE_KW = ["/user", "/account", "/profile", "/admin", "/order",
+                     "/payment", "/invoice", "/settings", "/dashboard"]
+    suspicious_unprotected: list[dict] = []
+    protected_count   = 0
+    unprotected_count = 0
+
+    for profile in profiles:
+        if profile.auth_types:
+            protected_count += 1
+        else:
+            unprotected_count += 1
+            if any(kw in profile.path.lower() for kw in _SENSITIVE_KW):
+                suspicious_unprotected.append({
+                    "endpoint": f"{profile.method} {profile.path}",
+                    "full_url": profile.full_url,
+                    "params":   sorted(profile.all_params)[:5],
+                })
+
+    # 4. JWT anomalies
+    anomalies: list[dict] = []
+    for info in token_flows.values():
+        alg    = (info.get("alg") or "").upper()
+        claims = info.get("claims", {})
+        issuer = info.get("issuer_path", "")
+
+        if alg in ("HS256", "HS384", "HS512"):
+            anomalies.append({"type": "weak_algorithm", "severity": "high",
+                              "detail": f"Symmetric HMAC signing ({alg}) — secret is brutable with hashcat",
+                              "issuer": issuer})
+        if alg in ("NONE", ""):
+            anomalies.append({"type": "alg_none", "severity": "critical",
+                              "detail": "Algorithm 'none' — signature verification may be bypassed",
+                              "issuer": issuer})
+        if "exp" not in claims:
+            anomalies.append({"type": "no_expiry", "severity": "medium",
+                              "detail": "JWT has no 'exp' claim — token never expires",
+                              "issuer": issuer})
+        if any(k in claims for k in ("role", "admin", "is_admin")):
+            anomalies.append({"type": "role_in_payload", "severity": "high",
+                              "detail": f"Authorization claims in JWT payload {list(claims.keys())} — modifiable if secret is weak",
+                              "issuer": issuer})
+
+    return {
+        "token_flows":             list(token_flows.values())[:6],
+        "protected_count":         protected_count,
+        "unprotected_count":       unprotected_count,
+        "suspicious_unprotected":  suspicious_unprotected[:12],
+        "anomalies":               anomalies[:10],
+    }
+
+
+# ─── Active request verifier ──────────────────────────────────────────────────
+
+async def verify_request(
+    endpoint_str: str,
+    method: str,
+    vuln_type: str,
+    param: str,
+    payload: str,
+    inject_in: str,
+    body_params: dict,
+    auth_headers: dict[str, str],
+    original_status: int,
+    req_timeout: int = 10,
+    verify_ssl: bool = True,
+) -> dict:
+    """Replay a request with the payload injected and analyse the response."""
+    try:
+        import httpx
+    except ImportError:
+        return {"error": "httpx not installed", "verified": False}
+
+    url = endpoint_str.split(" ", 1)[-1] if " " in endpoint_str else endpoint_str
+    parsed = urlparse(url)
+
+    headers: dict[str, str] = {
+        "User-Agent": "AttackTrace-Verifier/1.0",
+        "Accept":     "application/json, text/html, */*",
+    }
+    headers.update({k: v for k, v in auth_headers.items() if k and v})
+
+    request_body: Optional[str] = None
+
+    if inject_in == "query":
+        qs = parse_qs(parsed.query)
+        qs[param] = [payload]
+        url = urlunparse(parsed._replace(query=urlencode({k: v[0] for k, v in qs.items()})))
+    elif inject_in == "body_json":
+        data = dict(body_params)
+        data[param] = payload
+        request_body = json.dumps(data)
+        headers["Content-Type"] = "application/json"
+    elif inject_in == "body_form":
+        data = dict(body_params)
+        data[param] = payload
+        request_body = urlencode(data)
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    elif inject_in == "path":
+        new_path = re.sub(r'\{[^}]+\}', payload, parsed.path)
+        new_path = re.sub(r'(?<=/)\d+(?=/|$)', payload, new_path)
+        url = urlunparse(parsed._replace(path=new_path))
+
+    try:
+        async with httpx.AsyncClient(verify=verify_ssl, follow_redirects=True,
+                                     timeout=req_timeout) as client:
+            resp = await client.request(
+                method=method, url=url, headers=headers,
+                content=request_body.encode() if request_body else None,
+            )
+        body  = resp.text[:4000]
+        status = resp.status_code
+    except Exception as exc:
+        return {"verified": False, "confidence": "none", "error": str(exc),
+                "status_code": 0, "response_snippet": "", "evidence": ""}
+
+    verified   = False
+    confidence = "low"
+    evidence   = ""
+
+    if vuln_type in ("sqli", "sqli_exposure"):
+        _SQL = [r"you have an error in your sql syntax", r"ora-\d{5}:",
+                r"microsoft ole db", r"sqlstate\[", r"warning: mysql_",
+                r"sqlite3::", r"unclosed quotation mark", r"pg_query\(\)"]
+        bl = body.lower()
+        for pat in _SQL:
+            m = re.search(pat, bl)
+            if m:
+                verified = True; confidence = "high"
+                evidence = body[max(0, m.start()-30):m.end()+80]
+                break
+
+    elif vuln_type == "xss":
+        if len(payload) > 5 and payload[:20].lower() in body.lower():
+            verified = True; confidence = "high"
+            idx = body.lower().find(payload[:20].lower())
+            evidence = body[max(0, idx-40):idx+100]
+
+    elif vuln_type == "ssti":
+        for probe, expected in [("{{7*7}}", "49"), ("${7*7}", "49"), ("#{7*7}", "49")]:
+            if probe.lower() in payload.lower() and expected in body:
+                verified = True; confidence = "high"
+                evidence = f"Template expression evaluated — '{expected}' found in response"
+                break
+
+    elif vuln_type in ("idor", "auth_bypass"):
+        if status == 200 and original_status in (401, 403, 404):
+            verified = True; confidence = "medium"
+            evidence = f"HTTP {status} received (expected {original_status}) — possible access control bypass"
+        else:
+            evidence = f"HTTP {status} — manual review needed"
+
+    elif vuln_type == "open_redirect":
+        location = resp.headers.get("location", "")
+        if location and any(kw in location for kw in ["evil.example", "attacker.", payload[:15]]):
+            verified = True; confidence = "high"
+            evidence = f"Redirect Location: {location}"
+
+    elif vuln_type == "ssrf":
+        if status == 200 and any(kw in body.lower() for kw in
+                                  ["ami-id", "instance-id", "security-credentials",
+                                   "-err wrong", "redis_version", "169.254"]):
+            verified = True; confidence = "high"
+            evidence = body[:200]
+
+    elif vuln_type in ("info_disclosure", "secret_exposure"):
+        for pat in [r"AKIA[0-9A-Z]{16}", r"-----BEGIN.*PRIVATE KEY",
+                    r'"password"\s*:\s*"[^"]{4,}"']:
+            m = re.search(pat, body, re.IGNORECASE)
+            if m:
+                verified = True; confidence = "high"
+                evidence = body[max(0, m.start()-10):m.end()+30]
+                break
+
+    if not evidence:
+        evidence = f"HTTP {status} — {len(body)} bytes received. Manual review needed."
+
+    return {
+        "verified":          verified,
+        "confidence":        confidence,
+        "status_code":       status,
+        "response_snippet":  body[:500],
+        "evidence":          evidence,
+        "url_used":          url,
+    }
+
+
+# ─── History helpers ──────────────────────────────────────────────────────────
+
+def _burp_history_dir(org_id: str) -> pathlib.Path:
+    d = pathlib.Path(_settings.ATTACKTRACE_WORKSPACE_DIR) / "burp-analyzer" / str(org_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _save_burp_analysis(
+    org_id: str,
+    filename: str,
+    summary: dict,
+    test_cases: list[dict],
+    response_findings: list[dict],
+    ai_text: str,
+    param_graph: list[dict],
+    auth_flows: dict,
+) -> str:
+    aid = str(uuid.uuid4())
+    record = {
+        "id": aid,
+        "filename": filename,
+        "saved_at": _time.time(),
+        "summary": summary,
+        "test_cases": test_cases,
+        "response_findings": response_findings,
+        "ai_text": ai_text,
+        "param_graph": param_graph,
+        "auth_flows": auth_flows,
+    }
+    (_burp_history_dir(org_id) / f"{aid}.json").write_text(json.dumps(record))
+    return aid
+
+
+def _list_burp_history(org_id: str) -> list[dict]:
+    d = _burp_history_dir(org_id)
+    result = []
+    for f in sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:50]:
+        try:
+            data = json.loads(f.read_text())
+            result.append({
+                "id":               data["id"],
+                "filename":         data.get("filename", "unknown"),
+                "saved_at":         data.get("saved_at", 0),
+                "total_requests":   data.get("summary", {}).get("total_requests", 0),
+                "test_cases":       len(data.get("test_cases", [])),
+                "response_findings":len(data.get("response_findings", [])),
+                "severity_counts":  data.get("summary", {}).get("severity_counts", {}),
+                "tech_stack":       data.get("summary", {}).get("tech_stack", []),
+                "unique_hosts":     data.get("summary", {}).get("unique_hosts", []),
+            })
+        except Exception:
+            continue
+    return result
+
+
+def _get_burp_analysis(org_id: str, analysis_id: str) -> Optional[dict]:
+    f = _burp_history_dir(org_id) / f"{analysis_id}.json"
+    if not f.exists():
+        return None
+    try:
+        return json.loads(f.read_text())
+    except Exception:
+        return None
+
+
+def _delete_burp_analysis(org_id: str, analysis_id: str) -> bool:
+    f = _burp_history_dir(org_id) / f"{analysis_id}.json"
+    if f.exists():
+        f.unlink()
+        return True
+    return False
+
+
 # ─── Claude AI prompt ─────────────────────────────────────────────────────────
 
 def build_ai_prompt(
@@ -1115,6 +1479,8 @@ async def run_burp_analysis(
     anthropic_api_key: str,
     base_url: str | None = None,
     model: str | None = None,
+    org_id: str | None = None,
+    filename: str = "burp_history.xml",
 ) -> AsyncGenerator[str, None]:
     """Full analysis pipeline — yields SSE events."""
 
@@ -1176,7 +1542,25 @@ async def run_burp_analysis(
         "message": f"Generated {len(all_test_cases):,} test cases across {len(profiles):,} endpoints",
     })
 
-    # 5. AI analysis
+    # 5. Parameter correlation graph
+    param_graph = build_param_graph(profiles)
+    yield _sse("param_graph", {
+        "correlations": param_graph,
+        "message": f"Found {len(param_graph)} cross-endpoint parameter correlation(s)",
+    })
+
+    # 6. Auth flow tracing
+    auth_flows = trace_auth_flows(items, profiles)
+    yield _sse("auth_flows", {
+        **auth_flows,
+        "message": (
+            f"Traced {len(auth_flows['token_flows'])} token flow(s), "
+            f"{len(auth_flows['suspicious_unprotected'])} suspicious unprotected endpoint(s)"
+        ),
+    })
+
+    # 7. AI analysis
+    ai_text = ""
     if ai_analysis and anthropic_api_key:
         yield _sse("ai_start", {"message": "Running AI analysis — this may take 15-30 seconds…"})
         prompt = build_ai_prompt(items, profiles, tech_stack, auth_mechs, interesting)
@@ -1195,24 +1579,48 @@ async def run_burp_analysis(
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
                 async for chunk in stream.text_stream:
+                    ai_text += chunk
                     yield _sse("ai_chunk", {"text": chunk})
         except Exception as exc:
             yield _sse("ai_error", {"message": f"AI analysis unavailable: {exc}"})
 
-    # 6. Complete
+    # 8. Complete + save history
     sev_counts: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     for tc in all_test_cases:
         sev_counts[tc.severity] = sev_counts.get(tc.severity, 0) + 1
     for rf in response_findings:
         sev_counts[rf["severity"]] = sev_counts.get(rf["severity"], 0) + 1
 
+    summary = {
+        "total_requests":      len(items),
+        "unique_endpoints":    len(profiles),
+        "test_cases":          len(all_test_cases),
+        "response_findings":   len(response_findings),
+        "severity_counts":     sev_counts,
+        "tech_stack":          tech_stack,
+        "auth_mechanisms":     auth_mechs,
+        "unique_hosts":        hosts,
+        "interesting_endpoints": interesting,
+    }
+
+    analysis_id: Optional[str] = None
+    if org_id:
+        try:
+            analysis_id = _save_burp_analysis(
+                org_id=org_id,
+                filename=filename,
+                summary=summary,
+                test_cases=[tc.__dict__ for tc in all_test_cases],
+                response_findings=response_findings,
+                ai_text=ai_text,
+                param_graph=param_graph,
+                auth_flows=auth_flows,
+            )
+        except Exception:
+            pass
+
     yield _sse("complete", {
-        "total_requests":     len(items),
-        "unique_endpoints":   len(profiles),
-        "test_cases":         len(all_test_cases),
-        "response_findings":  len(response_findings),
-        "severity_counts":    sev_counts,
-        "tech_stack":         tech_stack,
-        "auth_mechanisms":    auth_mechs,
+        **summary,
+        "analysis_id": analysis_id,
         "interesting_endpoints": interesting,
     })
