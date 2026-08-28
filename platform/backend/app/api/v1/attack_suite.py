@@ -5733,11 +5733,21 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, ai_config:
                                              timeout=_timeout, verify=False)
 
         # ── Connectivity probe ─────────────────────────────────────────────
+        _probe_timeout = httpx.Timeout(connect=4.0, read=5.0, write=5.0, pool=5.0)
         try:
-            await client.head(req.target, timeout=httpx.Timeout(connect=4.0, read=5.0, write=5.0, pool=5.0))
+            await client.head(req.target, timeout=_probe_timeout)
         except (httpx.ConnectError, httpx.ConnectTimeout):
             yield _sse("error", {"message": f"Target {req.target} is unreachable. Check the URL and try again."})
             return
+        except Exception:
+            # HEAD rejected (405, timeout on read, etc.) — fall back to GET
+            try:
+                await client.get(req.target, timeout=_probe_timeout)
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                yield _sse("error", {"message": f"Target {req.target} is unreachable. Check the URL and try again."})
+                return
+            except Exception:
+                pass  # non-connect errors (SSL, redirect loops) — let the scan proceed
 
         # ── SPA Detection ──────────────────────────────────────────────────
         spa_fallback_size = await _detect_spa_fallback(req.target, client)

@@ -584,17 +584,20 @@ def _persist_module_results_partial(
                 logger.debug(f"Partial persist domain skipped [{module_name}]: {e}")
 
         # Persist findings (with dedup check)
+        from sqlalchemy.exc import IntegrityError as _IntegrityError
         for f in getattr(module_result, "findings", []):
             sev_value = f.severity.value if hasattr(f.severity, "value") else f.severity
             dedup_hash = _compute_dedup_hash(org_id, f.title, f.affected_asset, getattr(f, "cve", None))
 
-            # Check for existing finding with same dedup hash
-            existing = db_session.execute(
-                sync_select(DBFinding).where(
-                    DBFinding.org_id == org_id,
-                    DBFinding.dedup_hash == dedup_hash,
-                )
-            ).scalar_one_or_none()
+            # no_autoflush prevents pending adds from flushing mid-SELECT and
+            # hitting the unique constraint before we've had a chance to check.
+            with db_session.no_autoflush:
+                existing = db_session.execute(
+                    sync_select(DBFinding).where(
+                        DBFinding.org_id == org_id,
+                        DBFinding.dedup_hash == dedup_hash,
+                    )
+                ).scalar_one_or_none()
 
             if existing:
                 logger.debug(f"Dedup skip (partial) [{module_name}]: {f.title} / {f.affected_asset}")
@@ -639,7 +642,14 @@ def _persist_module_results_partial(
             except Exception as e:
                 logger.warning(f"Partial persist finding failed [{module_name}]: {e}")
 
-        db_session.flush()
+        try:
+            db_session.flush()
+        except _IntegrityError:
+            # A concurrent partial-persist or retry already wrote one of these
+            # findings. Roll back this batch and continue — findings already in
+            # the DB are counted correctly on the final persist pass.
+            db_session.rollback()
+            logger.warning(f"Partial persist [{module_name}]: dedup conflict on flush, skipping batch")
         logger.debug(
             f"Partial persist: {module_name} → "
             f"{len(getattr(module_result, 'findings', []))} findings"
@@ -731,18 +741,22 @@ def _persist_session_results(db_session, scan_job, attacktrace_session, org_id: 
         )
         assets_created += 1
 
+    from sqlalchemy.exc import IntegrityError as _IntegrityError
     for f in attacktrace_session.findings:
         sev_value = f.severity.value
         dedup_hash = _compute_dedup_hash(org_id, f.title, f.affected_asset, getattr(f, "cve", None))
 
-        # Idempotent: skip if already persisted (e.g., by partial persist callback)
-        existing = db_session.execute(
-            sync_select(DBFinding).where(
-                DBFinding.org_id == org_id,
-                DBFinding.dedup_hash == dedup_hash,
-                DBFinding.scan_job_id == scan_job.id,
-            )
-        ).scalar_one_or_none()
+        # Idempotent: skip if already persisted (e.g., by partial persist callback).
+        # no_autoflush prevents pending adds from flushing mid-SELECT and hitting
+        # the unique constraint before the check completes.
+        with db_session.no_autoflush:
+            existing = db_session.execute(
+                sync_select(DBFinding).where(
+                    DBFinding.org_id == org_id,
+                    DBFinding.dedup_hash == dedup_hash,
+                    DBFinding.scan_job_id == scan_job.id,
+                )
+            ).scalar_one_or_none()
 
         if existing:
             # Still count it in findings_count
@@ -790,7 +804,11 @@ def _persist_session_results(db_session, scan_job, attacktrace_session, org_id: 
         except Exception as e:
             logger.error(f"Failed to persist finding '{f.title}': {e}")
 
-    db_session.flush()
+    try:
+        db_session.flush()
+    except _IntegrityError:
+        db_session.rollback()
+        logger.warning("Final persist: dedup conflict on flush — duplicate findings skipped")
 
     attacktrace_session.update_statistics()
     results_summary = {
