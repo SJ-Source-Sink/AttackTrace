@@ -68,7 +68,7 @@ interface JsFinding {
   file_url: string;
   match: string;
   line_number: number;
-  recommendation: string;
+  remediation: string;
   context?: string;
 }
 
@@ -236,7 +236,7 @@ function FindingCard({ finding }: { finding: JsFinding }) {
           )}
           <div>
             <p className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">Recommendation</p>
-            <p className="text-xs text-zinc-400">{finding.recommendation}</p>
+            <p className="text-xs text-zinc-400">{finding.remediation}</p>
           </div>
           {finding.file_url.startsWith("http") && (
             <a

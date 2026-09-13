@@ -434,11 +434,7 @@ async def _run_url_discovery_for_session(session, r, scan_job_id: str) -> None:
 
 # --- Asset/Finding persistence ---
 
-def _compute_dedup_hash(org_id: UUID, title: str, affected_asset: str, cve_list: list[str] | None = None) -> str:
-    """Compute a stable 64-char dedup hash: sha256(org|title|asset|sorted_cves)."""
-    sorted_cves = "|".join(sorted(cve_list or []))
-    key = f"{str(org_id)}|{title}|{affected_asset}|{sorted_cves}"
-    return hashlib.sha256(key.encode()).hexdigest()
+from app.core.dedup import compute_dedup_hash as _compute_dedup_hash  # noqa: E402
 
 
 def _load_suppression_rules(db_session, org_id: UUID) -> list:
@@ -663,11 +659,27 @@ def _persist_module_results_partial(
 
 
 def _upsert_asset(db_session, **kwargs):
-    """Insert an asset, silently skipping if (org_id, value, asset_type) already exists."""
+    """Insert an asset, or refresh it if (org_id, value, asset_type) already exists.
+
+    Previously this was ON CONFLICT DO NOTHING, so a rescanned asset's metadata
+    (open ports, resolved IPs, etc.) and scan_job_id stayed pinned to whichever
+    scan first discovered it — silently going stale forever. Refreshing on
+    conflict is required for the EASM diff task to have anything new to detect.
+    """
     from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy import func as sa_func
     from app.models.db.asset import Asset
-    stmt = pg_insert(Asset).values(**kwargs).on_conflict_do_nothing(
-        index_elements=["org_id", "value", "asset_type"]
+    stmt = pg_insert(Asset).values(**kwargs)
+    # stmt.excluded is keyed by actual DB column names, not ORM attribute aliases
+    # (Asset.metadata_ maps to the "metadata" column) — translate accordingly.
+    _col_for_kwarg = {"scan_job_id": "scan_job_id", "metadata_": "metadata"}
+    update_cols = {
+        _col_for_kwarg[k]: stmt.excluded[_col_for_kwarg[k]] for k in _col_for_kwarg if k in kwargs
+    }
+    update_cols["last_seen"] = sa_func.now()
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["org_id", "value", "asset_type"],
+        set_=update_cols,
     )
     db_session.execute(stmt)
 
@@ -1287,7 +1299,7 @@ def triage_scan_findings(self, scan_job_id: str) -> dict:
         from app.models.db.asset import Asset
         from app.models.db.scan import ScanJob
         from app.models.db.org import Organization, OrgCredentials
-        from app.services.crypto import decrypt_credential
+        from app.core.security import decrypt_credential
         from sqlalchemy import select as sync_select
 
         try:

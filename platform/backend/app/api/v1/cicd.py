@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, Optional
 from uuid import UUID
 
@@ -18,6 +21,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings as _get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
 from app.models.db.finding import Finding
@@ -27,6 +31,64 @@ from app.services.scan_service import create_scan, get_scan_by_id
 from app.models.schemas.scan import ScanCreate
 
 router = APIRouter(prefix="/cicd", tags=["CI/CD"])
+
+# ── Filesystem history (org-scoped, path-traversal-safe) ─────────────────────
+
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def _validate_uuid(value: str, label: str) -> str:
+    if not _UUID_RE.match(value):
+        raise HTTPException(status_code=400, detail=f"Invalid {label}: must be a UUID")
+    return value
+
+
+def _history_dir(org_id: str) -> Path:
+    d = Path(_get_settings().ATTACKTRACE_WORKSPACE_DIR) / "cicd_gateway" / org_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _safe_history_path(org_id: str, scan_id: str) -> Path:
+    _validate_uuid(scan_id, "scan_id")
+    base = _history_dir(org_id)
+    candidate = (base / f"{scan_id}.json").resolve()
+    if not candidate.is_relative_to(base.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid scan_id")
+    return candidate
+
+
+def _save_scan_result(org_id: str, record: dict) -> None:
+    try:
+        path = _history_dir(org_id) / f"{record['id']}.json"
+        path.write_text(json.dumps(record, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def _load_history(org_id: str, limit: int = 50) -> list[dict]:
+    try:
+        files = sorted(
+            _history_dir(org_id).glob("*.json"),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )[:limit]
+        records = []
+        for f in files:
+            try:
+                records.append(json.loads(f.read_text()))
+            except Exception:
+                pass
+        return records
+    except Exception:
+        return []
+
+
+def _load_scan(org_id: str, scan_id: str) -> dict | None:
+    path = _safe_history_path(org_id, scan_id)
+    if path.exists():
+        return json.loads(path.read_text())
+    return None
 
 
 class CICDScanRequest(BaseModel):
@@ -185,13 +247,20 @@ async def cicd_scan(
                 ci_failed = True
                 break
 
-    return {
+    result = {
+        "id": str(scan_id),
         "scan_id": str(scan_id),
         "status": final_job.status.value,
         "target_domains": payload.target_domains,
         "findings_count": len(findings),
         "ci_failed": ci_failed,
         "fail_reason": f"Found findings at or above severity '{payload.fail_on_severity}'" if ci_failed else None,
+        "created_at": time.time(),
+    }
+    _save_scan_result(str(org_id), result)
+
+    return {
+        **result,
         "sarif": sarif,
         "github_action_snippet": (
             "# Add to .github/workflows/security.yml:\n"
@@ -208,3 +277,24 @@ async def cicd_scan(
             "    sarif_file: sarif_output.json\n"
         ),
     }
+
+
+@router.get("/history", summary="List past CI/CD gateway scans")
+async def list_cicd_history(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+) -> dict:
+    records = _load_history(str(org_id))
+    return {"items": records, "total": len(records)}
+
+
+@router.get("/history/{scan_id}", summary="Get a past CI/CD gateway scan result")
+async def get_cicd_history_item(
+    scan_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+) -> dict:
+    record = _load_scan(str(org_id), scan_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="CI/CD scan record not found")
+    return record

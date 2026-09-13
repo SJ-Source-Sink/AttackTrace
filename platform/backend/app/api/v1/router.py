@@ -18,7 +18,6 @@ from app.api.v1.nmap import router as nmap_router
 from app.api.v1.nuclei import router as nuclei_router
 from app.api.v1.ffuf import router as ffuf_router
 from app.api.v1.attack_suite import router as attack_suite_router
-from app.api.v1.ai_attack_suite import router as ai_attack_suite_router
 from app.api.v1.takeover import router as takeover_router
 from app.api.v1.suppression_rules import router as suppression_rules_router
 from app.api.v1.testgen import router as testgen_router
@@ -50,6 +49,12 @@ try:
 except ImportError:
     _log.warning("attack_mapper module not found — MITRE ATT&CK mapper disabled")
     attack_mapper_router = None
+
+try:
+    from app.api.v1.compliance import router as compliance_router
+except ImportError:
+    _log.warning("compliance module not found — Compliance evidence export disabled")
+    compliance_router = None
 
 try:
     from app.api.v1.webhooks import router as webhooks_router
@@ -138,7 +143,6 @@ api_router.include_router(nmap_router)
 api_router.include_router(nuclei_router)
 api_router.include_router(ffuf_router)
 api_router.include_router(attack_suite_router)
-api_router.include_router(ai_attack_suite_router)
 api_router.include_router(takeover_router)
 api_router.include_router(suppression_rules_router)
 api_router.include_router(testgen_router)
@@ -156,6 +160,8 @@ if cicd_router:
     api_router.include_router(cicd_router)
 if attack_mapper_router:
     api_router.include_router(attack_mapper_router)
+if compliance_router:
+    api_router.include_router(compliance_router)
 if webhooks_router:
     api_router.include_router(webhooks_router)
 if ai_scanner_router:

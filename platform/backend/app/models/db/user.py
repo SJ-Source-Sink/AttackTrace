@@ -40,6 +40,9 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     is_superuser: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_login: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     avatar_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    totp_secret_enc: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    mfa_backup_codes_enc: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
 
     # Relationships
     org_memberships: Mapped[list["OrgMember"]] = relationship(

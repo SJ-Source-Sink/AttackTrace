@@ -6,8 +6,12 @@ cloud resources across AWS, GCP, and Azure.
 import asyncio
 import json
 import os
+import re
 import shutil
 import tempfile
+import time
+import uuid as _uuid_mod
+from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
@@ -16,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings as _get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
 from app.models.db.asset import Asset, AssetType
@@ -24,6 +29,78 @@ from app.models.db.user import User
 router = APIRouter(prefix="/cloud", tags=["Cloud Discovery"])
 
 _CLOUDLIST_TIMEOUT = 120  # seconds
+
+# ── Filesystem history (org-scoped, path-traversal-safe) ─────────────────────
+
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def _validate_uuid(value: str, label: str) -> str:
+    if not _UUID_RE.match(value):
+        raise HTTPException(status_code=400, detail=f"Invalid {label}: must be a UUID")
+    return value
+
+
+def _history_dir(org_id: str) -> Path:
+    d = Path(_get_settings().ATTACKTRACE_WORKSPACE_DIR) / "cloud_discovery" / org_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _safe_history_path(org_id: str, scan_id: str) -> Path:
+    """Build and confine the history file path to the org's history directory."""
+    _validate_uuid(scan_id, "scan_id")
+    base = _history_dir(org_id)
+    candidate = (base / f"{scan_id}.json").resolve()
+    if not candidate.is_relative_to(base.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid scan_id")
+    return candidate
+
+
+def _save_scan_result(org_id: str, record: dict) -> None:
+    try:
+        path = _history_dir(org_id) / f"{record['id']}.json"
+        path.write_text(json.dumps(record, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def _load_history(org_id: str, limit: int = 50) -> list[dict]:
+    try:
+        files = sorted(
+            _history_dir(org_id).glob("*.json"),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )[:limit]
+        records = []
+        for f in files:
+            try:
+                records.append(json.loads(f.read_text()))
+            except Exception:
+                pass
+        return records
+    except Exception:
+        return []
+
+
+def _load_scan(org_id: str, scan_id: str) -> dict | None:
+    try:
+        path = _safe_history_path(org_id, scan_id)
+        if path.exists():
+            return json.loads(path.read_text())
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    return None
+
+
+def _delete_scan(org_id: str, scan_id: str) -> bool:
+    path = _safe_history_path(org_id, scan_id)
+    if path.exists():
+        path.unlink()
+        return True
+    return False
 
 
 def _build_cloudlist_config(provider: str, credentials: dict) -> dict:
@@ -140,7 +217,17 @@ async def discover_cloud_assets(
             except Exception:
                 continue
 
+        record = {
+            "id": str(_uuid_mod.uuid4()),
+            "provider": provider,
+            "discovered": len(assets),
+            "assets": assets[:100],
+            "created_at": time.time(),
+        }
+        _save_scan_result(str(org_id), record)
+
         return {
+            "id": record["id"],
             "discovered": len(assets),
             "assets": assets[:100],
             "provider": provider,
@@ -181,3 +268,47 @@ async def list_cloud_assets(
         ],
         "total": len(assets),
     }
+
+
+@router.get("/history", summary="List past cloud discovery runs")
+async def list_discovery_history(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+) -> dict:
+    records = _load_history(str(org_id))
+    return {
+        "items": [
+            {
+                "id": r.get("id"),
+                "provider": r.get("provider"),
+                "discovered": r.get("discovered"),
+                "created_at": r.get("created_at"),
+            }
+            for r in records
+        ],
+        "total": len(records),
+    }
+
+
+@router.get("/history/{scan_id}", summary="Get a past cloud discovery run")
+async def get_discovery_history_item(
+    scan_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+) -> dict:
+    record = _load_scan(str(org_id), scan_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Discovery run not found")
+    return record
+
+
+@router.delete("/history/{scan_id}", summary="Delete a past cloud discovery run")
+async def delete_discovery_history_item(
+    scan_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+) -> dict:
+    deleted = _delete_scan(str(org_id), scan_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Discovery run not found")
+    return {"ok": True, "scan_id": scan_id}

@@ -26,10 +26,99 @@ from typing import Annotated, AsyncGenerator
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings as _get_settings
+from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
+from app.services.enrichment_service import batch_enrich_cves
+from app.services.finding_ingest import ingest_findings
 from app.models.db.user import User
+
+# ── SBOM (CycloneDX) generation ───────────────────────────────────────────────
+
+_PURL_ECOSYSTEM_MAP = {
+    "npm": "npm",
+    "PyPI": "pypi",
+    "Go": "golang",
+    "Maven": "maven",
+    "RubyGems": "gem",
+    "Packagist": "composer",
+}
+
+
+def _build_cyclonedx_sbom(deps: list[dict], findings: list[dict]) -> dict:
+    """Build a CycloneDX 1.5 SBOM document from parsed dependencies and OSV findings."""
+    from cyclonedx.model.bom import Bom
+    from cyclonedx.model.component import Component, ComponentType
+    from cyclonedx.model.vulnerability import (
+        Vulnerability, VulnerabilityRating, VulnerabilitySeverity, BomTarget,
+    )
+    from cyclonedx.output.json import JsonV1Dot5
+    from packageurl import PackageURL
+
+    bom = Bom()
+    seen: set[tuple[str, str, str]] = set()
+    components_by_key: dict[tuple[str, str], Component] = {}
+
+    for d in deps:
+        name = d.get("name", "")
+        version = d.get("version", "") or "0.0.0"
+        ecosystem = d.get("ecosystem", "")
+        key = (ecosystem, name, version)
+        if not name or key in seen:
+            continue
+        seen.add(key)
+
+        purl_type = _PURL_ECOSYSTEM_MAP.get(ecosystem)
+        purl = None
+        if purl_type:
+            try:
+                if purl_type == "maven" and ":" in name:
+                    namespace, artifact = name.split(":", 1)
+                    purl = PackageURL(type=purl_type, namespace=namespace, name=artifact, version=version)
+                else:
+                    purl = PackageURL(type=purl_type, name=name, version=version)
+            except Exception:
+                purl = None
+
+        try:
+            component = Component(
+                name=name, version=version, type=ComponentType.LIBRARY,
+                purl=purl, bom_ref=f"{ecosystem}:{name}@{version}",
+            )
+            bom.components.add(component)
+            components_by_key[(ecosystem, name)] = component
+        except Exception:
+            continue
+
+    severity_map = {
+        "critical": VulnerabilitySeverity.CRITICAL,
+        "high": VulnerabilitySeverity.HIGH,
+        "medium": VulnerabilitySeverity.MEDIUM,
+        "low": VulnerabilitySeverity.LOW,
+        "info": VulnerabilitySeverity.INFO,
+    }
+    for f in findings:
+        if f.get("type") not in (None, "vulnerability") or not f.get("vuln_id"):
+            continue
+        pkg = f.get("package", "")
+        ecosystem = f.get("ecosystem", "")
+        component = components_by_key.get((ecosystem, pkg))
+        try:
+            vuln = Vulnerability(
+                id=f.get("vuln_id"),
+                description=f.get("description", ""),
+                ratings=[VulnerabilityRating(severity=severity_map.get(f.get("severity", "medium"), VulnerabilitySeverity.MEDIUM))],
+            )
+            if component is not None:
+                vuln.affects.add(BomTarget(ref=component.bom_ref))
+            bom.vulnerabilities.add(vuln)
+        except Exception:
+            continue
+
+    output = JsonV1Dot5(bom)
+    return json.loads(output.output_as_string())
 
 router = APIRouter(prefix="/supply-chain", tags=["Supply Chain Scanner"])
 
@@ -555,8 +644,56 @@ async def _license_check(deps: list[dict], client: httpx.AsyncClient) -> list[di
 
 # ── SSE helper ─────────────────────────────────────────────────────────────────
 
-def _sse(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+from app.core.sse import sse_event as _sse
+
+
+# ── Finding-quality adapter ────────────────────────────────────────────────────
+
+_TYPE_CONFIDENCE = {
+    "vulnerability": "high",          # OSV.dev matched exact name+version against a public advisory
+    "dependency_confusion": "medium", # heuristic: name pattern + registry existence check
+    "abandoned": "high",              # registry-confirmed fact (deprecated flag / last-publish date)
+    "license_risk": "high",           # registry-confirmed license field
+}
+
+
+async def _adapt_supply_chain_findings(findings: list[dict]) -> list[dict]:
+    """Normalize supply_chain.py findings for finding_ingest.ingest_findings,
+    enriching OSV vulnerability findings with CVSS v4/EPSS/KEV where the
+    advisory has a mapped CVE (many OSV/GHSA entries don't — enrichment is a
+    no-op for those rather than a failure)."""
+    # OSV vuln_id is often a GHSA id; use cve_id specifically, not vuln_id, for enrichment
+    cve_ids = list({f["cve_id"] for f in findings if f.get("type") == "vulnerability" and f.get("cve_id")})
+    enrichment = await batch_enrich_cves(cve_ids) if cve_ids else {}
+
+    adapted = []
+    for f in findings:
+        ftype = f.get("type", "")
+        pkg = f.get("package", "")
+        version = f.get("version", "")
+        title = f"{f.get('vuln_id', ftype)} — {pkg}" if ftype == "vulnerability" else f"{ftype.replace('_', ' ').title()} — {pkg}"
+        enrich = enrichment.get((f.get("cve_id") or "").upper(), {}) if ftype == "vulnerability" else {}
+        remediation = f.get("remediation", "")
+        if not remediation and ftype == "vulnerability":
+            remediation = (
+                f"Upgrade {pkg} to {f['fixed_in']} or later." if f.get("fixed_in")
+                else f"No fixed version is published yet for this advisory — track {f.get('osv_url', 'the OSV advisory')} for updates."
+            )
+        adapted.append({
+            "title": title,
+            "description": f.get("summary", ""),
+            "severity": f.get("severity", "medium"),
+            "category": f"supply-chain-{ftype}",
+            "affected_asset": f"{pkg}@{version}" if version else pkg,
+            "evidence": {"ecosystem": f.get("ecosystem"), "fixed_in": f.get("fixed_in"), "osv_url": f.get("osv_url")},
+            "remediation": remediation,
+            "cve": [f["cve_id"]] if f.get("cve_id") else ([f["vuln_id"]] if f.get("vuln_id") else []),
+            "confidence": _TYPE_CONFIDENCE.get(ftype, "medium"),
+            "cvss_score": enrich.get("cvss_v4_score"),
+            "epss_score": enrich.get("epss_score"),
+            "kev_status": enrich.get("is_kev", False),
+        })
+    return adapted
 
 
 # ── Scan generator ─────────────────────────────────────────────────────────────
@@ -565,6 +702,7 @@ async def _scan_generator(
     files: list[UploadFile],
     org_id: str,
     scan_id: str,
+    db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
     started_at = datetime.now(timezone.utc).isoformat()
     all_findings: list[dict] = []
@@ -685,8 +823,16 @@ async def _scan_generator(
         "by_severity": by_severity,
         "manifests": manifest_summaries,
         "findings": all_findings,
+        "dependencies": all_deps,
     }
     _save_scan_result(org_id, record)
+
+    try:
+        adapted = await _adapt_supply_chain_findings(all_findings)
+        await ingest_findings(db, org_id, source="supply_chain", source_scan_id=scan_id, findings=adapted)
+        await db.commit()
+    except Exception:
+        await db.rollback()
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -696,7 +842,7 @@ async def get_history(
     org_id: Annotated[str, Depends(get_current_org_id)],
     _user: Annotated[User, Depends(get_current_user)],
 ):
-    return _load_history(org_id)
+    return _load_history(str(org_id))
 
 
 @router.get("/history/{scan_id}")
@@ -705,7 +851,7 @@ async def get_scan(
     org_id: Annotated[str, Depends(get_current_org_id)],
     _user: Annotated[User, Depends(get_current_user)],
 ):
-    record = _load_scan(org_id, scan_id)
+    record = _load_scan(str(org_id), scan_id)
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan not found")
     return record
@@ -717,9 +863,28 @@ async def delete_scan(
     org_id: Annotated[str, Depends(get_current_org_id)],
     _user: Annotated[User, Depends(get_current_user)],
 ):
-    if not _delete_scan(org_id, scan_id):
+    if not _delete_scan(str(org_id), scan_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan not found")
     return {"deleted": True}
+
+
+@router.get("/history/{scan_id}/sbom", summary="Export a CycloneDX SBOM for a past scan")
+async def get_scan_sbom(
+    scan_id: str,
+    org_id: Annotated[str, Depends(get_current_org_id)],
+    _user: Annotated[User, Depends(get_current_user)],
+):
+    record = _load_scan(str(org_id), scan_id)
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan not found")
+    deps = record.get("dependencies") or []
+    if not deps:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This scan has no stored dependency list to build an SBOM from")
+    try:
+        sbom = _build_cyclonedx_sbom(deps, record.get("findings") or [])
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to build SBOM: {exc}")
+    return sbom
 
 
 @router.post("/scan")
@@ -727,13 +892,14 @@ async def scan_supply_chain(
     files: list[UploadFile],
     org_id: Annotated[str, Depends(get_current_org_id)] = None,
     current_user: Annotated[User, Depends(get_current_user)] = None,
+    db: AsyncSession = Depends(get_db),
 ):
     if not files:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No files provided")
 
     scan_id = str(_uuid_mod.uuid4())
     return StreamingResponse(
-        _scan_generator(files, org_id, scan_id),
+        _scan_generator(files, str(org_id), scan_id, db),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -102,8 +102,7 @@ def _delete_scan_record(org_id: str, scan_id: str) -> bool:
 # SSE helper
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _sse(event: str, data: Any) -> str:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+from app.core.sse import sse_event as _sse
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -636,7 +635,7 @@ def _check_security_headers(resp: httpx.Response) -> list[dict]:
             "match": match,
             "line_number": 0,
             "context": "",
-            "recommendation": rec,
+            "remediation": rec,
         }
 
     # CORS
@@ -763,7 +762,7 @@ def _check_external_sri(html: str, page_url: str) -> list[dict]:
             "match": src[:80],
             "line_number": 0,
             "context": m.group(0)[:200],
-            "recommendation": (
+            "remediation": (
                 "Add integrity='sha384-...' and crossorigin='anonymous' to external <script> tags. "
                 "Generate SRI hashes at https://www.srihash.org/"
             ),
@@ -797,7 +796,7 @@ def _detect_library_versions(content: str, file_url: str) -> list[dict]:
                 "match": f"{lib['name']} {version}",
                 "line_number": _line_number(content, m.start()),
                 "context": _get_context(content, m.start()),
-                "recommendation": lib.get("note") or f"Upgrade {lib['name']} to {lib['vuln_below']} or later.",
+                "remediation": lib.get("note") or f"Upgrade {lib['name']} to {lib['vuln_below']} or later.",
             })
     return findings
 
@@ -914,7 +913,7 @@ def _find_tainted_sinks(content: str, file_url: str) -> list[dict]:
                 "match": f"{tainted_var_found} → {sink_expr[:70]}",
                 "line_number": line,
                 "context": _get_context(content, m.start()),
-                "recommendation": (
+                "remediation": (
                     f"User-controlled value '{tainted_var_found}' flows directly into '{sink_name}'. "
                     "Sanitize with DOMPurify.sanitize() before inserting into the DOM, "
                     "or use safe DOM APIs (textContent, createElement) instead."
@@ -1137,7 +1136,7 @@ def _analyze_js_content(
                 "match": _truncate_match(raw),
                 "line_number": line,
                 "context": _get_context(processed, m.start()),
-                "recommendation": f"Remove hardcoded {spec['name']} from JavaScript. Use server-side environment variables or a secrets manager.",
+                "remediation": f"Remove hardcoded {spec['name']} from JavaScript. Use server-side environment variables or a secrets manager.",
             })
 
     # ── Environment variable leaks ─────────────────────────────────────────────
@@ -1153,7 +1152,7 @@ def _analyze_js_content(
                 "match": _truncate_match(raw, 60),
                 "line_number": line,
                 "context": _get_context(processed, m.start()),
-                "recommendation": "Environment variables exposed in client-side JS are readable by anyone. Use server-side APIs to proxy sensitive config.",
+                "remediation": "Environment variables exposed in client-side JS are readable by anyone. Use server-side APIs to proxy sensitive config.",
             })
 
     # ── DOM XSS sinks ──────────────────────────────────────────────────────────
@@ -1168,7 +1167,7 @@ def _analyze_js_content(
                 "match": _truncate_match(m.group(0), 40),
                 "line_number": line,
                 "context": _get_context(processed, m.start()),
-                "recommendation": f"Avoid using {sink['name']} with untrusted input. Use DOMPurify or safe DOM APIs.",
+                "remediation": f"Avoid using {sink['name']} with untrusted input. Use DOMPurify or safe DOM APIs.",
             })
 
     # ── DOM XSS sources ────────────────────────────────────────────────────────
@@ -1183,7 +1182,7 @@ def _analyze_js_content(
                 "match": _truncate_match(m.group(0), 40),
                 "line_number": line,
                 "context": _get_context(processed, m.start()),
-                "recommendation": "Trace this user-controlled source to ensure it does not flow into a dangerous sink without sanitization.",
+                "remediation": "Trace this user-controlled source to ensure it does not flow into a dangerous sink without sanitization.",
             })
 
     # ── Prototype pollution ────────────────────────────────────────────────────
@@ -1198,7 +1197,7 @@ def _analyze_js_content(
                 "match": _truncate_match(m.group(0), 40),
                 "line_number": line,
                 "context": _get_context(processed, m.start()),
-                "recommendation": "Sanitize object keys against '__proto__', 'constructor', and 'prototype' before performing deep merges.",
+                "remediation": "Sanitize object keys against '__proto__', 'constructor', and 'prototype' before performing deep merges.",
             })
 
     # ── PostMessage security ───────────────────────────────────────────────────
@@ -1213,7 +1212,7 @@ def _analyze_js_content(
                 "match": _truncate_match(m.group(0), 50),
                 "line_number": line,
                 "context": _get_context(processed, m.start()),
-                "recommendation": "Always validate event.origin in postMessage listeners and avoid sending messages to wildcard origins.",
+                "remediation": "Always validate event.origin in postMessage listeners and avoid sending messages to wildcard origins.",
             })
 
     # ── WebSocket security ─────────────────────────────────────────────────────
@@ -1228,7 +1227,7 @@ def _analyze_js_content(
                 "match": _truncate_match(m.group(0), 60),
                 "line_number": line,
                 "context": _get_context(processed, m.start()),
-                "recommendation": "Ensure WebSocket connections include authentication tokens and validate the Origin header server-side.",
+                "remediation": "Ensure WebSocket connections include authentication tokens and validate the Origin header server-side.",
             })
 
     # ── Service worker ─────────────────────────────────────────────────────────
@@ -1243,7 +1242,7 @@ def _analyze_js_content(
                 "match": _truncate_match(m.group(0), 60),
                 "line_number": line,
                 "context": _get_context(processed, m.start()),
-                "recommendation": "Review service worker scope and ensure it does not intercept sensitive requests or execute untrusted scripts.",
+                "remediation": "Review service worker scope and ensure it does not intercept sensitive requests or execute untrusted scripts.",
             })
 
     # ── Open redirect ──────────────────────────────────────────────────────────
@@ -1258,7 +1257,7 @@ def _analyze_js_content(
                 "match": _truncate_match(m.group(0), 60),
                 "line_number": line,
                 "context": _get_context(processed, m.start()),
-                "recommendation": "Validate redirect destinations against an allowlist of trusted URLs before redirecting.",
+                "remediation": "Validate redirect destinations against an allowlist of trusted URLs before redirecting.",
             })
 
     # ── JSONP ──────────────────────────────────────────────────────────────────
@@ -1274,7 +1273,7 @@ def _analyze_js_content(
                 "match": _truncate_match(raw, 80),
                 "line_number": line,
                 "context": _get_context(processed, m.start()),
-                "recommendation": "JSONP is deprecated. Migrate to CORS-enabled APIs. If JSONP must be used, validate the callback name strictly.",
+                "remediation": "JSONP is deprecated. Migrate to CORS-enabled APIs. If JSONP must be used, validate the callback name strictly.",
             })
 
     # ── Insecure randomness ────────────────────────────────────────────────────
@@ -1289,7 +1288,7 @@ def _analyze_js_content(
                 "match": _truncate_match(m.group(0), 60),
                 "line_number": line,
                 "context": _get_context(processed, m.start()),
-                "recommendation": "Use window.crypto.getRandomValues() or crypto.randomUUID() for security-sensitive random values.",
+                "remediation": "Use window.crypto.getRandomValues() or crypto.randomUUID() for security-sensitive random values.",
             })
 
     # ── Hardcoded auth headers ─────────────────────────────────────────────────
@@ -1307,7 +1306,7 @@ def _analyze_js_content(
                 "match": _truncate_match(raw),
                 "line_number": line,
                 "context": _get_context(processed, m.start()),
-                "recommendation": "Never hardcode credentials in client-side JS. Fetch tokens at runtime from a secure backend endpoint.",
+                "remediation": "Never hardcode credentials in client-side JS. Fetch tokens at runtime from a secure backend endpoint.",
             })
 
     # ── Library versions ───────────────────────────────────────────────────────
@@ -1619,7 +1618,7 @@ async def _run_js_scan(
                                                 "match": map_url[:60] + "..." if len(map_url) > 60 else map_url,
                                                 "line_number": _line_number(content, map_match.start()),
                                                 "context": "",
-                                                "recommendation": "Remove sourceMappingURL from production builds. Never deploy .map files publicly — they expose full original source.",
+                                                "remediation": "Remove sourceMappingURL from production builds. Never deploy .map files publicly — they expose full original source.",
                                             }
                                             await queue.put(_sse("finding", finding))
                                             all_findings.append(finding)
@@ -1668,7 +1667,7 @@ async def _run_js_scan(
                                 "match": gql_url,
                                 "line_number": 0,
                                 "context": "",
-                                "recommendation": "Disable GraphQL introspection in production. It exposes your full API schema to attackers.",
+                                "remediation": "Disable GraphQL introspection in production. It exposes your full API schema to attackers.",
                             }
                             yield _sse("finding", finding)
                             all_findings.append(finding)

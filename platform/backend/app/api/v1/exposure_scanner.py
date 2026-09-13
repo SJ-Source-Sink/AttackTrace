@@ -18,10 +18,14 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings as _get_settings
+from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
+from app.core.remediation import get_remediation
 from app.models.db.user import User
+from app.services.finding_ingest import ingest_findings
 
 # ── Filesystem history ────────────────────────────────────────────────────────
 
@@ -203,11 +207,35 @@ def _classify_severity(path: str) -> str:
 
 # ── SSE helper ────────────────────────────────────────────────────────────────
 
-def _sse(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+from app.core.sse import sse_event as _sse
 
 
 # ── Core scan generator ───────────────────────────────────────────────────────
+
+def _adapt_exposure_findings(findings: list[dict]) -> list[dict]:
+    """Normalize exposure_scanner.py findings for finding_ingest.
+
+    Confidence reflects the actual oracle: a 200 with real content returned is
+    a direct extracted-value proof ("certain"); a 403 only proves the path
+    exists, not that it's exploitable ("low" — a lead, not a confirmation).
+    """
+    adapted = []
+    for f in findings:
+        status_code = f.get("status_code")
+        confidence = "certain" if status_code == 200 else "low"
+        adapted.append({
+            "title": f"Exposed: {f.get('path', 'unknown path')}",
+            "description": f.get("note", ""),
+            "severity": f.get("severity", "medium"),
+            "category": f"exposure-{f.get('category', 'unknown')}",
+            "affected_asset": f.get("url", ""),
+            "evidence": {"status_code": status_code, "size_bytes": f.get("size_bytes"),
+                         "content_preview": f.get("content_preview")},
+            "remediation": get_remediation(category=f.get("category")),
+            "confidence": confidence,
+        })
+    return adapted
+
 
 async def _run_exposure_scan(
     target: str,
@@ -220,6 +248,7 @@ async def _run_exposure_scan(
     check_logs: bool,
     check_cloud: bool,
     custom_paths: list[str],
+    db: AsyncSession,
     org_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     scan_id = str(_uuid_mod.uuid4())
@@ -341,6 +370,12 @@ async def _run_exposure_scan(
             "by_category":   by_category,
             "findings":      findings,
         })
+        try:
+            adapted = _adapt_exposure_findings(findings)
+            await ingest_findings(db, org_id, source="exposure_scanner", source_scan_id=scan_id, findings=adapted)
+            await db.commit()
+        except Exception:
+            await db.rollback()
 
 
 # ── Request model ─────────────────────────────────────────────────────────────
@@ -365,6 +400,7 @@ async def run_exposure_scan(
     payload: ExposureScanRequest,
     current_user: Annotated[User, Depends(get_current_user)],
     org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     if not payload.target.strip():
         raise HTTPException(
@@ -386,6 +422,7 @@ async def run_exposure_scan(
             check_cloud=payload.check_cloud,
             custom_paths=payload.custom_paths,
             org_id=str(org_id),
+            db=db,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

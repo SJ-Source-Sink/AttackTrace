@@ -1193,11 +1193,19 @@ async def create_invite_code(
     current_user: Annotated[User, Depends(get_current_user)],
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
-    role: str = "member",
+    role: str = MemberRole.ANALYST.value,
     email: Optional[str] = None,
     expires_in_days: Optional[int] = 7,
 ) -> dict:
     await _require_org_role(db, current_user.id, org_id, [MemberRole.OWNER, MemberRole.ADMIN])
+
+    try:
+        role = MemberRole(role).value
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid role '{role}'. Must be one of: {', '.join(r.value for r in MemberRole)}",
+        )
 
     # Ensure unique code
     for _ in range(10):

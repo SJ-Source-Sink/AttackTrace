@@ -103,8 +103,7 @@ class AttackMapperRequest(BaseModel):
         return v.strip() or None
 
 
-def _sse(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+from app.core.sse import sse_event as _sse
 
 
 def _technique_to_dict(tech) -> dict:

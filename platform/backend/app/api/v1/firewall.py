@@ -32,6 +32,8 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user, require_tool
 from app.models.db.audit import AuditLog
 from app.models.db.user import User
+from app.services.enrichment_service import batch_enrich_cves
+from app.services.finding_ingest import ingest_findings
 
 router = APIRouter(prefix="/firewall", tags=["Firewall"])
 
@@ -41,8 +43,7 @@ _scan_history: dict[str, dict] = {}
 
 # ── SSE helper ────────────────────────────────────────────────────────────────
 
-def _sse(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+from app.core.sse import sse_event as _sse
 
 
 # ── WAF signature database ────────────────────────────────────────────────────
@@ -3709,12 +3710,57 @@ def _calculate_risk_score(scan_data: dict) -> dict:
 
 # ── Main physical scan orchestrator ──────────────────────────────────────────
 
+async def _adapt_physical_firewall_findings(
+    target: str, vendor_name: str, cves: list[dict], ssl_vpn_portals: list[dict],
+) -> list[dict]:
+    """Normalize physical-NGFW CVE + exposed-SSL-VPN-portal findings for
+    finding_ingest, enriched with live EPSS/KEV (the static CVE catalogue's
+    `actively_exploited` flag may be stale; the live KEV catalog is not)."""
+    cve_ids = list({c["id"] for c in cves if c.get("id")})
+    enrichment = await batch_enrich_cves(cve_ids) if cve_ids else {}
+
+    adapted = []
+    for c in cves:
+        enrich = enrichment.get(c["id"].upper(), {})
+        adapted.append({
+            "title": f"{c['id']} — {c.get('title', 'NGFW vulnerability')} ({vendor_name})",
+            "description": c.get("description", ""),
+            "severity": c.get("severity", "medium"),
+            "category": "firewall-physical-cve",
+            "affected_asset": target,
+            "evidence": {"cvss": c.get("cvss"), "version_confirmed": c.get("version_confirmed"),
+                         "actively_exploited_static": c.get("actively_exploited", False)},
+            "remediation": c.get("remediation", ""),
+            "cve": [c["id"]],
+            "confidence": "high" if c.get("version_confirmed") else "medium",
+            "cvss_score": c.get("cvss") or enrich.get("cvss_v4_score"),
+            "epss_score": enrich.get("epss_score"),
+            "kev_status": enrich.get("is_kev", False) or bool(c.get("actively_exploited")),
+        })
+
+    for p in ssl_vpn_portals:
+        adapted.append({
+            "title": f"{p.get('vpn_name', 'SSL VPN')} Portal Exposed",
+            "description": f"{p.get('vpn_name', 'SSL VPN')} portal exposed at {target}",
+            "severity": "high",
+            "category": "firewall-physical-vpn-exposure",
+            "affected_asset": target,
+            "evidence": {k: v for k, v in p.items() if k != "vpn_name"},
+            "remediation": "Restrict access to the SSL VPN management portal to known-good IP ranges, and require MFA for VPN authentication.",
+            "confidence": "certain",  # a live HTTP fingerprint match on the portal
+        })
+
+    return adapted
+
+
 async def _run_physical_scan(
     target: str,
     scan_mode: str,
     include_snmp: bool,
     include_ike: bool,
     include_cve_probes: bool,
+    org_id: uuid.UUID,
+    db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
     """Master scan orchestrator — runs all phases and streams SSE events."""
 
@@ -3945,6 +3991,16 @@ async def _run_physical_scan(
     scan_data["risk_score"] = _calculate_risk_score(scan_data)
     yield _sse("risk_score", scan_data["risk_score"])
 
+    try:
+        adapted = await _adapt_physical_firewall_findings(
+            target, scan_data.get("vendor_name", "Unknown"),
+            scan_data.get("cves", []), scan_data.get("ssl_vpn_portals", []),
+        )
+        await ingest_findings(db, org_id, source="firewall_physical", source_scan_id=scan_id, findings=adapted)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+
     # ── Final Summary ─────────────────────────────────────────────────────────
     yield _sse("complete", {
         "scan_id": scan_id,
@@ -3981,6 +4037,7 @@ async def physical_firewall_scan(
     payload: PhysicalScanRequest,
     current_user: Annotated[User, Depends(get_current_user)],
     org_id: uuid.UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     return StreamingResponse(
         _run_physical_scan(
@@ -3989,6 +4046,8 @@ async def physical_firewall_scan(
             payload.include_snmp,
             payload.include_ike,
             payload.include_cve_probes,
+            org_id,
+            db,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

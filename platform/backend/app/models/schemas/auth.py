@@ -84,6 +84,7 @@ class UserResponse(BaseModel):
     role: Optional[str] = None
     org_id: Optional[str] = None
     tool_permissions: Optional[list[str]] = None
+    mfa_enabled: bool = False
 
     @classmethod
     def from_orm_user(cls, user, member=None) -> "UserResponse":
@@ -98,4 +99,5 @@ class UserResponse(BaseModel):
             role=member.role.value if member else None,
             org_id=str(member.org_id) if member else None,
             tool_permissions=member.tool_permissions if member else None,
+            mfa_enabled=bool(getattr(user, "mfa_enabled", False)),
         )

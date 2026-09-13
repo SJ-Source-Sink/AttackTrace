@@ -24,9 +24,12 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_current_user, require_tool
+from app.core.database import get_db
+from app.core.dependencies import get_current_org_id, get_current_user, require_tool
 from app.models.db.user import User
+from app.services.finding_ingest import ingest_findings
 
 router = APIRouter(prefix="/takeover", tags=["Takeover"])
 
@@ -934,10 +937,41 @@ async def _analyze_target(
 
 # ── SSE Generator ─────────────────────────────────────────────────────────────
 
+def _adapt_takeover_findings(results: list[dict]) -> list[dict]:
+    """Normalize takeover.py results for finding_ingest — only VULNERABLE/
+    NEEDS_REVIEW results are findings; NOT_VULNERABLE/ERROR are not.
+
+    Confidence reuses this scanner's own existing confirmed/potential grading
+    (a two-signal check: CNAME resolves to a known-dead service AND the
+    response body matches that service's fingerprint) — already solid, just
+    never made it into the shared Finding table before.
+    """
+    confidence_map = {"confirmed": "certain", "potential": "medium"}
+    adapted = []
+    for r in results:
+        if r.get("status") not in ("VULNERABLE", "NEEDS_REVIEW"):
+            continue
+        adapted.append({
+            "title": f"Possible Subdomain Takeover — {r.get('hostname')}" if r["status"] == "NEEDS_REVIEW"
+                     else f"Subdomain Takeover — {r.get('hostname')} ({r.get('service', 'unknown service')})",
+            "description": r.get("reason", ""),
+            "severity": r.get("severity") or ("high" if r["status"] == "VULNERABLE" else "medium"),
+            "category": f"takeover-{r.get('check_type', 'cname')}",
+            "affected_asset": r.get("hostname", ""),
+            "evidence": {"cname_chain": r.get("cname_chain"), "evidence": r.get("evidence"),
+                         "ttl_warning": r.get("ttl_warning")},
+            "remediation": r.get("remediation") or "Remove the dangling DNS record or reclaim the referenced cloud resource.",
+            "confidence": confidence_map.get(r.get("confidence"), "medium"),
+        })
+    return adapted
+
+
 async def _stream_takeover_scan(
     scan_id: str,
     req: TakeoverRequest,
     user_email: str,
+    org_id: uuid.UUID,
+    db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
     """Main SSE generator — analyzes targets concurrently and streams results."""
 
@@ -1013,6 +1047,13 @@ async def _stream_takeover_scan(
         }
     )
 
+    try:
+        adapted = _adapt_takeover_findings(_scan_history[scan_id]["results"])
+        await ingest_findings(db, org_id, source="takeover", source_scan_id=scan_id, findings=adapted)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+
     summary = {
         "scan_id": scan_id,
         "total": total,
@@ -1031,6 +1072,8 @@ async def _stream_takeover_scan(
 async def scan_takeover(
     req: TakeoverRequest,
     current_user: User = Depends(require_tool("takeover")),
+    org_id: uuid.UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     """
     Stream subdomain/domain takeover analysis via SSE.
@@ -1051,7 +1094,7 @@ async def scan_takeover(
     scan_id = str(uuid.uuid4())
 
     return StreamingResponse(
-        _stream_takeover_scan(scan_id, req, current_user.email),
+        _stream_takeover_scan(scan_id, req, current_user.email, org_id, db),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

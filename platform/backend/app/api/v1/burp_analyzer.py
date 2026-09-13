@@ -1496,8 +1496,7 @@ Be specific and technical. Reference exact paths. Do not give generic OWASP advi
 
 # ─── Main streaming entry point ───────────────────────────────────────────────
 
-def _sse(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+from app.core.sse import sse_event as _sse
 
 
 async def run_burp_analysis(

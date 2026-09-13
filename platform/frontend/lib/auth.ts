@@ -1,7 +1,7 @@
 "use client";
 
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
-import type { User, LoginRequest, RegisterRequest, AuthResponse } from "@/types";
+import type { User, LoginRequest, RegisterRequest, AuthResponse, MfaRequiredResponse } from "@/types";
 
 // API_BASE intentionally NOT exported from here — use the one from lib/api.ts
 const _AUTH_API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
@@ -126,10 +126,12 @@ interface AuthContextValue {
   user: User | null;
   isLoading: boolean;
   isAuthenticated: boolean;
-  login: (credentials: LoginRequest) => Promise<void>;
+  login: (credentials: LoginRequest) => Promise<MfaRequiredResponse | void>;
+  completeMfaLogin: (mfaToken: string, code: string) => Promise<void>;
   register: (data: RegisterRequest) => Promise<void>;
   logout: () => Promise<void>;
   hasToolAccess: (toolKey: string) => boolean;
+  refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -220,7 +222,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => { mounted = false; };
   }, [fetchCurrentUser]);
 
-  const login = useCallback(async (credentials: LoginRequest) => {
+  const login = useCallback(async (credentials: LoginRequest): Promise<MfaRequiredResponse | void> => {
     const response = await fetch(`${_AUTH_API_BASE}/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -230,6 +232,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
       throw new Error(error?.detail?.error?.message ?? error?.detail ?? "Login failed");
+    }
+
+    const data: AuthResponse | MfaRequiredResponse = await response.json();
+    if (!("access_token" in data)) {
+      return data;
+    }
+
+    setAccessToken(data.access_token);
+    setRefreshToken(data.refresh_token);
+    const userData = await fetchCurrentUser(data.access_token);
+    setUser(userData);
+  }, [fetchCurrentUser]);
+
+  const completeMfaLogin = useCallback(async (mfaToken: string, code: string) => {
+    const response = await fetch(`${_AUTH_API_BASE}/auth/mfa/challenge`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mfa_token: mfaToken, code }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error?.detail ?? "Invalid code");
     }
 
     const data: AuthResponse = await response.json();
@@ -278,6 +303,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null);
   }, []);
 
+  const refreshUser = useCallback(async () => {
+    const token = getAccessToken();
+    if (!token) return;
+    const userData = await fetchCurrentUser(token);
+    setUser(userData);
+  }, [fetchCurrentUser]);
+
   const hasToolAccess = useCallback((toolKey: string): boolean => {
     if (!user) return false;
     if (user.role === "owner" || user.role === "admin") return true;
@@ -292,9 +324,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     isLoading,
     isAuthenticated: !!user,
     login,
+    completeMfaLogin,
     register,
     logout,
     hasToolAccess,
+    refreshUser,
   };
 
   return React.createElement(AuthContext.Provider, { value }, children);

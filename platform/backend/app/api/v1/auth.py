@@ -2,6 +2,7 @@
 Authentication API: register, login, refresh tokens, current user.
 """
 
+import json
 import re
 from datetime import datetime, timezone
 from typing import Annotated
@@ -18,6 +19,8 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
+    decrypt_credential,
+    encrypt_credential,
     hash_password,
     is_refresh_token_valid,
     revoke_refresh_token,
@@ -98,7 +101,10 @@ async def register(
     try:
         member_role = MemberRole(invite.role)
     except (ValueError, AttributeError):
-        member_role = MemberRole.ANALYST
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This invite has an invalid role configured. Contact your organization admin.",
+        )
 
     member = OrgMember(
         user_id=user.id,
@@ -133,15 +139,14 @@ async def register(
 
 @router.post(
     "/login",
-    response_model=TokenResponse,
     summary="Authenticate with email and password",
-    description="Returns a JWT access token and refresh token.",
+    description="Returns a JWT access token and refresh token, or an MFA challenge if enabled.",
 )
 async def login(
     payload: LoginRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
-) -> TokenResponse:
+) -> dict:
     # Check account lockout and manage brute-force counters via Redis.
     # Each Redis operation uses a short-lived connection that is always closed
     # in a finally block, preventing connection leaks on all code paths.
@@ -149,6 +154,9 @@ async def login(
 
     _lockout_key = f"lockout:{payload.email}"
     _attempt_key = f"loginattempts:{payload.email}"
+    _client_ip = request.client.host if request.client else "unknown"
+    _ip_lockout_key = f"lockout_ip:{_client_ip}"
+    _ip_attempt_key = f"loginattempts_ip:{_client_ip}"
 
     async def _redis_op(coro_factory):
         """Execute a Redis coroutine with a dedicated connection; return None on any error."""
@@ -165,12 +173,19 @@ async def login(
                 except Exception:
                     pass
 
-    # Check lockout
+    # Check lockout (per-account, and per-source-IP as defense-in-depth against
+    # credential-stuffing/spray attacks hitting many emails from one IP)
     _locked = await _redis_op(lambda r: r.get(_lockout_key))
     if _locked:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={"error": {"code": "ACCOUNT_LOCKED", "message": "Account temporarily locked due to too many failed login attempts. Try again in 15 minutes."}},
+        )
+    _ip_locked = await _redis_op(lambda r: r.get(_ip_lockout_key))
+    if _ip_locked:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"error": {"code": "TOO_MANY_REQUESTS", "message": "Too many failed login attempts from this network. Try again in 15 minutes."}},
         )
 
     # Load user
@@ -178,13 +193,20 @@ async def login(
     user = result.scalar_one_or_none()
 
     if not user or not verify_password(payload.password, user.hashed_password):
-        # Increment failed attempt counter; lock after 5 failures within 15 min
+        # Increment failed attempt counter; lock the account after 5 failures within
+        # 15 min, and lock the source IP after 20 failures (any email) within 15 min.
         async def _increment(r):
             attempts = await r.incr(_attempt_key)
             await r.expire(_attempt_key, 900)
             if int(attempts) >= 5:
                 await r.set(_lockout_key, "1", ex=900)
                 await r.delete(_attempt_key)
+
+            ip_attempts = await r.incr(_ip_attempt_key)
+            await r.expire(_ip_attempt_key, 900)
+            if int(ip_attempts) >= 20:
+                await r.set(_ip_lockout_key, "1", ex=900)
+                await r.delete(_ip_attempt_key)
 
         await _redis_op(_increment)
         raise HTTPException(
@@ -197,6 +219,14 @@ async def login(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"error": {"code": "ACCOUNT_DISABLED", "message": "Account has been disabled"}},
         )
+
+    # Correct password; if MFA is enabled, require the second factor before
+    # issuing real tokens. Clear the brute-force counters now since the
+    # password itself was correct.
+    if user.mfa_enabled:
+        await _redis_op(lambda r: r.delete(_attempt_key, _lockout_key, _ip_attempt_key))
+        mfa_token = create_access_token(subject=str(user.id), extra_claims={"type": "mfa_pending"})
+        return {"mfa_required": True, "mfa_token": mfa_token}
 
     # Load first org membership for default context
     member_result = await db.execute(
@@ -218,14 +248,151 @@ async def login(
     refresh_token = create_refresh_token(subject=str(user.id))
     await store_refresh_token(str(user.id), refresh_token)
 
-    # Clear failed attempt counter on successful login
-    await _redis_op(lambda r: r.delete(_attempt_key, _lockout_key))
+    # Clear failed attempt counters on successful login
+    await _redis_op(lambda r: r.delete(_attempt_key, _lockout_key, _ip_attempt_key))
 
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
         expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    ).model_dump()
+
+
+@router.post(
+    "/mfa/enroll",
+    summary="Begin MFA enrollment",
+    description="Generates a new TOTP secret for the current user (not yet active until verified).",
+)
+async def mfa_enroll(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    import pyotp
+
+    secret = pyotp.random_base32()
+    current_user.totp_secret_enc = encrypt_credential(secret)
+    current_user.mfa_enabled = False
+    db.add(current_user)
+    await db.flush()
+
+    otpauth_url = pyotp.totp.TOTP(secret).provisioning_uri(
+        name=current_user.email, issuer_name="AttackTrace"
     )
+    return {"secret": secret, "otpauth_url": otpauth_url}
+
+
+@router.post(
+    "/mfa/verify",
+    summary="Complete MFA enrollment",
+    description="Verifies a TOTP code against the pending secret and activates MFA.",
+)
+async def mfa_verify(
+    payload: dict,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    import pyotp
+    import secrets as _secrets_mod
+
+    code = str(payload.get("code", ""))
+    if not current_user.totp_secret_enc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No MFA enrollment in progress. Call /auth/mfa/enroll first.",
+        )
+    secret = decrypt_credential(current_user.totp_secret_enc)
+    if not pyotp.TOTP(secret).verify(code, valid_window=1):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid code")
+
+    backup_codes = ["-".join([_secrets_mod.token_hex(2) for _ in range(2)]) for _ in range(8)]
+    current_user.mfa_enabled = True
+    current_user.mfa_backup_codes_enc = encrypt_credential(json.dumps(backup_codes))
+    db.add(current_user)
+    await db.flush()
+
+    return {"mfa_enabled": True, "backup_codes": backup_codes}
+
+
+@router.post(
+    "/mfa/disable",
+    summary="Disable MFA",
+    description="Requires the current password to confirm.",
+)
+async def mfa_disable(
+    payload: dict,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    if not verify_password(str(payload.get("password", "")), current_user.hashed_password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect password")
+
+    current_user.mfa_enabled = False
+    current_user.totp_secret_enc = None
+    current_user.mfa_backup_codes_enc = None
+    db.add(current_user)
+    await db.flush()
+    return {"mfa_enabled": False}
+
+
+@router.post(
+    "/mfa/challenge",
+    summary="Complete login with a second factor",
+    description="Exchanges an mfa_pending token plus a TOTP (or backup) code for real access/refresh tokens.",
+)
+async def mfa_challenge(
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    import pyotp
+
+    mfa_token = str(payload.get("mfa_token", ""))
+    code = str(payload.get("code", ""))
+    try:
+        claims = decode_token(mfa_token)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired MFA token")
+    if claims.get("type") != "mfa_pending":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid MFA token")
+
+    user_id = claims.get("sub")
+    result = await db.execute(select(User).where(User.id == UUID(user_id)))
+    user = result.scalar_one_or_none()
+    if not user or not user.mfa_enabled or not user.totp_secret_enc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="MFA is not enabled for this account")
+
+    secret = decrypt_credential(user.totp_secret_enc)
+    valid = pyotp.TOTP(secret).verify(code, valid_window=1)
+
+    if not valid and user.mfa_backup_codes_enc:
+        backup_codes = json.loads(decrypt_credential(user.mfa_backup_codes_enc))
+        if code in backup_codes:
+            valid = True
+            backup_codes.remove(code)
+            user.mfa_backup_codes_enc = encrypt_credential(json.dumps(backup_codes))
+            db.add(user)
+
+    if not valid:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid code")
+
+    member_result = await db.execute(
+        select(OrgMember).where(OrgMember.user_id == user.id).order_by(OrgMember.created_at.asc()).limit(1)
+    )
+    member = member_result.scalar_one_or_none()
+    org_id = str(member.org_id) if member else None
+    role = member.role.value if member else None
+
+    user.last_login = datetime.now(timezone.utc)
+    db.add(user)
+
+    access_token = create_access_token(subject=str(user.id), org_id=org_id, role=role)
+    refresh_token = create_refresh_token(subject=str(user.id))
+    await store_refresh_token(str(user.id), refresh_token)
+
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    ).model_dump()
 
 
 @router.post(

@@ -95,6 +95,13 @@ class Settings(BaseSettings):
             raise ValueError("SECRET_KEY must be at least 32 characters long")
         return v
 
+    @field_validator("KMS_MASTER_KEY", mode="after")
+    @classmethod
+    def validate_kms_master_key_length(cls, v: str) -> str:
+        if len(v) < 32:
+            raise ValueError("KMS_MASTER_KEY must be at least 32 characters long")
+        return v
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def parse_cors_origins(cls, v):

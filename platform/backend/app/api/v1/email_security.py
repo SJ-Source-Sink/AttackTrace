@@ -21,9 +21,13 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings as _get_settings
+from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
+from app.core.remediation import get_remediation
+from app.services.finding_ingest import ingest_findings
 from app.models.db.user import User
 
 # ── Filesystem history ────────────────────────────────────────────────────────
@@ -85,8 +89,7 @@ router = APIRouter(prefix="/email-security", tags=["Email Security"])
 
 # ── SSE helper ────────────────────────────────────────────────────────────────
 
-def _sse(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+from app.core.sse import sse_event as _sse
 
 
 # ── DNS helpers ───────────────────────────────────────────────────────────────
@@ -557,10 +560,39 @@ def _compute_score(findings: list[dict]) -> int:
 
 # ── Core scan generator ───────────────────────────────────────────────────────
 
+def _adapt_email_findings(findings: list[dict], domain: str) -> list[dict]:
+    """Normalize email_security.py findings for finding_ingest.
+
+    Confidence: SPF/DMARC/DKIM/MX findings are direct DNS-record-confirmed
+    facts ("certain"). Lookalike-domain registration is DNS-confirmed too, but
+    registration alone doesn't prove phishing intent ("medium"). A breach
+    listing is a confirmed HIBP match ("high").
+    """
+    confidence_by_phase = {
+        "spf": "certain", "dmarc": "certain", "dkim": "certain", "mx": "certain",
+        "lookalikes": "medium", "breaches": "high",
+    }
+    adapted = []
+    for f in findings:
+        phase = f.get("phase", "")
+        adapted.append({
+            "title": f.get("title", "Email security finding"),
+            "description": f.get("detail", ""),
+            "severity": f.get("severity", "medium"),
+            "category": f"email-{phase}",
+            "affected_asset": domain,
+            "evidence": {k: f[k] for k in ("raw_record", "selectors_found", "mx_records") if k in f},
+            "remediation": get_remediation(title=f.get("title", "")),
+            "confidence": confidence_by_phase.get(phase, "medium"),
+        })
+    return adapted
+
+
 async def _run_email_scan(
     domain: str,
     check_lookalikes: bool,
     max_lookalikes: int,
+    db: AsyncSession,
     org_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     scan_id = str(_uuid_mod.uuid4())
@@ -575,6 +607,8 @@ async def _run_email_scan(
     yield _sse("phase", {"phase": "spf", "message": f"Analysing SPF record for {domain}..."})
     try:
         spf_findings, spf_detail = await loop.run_in_executor(None, _analyse_spf, domain)
+        for f in spf_findings:
+            f["raw_record"] = spf_detail.get("record")
         all_findings.extend(spf_findings)
         for f in spf_findings:
             yield _sse("finding", f)
@@ -586,6 +620,8 @@ async def _run_email_scan(
     yield _sse("phase", {"phase": "dmarc", "message": f"Analysing DMARC record for _dmarc.{domain}..."})
     try:
         dmarc_findings, dmarc_detail = await loop.run_in_executor(None, _analyse_dmarc, domain)
+        for f in dmarc_findings:
+            f["raw_record"] = dmarc_detail.get("record")
         all_findings.extend(dmarc_findings)
         for f in dmarc_findings:
             yield _sse("finding", f)
@@ -597,6 +633,8 @@ async def _run_email_scan(
     yield _sse("phase", {"phase": "dkim", "message": "Checking common DKIM selectors..."})
     try:
         dkim_findings, dkim_detail = await loop.run_in_executor(None, _analyse_dkim, domain)
+        for f in dkim_findings:
+            f["selectors_found"] = dkim_detail.get("selectors_found")
         all_findings.extend(dkim_findings)
         for f in dkim_findings:
             yield _sse("finding", f)
@@ -608,6 +646,8 @@ async def _run_email_scan(
     yield _sse("phase", {"phase": "mx", "message": f"Analysing MX records and SMTP capabilities for {domain}..."})
     try:
         mx_findings, mx_detail = await loop.run_in_executor(None, _analyse_mx, domain)
+        for f in mx_findings:
+            f["mx_records"] = mx_detail.get("mx_records")
         all_findings.extend(mx_findings)
         for f in mx_findings:
             yield _sse("finding", f)
@@ -738,6 +778,12 @@ async def _run_email_scan(
             "findings":      all_findings,
             "lookalikes":    lookalike_results,
         })
+        try:
+            adapted = _adapt_email_findings(all_findings, domain)
+            await ingest_findings(db, org_id, source="email_security", source_scan_id=scan_id, findings=adapted)
+            await db.commit()
+        except Exception:
+            await db.rollback()
 
 
 # ── Request model ─────────────────────────────────────────────────────────────
@@ -755,6 +801,7 @@ async def run_email_scan(
     payload: EmailSecurityScanRequest,
     current_user: Annotated[User, Depends(get_current_user)],
     org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     domain = payload.domain.strip().lower().lstrip("https://").lstrip("http://").rstrip("/")
     if not domain:
@@ -767,6 +814,7 @@ async def run_email_scan(
             domain=domain,
             check_lookalikes=payload.check_lookalikes,
             max_lookalikes=min(payload.max_lookalikes, 200),
+            db=db,
             org_id=str(org_id),
         ),
         media_type="text/event-stream",

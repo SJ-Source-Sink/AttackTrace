@@ -21,11 +21,13 @@ const loginSchema = z.object({
 type LoginFormData = z.infer<typeof loginSchema>;
 
 export default function LoginPage() {
-  const { login } = useAuth();
+  const { login, completeMfaLogin } = useAuth();
   const router = useRouter();
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [mfaToken, setMfaToken] = useState<string | null>(null);
+  const [mfaCode, setMfaCode] = useState("");
 
   const {
     register,
@@ -39,10 +41,29 @@ export default function LoginPage() {
     setIsLoading(true);
     setError(null);
     try {
-      await login(data);
+      const result = await login(data);
+      if (result && "mfa_required" in result) {
+        setMfaToken(result.mfa_token);
+        return;
+      }
       router.push("/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed. Please try again.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const onMfaSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!mfaToken) return;
+    setIsLoading(true);
+    setError(null);
+    try {
+      await completeMfaLogin(mfaToken, mfaCode);
+      router.push("/dashboard");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Invalid code. Please try again.");
     } finally {
       setIsLoading(false);
     }
@@ -118,9 +139,13 @@ export default function LoginPage() {
           </div>
 
           <div className="mb-8">
-            <h1 className="text-2xl font-bold text-white">Welcome back</h1>
+            <h1 className="text-2xl font-bold text-white">
+              {mfaToken ? "Two-factor authentication" : "Welcome back"}
+            </h1>
             <p className="text-zinc-400 mt-1 text-sm">
-              Sign in to your account to continue
+              {mfaToken
+                ? "Enter the 6-digit code from your authenticator app (or a backup code)"
+                : "Sign in to your account to continue"}
             </p>
           </div>
 
@@ -130,6 +155,40 @@ export default function LoginPage() {
             </div>
           )}
 
+          {mfaToken ? (
+            <form onSubmit={onMfaSubmit} className="space-y-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="mfa-code">Authentication code</Label>
+                <Input
+                  id="mfa-code"
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  placeholder="123456"
+                  value={mfaCode}
+                  onChange={(e) => setMfaCode(e.target.value)}
+                  autoFocus
+                />
+              </div>
+              <Button type="submit" className="w-full" disabled={isLoading || mfaCode.length === 0}>
+                {isLoading ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Verifying...
+                  </>
+                ) : (
+                  "Verify"
+                )}
+              </Button>
+              <button
+                type="button"
+                onClick={() => { setMfaToken(null); setMfaCode(""); setError(null); }}
+                className="w-full text-center text-xs text-zinc-500 hover:text-zinc-400"
+              >
+                Back to sign in
+              </button>
+            </form>
+          ) : (
           <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
             <div className="space-y-1.5">
               <Label htmlFor="email">Email or username</Label>
@@ -200,13 +259,16 @@ export default function LoginPage() {
               )}
             </Button>
           </form>
+          )}
 
+          {!mfaToken && (
           <p className="mt-6 text-center text-xs text-zinc-600">
             Need access?{" "}
             <Link href="/register" className="text-zinc-500 hover:text-zinc-400">
               Use your invite code
             </Link>
           </p>
+          )}
         </div>
       </div>
     </div>

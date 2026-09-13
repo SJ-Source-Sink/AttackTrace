@@ -47,6 +47,48 @@ interface ScanRecord {
   status: string;
 }
 
+// The backend persists/streams a different shape than this page's UI model
+// (lowercase severities, `summary`/`vuln_id`/`osv_url` instead of `title`/`cve`/
+// `references`, and a bare array from GET /history instead of {items:[...]}).
+// Normalize at the fetch boundary so the render logic below can stay simple.
+function normalizeFinding(raw: Record<string, unknown>): SupplyFinding {
+  return {
+    package: String(raw.package ?? ""),
+    version: String(raw.version ?? ""),
+    ecosystem: String(raw.ecosystem ?? ""),
+    vuln_id: String(raw.vuln_id ?? ""),
+    cve: String(raw.cve_id ?? ""),
+    title: String(raw.summary ?? raw.description ?? raw.type ?? "Finding"),
+    severity: String(raw.severity ?? "info").toUpperCase() as Severity,
+    cvss: null,
+    fixed_versions: raw.fixed_in ? [String(raw.fixed_in)] : [],
+    references: raw.osv_url ? [String(raw.osv_url)] : [],
+  };
+}
+
+function normalizeHistoryRecord(raw: Record<string, unknown>): ScanRecord {
+  const manifests = (raw.manifests as { filename: string; manifest_type: string }[] | undefined) ?? [];
+  const bySeverity = (raw.by_severity as Record<string, number> | undefined) ?? {};
+  return {
+    id: String(raw.id ?? ""),
+    filename: manifests.map((m) => m.filename).join(", ") || "scan",
+    ecosystem: manifests[0]?.manifest_type ?? "",
+    deps_count: Number(raw.total_packages ?? 0),
+    findings_count: Number(raw.total_findings ?? 0),
+    severity_counts: {
+      CRITICAL: bySeverity.critical ?? 0,
+      HIGH: bySeverity.high ?? 0,
+      MEDIUM: bySeverity.medium ?? 0,
+      LOW: bySeverity.low ?? 0,
+      INFO: bySeverity.info ?? 0,
+    },
+    findings: ((raw.findings as Record<string, unknown>[] | undefined) ?? []).map(normalizeFinding),
+    started_at: String(raw.started_at ?? ""),
+    completed_at: String(raw.completed_at ?? ""),
+    status: "completed",
+  };
+}
+
 const SEV_CONFIG: Record<Severity, { label: string; color: string; bg: string; border: string }> = {
   CRITICAL: { label: "Critical", color: "text-red-400", bg: "bg-red-950/40", border: "border-red-800/60" },
   HIGH:     { label: "High",     color: "text-orange-400", bg: "bg-orange-950/40", border: "border-orange-800/60" },
@@ -74,7 +116,8 @@ export default function SupplyChainPage() {
     try {
       const res = await fetchWithAuth(`${API_BASE}/supply-chain/history`);
       const data = await res.json();
-      setHistory(data.items ?? []);
+      const rawItems: Record<string, unknown>[] = Array.isArray(data) ? data : (data.items ?? []);
+      setHistory(rawItems.filter((r) => r.id).map(normalizeHistoryRecord));
     } catch { /* silent */ }
   }, []);
 
@@ -100,8 +143,7 @@ export default function SupplyChainPage() {
 
     try {
       const form = new FormData();
-      form.append("file", file);
-      form.append("check_confusion", checkConfusion ? "true" : "false");
+      form.append("files", file);
 
       const token = localStorage.getItem("access_token");
       const orgId = localStorage.getItem("org_id");
@@ -128,41 +170,30 @@ export default function SupplyChainPage() {
         const parts = buf.split("\n\n");
         buf = parts.pop() ?? "";
         for (const part of parts) {
+          const eventLine = part.split("\n").find(l => l.startsWith("event:"));
           const dataLine = part.split("\n").find(l => l.startsWith("data:"));
-          if (!dataLine) continue;
+          if (!eventLine || !dataLine) continue;
+          const event = eventLine.slice(6).trim();
+          let d: Record<string, unknown>;
           try {
-            const evt = JSON.parse(dataLine.slice(5).trim());
-            if (evt.event_type === "finding" || part.startsWith("event: finding")) {
-              setFindings(prev => [...prev, evt.finding ?? evt]);
-            } else if (part.startsWith("event: finding")) {
-              // already handled
-            } else if (part.startsWith("event: progress")) {
-              setProgress(prev => [...prev, evt.message ?? ""]);
-            } else if (part.startsWith("event: start")) {
-              setProgress(prev => [...prev, `Started scan on ${evt.filename}`]);
-            } else if (part.startsWith("event: complete")) {
-              setScanMeta({ depsCount: evt.deps_count ?? 0, ecosystem: evt.ecosystem ?? "" });
-              toast.success(`Scan complete — ${evt.findings_count} findings`);
-              setRunning(false);
-            } else if (part.startsWith("event: error")) {
-              toast.error(evt.message ?? "Scan error");
-              setRunning(false);
-            }
-            // parse SSE events by event: line
-            const eventLine = part.split("\n").find(l => l.startsWith("event:"));
-            const event = eventLine?.slice(6).trim();
-            if (event === "finding") {
-              const d = JSON.parse(dataLine.slice(5).trim());
-              if (d.finding) setFindings(prev => [...prev, d.finding]);
-            } else if (event === "progress") {
-              const d = JSON.parse(dataLine.slice(5).trim());
-              setProgress(prev => [...prev.slice(-19), d.message ?? ""]);
-            } else if (event === "complete") {
-              const d = JSON.parse(dataLine.slice(5).trim());
-              setScanMeta({ depsCount: d.deps_count ?? 0, ecosystem: "" });
-              setRunning(false);
-            }
-          } catch { /* ignore parse errors */ }
+            d = JSON.parse(dataLine.slice(5).trim());
+          } catch {
+            continue;
+          }
+
+          if (event === "finding") {
+            setFindings(prev => [...prev, normalizeFinding(d)]);
+          } else if (event === "phase") {
+            setProgress(prev => [...prev.slice(-19), String(d.message ?? "")]);
+          } else if (event === "manifest_parsed") {
+            setProgress(prev => [...prev.slice(-19), `Parsed ${d.filename} (${d.package_count} packages)`]);
+          } else if (event === "phase_error") {
+            setProgress(prev => [...prev.slice(-19), `${d.phase}: ${d.message}`]);
+          } else if (event === "complete") {
+            setScanMeta({ depsCount: Number(d.total_packages ?? 0), ecosystem: "" });
+            toast.success(`Scan complete — ${d.total_findings} findings`);
+            setRunning(false);
+          }
         }
       }
     } catch (e: unknown) {
@@ -179,6 +210,29 @@ export default function SupplyChainPage() {
       n.has(id) ? n.delete(id) : n.add(id);
       return n;
     });
+  };
+
+  const downloadSbom = async (id: string) => {
+    try {
+      const res = await fetchWithAuth(`${API_BASE}/supply-chain/history/${id}/sbom`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        toast.error(err?.detail ?? "Failed to export SBOM");
+        return;
+      }
+      const sbom = await res.json();
+      const blob = new Blob([JSON.stringify(sbom, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `sbom-${id}.cdx.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      toast.error("Failed to export SBOM");
+    }
   };
 
   const deleteHistory = async (id: string) => {
@@ -354,6 +408,14 @@ export default function SupplyChainPage() {
                   </Button>
                   <h2 className="text-lg font-semibold text-zinc-200">{historyDetail.filename}</h2>
                   <Badge className="text-xs bg-zinc-800 text-zinc-400">{historyDetail.ecosystem}</Badge>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="ml-auto gap-1.5"
+                    onClick={() => downloadSbom(historyDetail.id)}
+                  >
+                    <FileText className="h-3.5 w-3.5" /> Export SBOM
+                  </Button>
                 </div>
                 <div className="grid grid-cols-5 gap-3">
                   {(["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] as Severity[]).map(sev => (

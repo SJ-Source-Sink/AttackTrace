@@ -24,10 +24,14 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings as _get_settings
+from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
 from app.models.db.user import User
+from app.services.enrichment_service import batch_enrich_cves
+from app.services.finding_ingest import ingest_findings
 
 # ── Filesystem history ────────────────────────────────────────────────────────
 
@@ -165,8 +169,7 @@ KNOWN_VULNERABLE_TAGS = {
 
 # ── SSE helper ────────────────────────────────────────────────────────────────
 
-def _sse(event: str, data: Any) -> str:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+from app.core.sse import sse_event as _sse
 
 
 # ── Pydantic model ────────────────────────────────────────────────────────────
@@ -182,6 +185,48 @@ class ContainerScanRequest(BaseModel):
     check_secrets: bool = True
 
 
+# ── Finding-quality adapter (shared across all 3 scan types — same shape) ────
+
+_CATEGORY_CONFIDENCE = {
+    "Kubernetes API": "certain",
+    "K8s Component Exposure": "certain",
+    "Registry Exposure": "certain",
+    "Registry Misconfiguration": "certain",
+    "CVE": "high",
+    "Configuration": "high",
+    "Image Tag Policy": "high",
+    "Secret in Image": "medium",
+}
+
+
+async def _adapt_container_findings(findings: list[dict]) -> list[dict]:
+    """Normalize container_scanner.py findings (same shape across all 3 scan
+    types: kubernetes_api, exposed_registry, image) for finding_ingest, with
+    CVSS/EPSS/KEV enrichment for Trivy-sourced CVE findings."""
+    cve_ids = list({f["cve_id"] for f in findings if f.get("cve_id")})
+    enrichment = await batch_enrich_cves(cve_ids) if cve_ids else {}
+
+    adapted = []
+    for f in findings:
+        cve_id = f.get("cve_id")
+        enrich = enrichment.get((cve_id or "").upper(), {})
+        adapted.append({
+            "title": f.get("title", f.get("check", "Container finding")),
+            "description": f.get("detail", ""),
+            "severity": f.get("severity", "medium"),
+            "category": f"container-{f.get('category', 'unknown')}",
+            "affected_asset": f.get("resource", ""),
+            "evidence": {"check": f.get("check"), "evidence": f.get("evidence")},
+            "remediation": f.get("remediation", ""),
+            "cve": [cve_id] if cve_id else [],
+            "confidence": _CATEGORY_CONFIDENCE.get(f.get("category", ""), "medium"),
+            "cvss_score": enrich.get("cvss_v4_score"),
+            "epss_score": enrich.get("epss_score"),
+            "kev_status": enrich.get("is_kev", False),
+        })
+    return adapted
+
+
 # ── Core scan generators ──────────────────────────────────────────────────────
 
 async def _scan_kubernetes_api(
@@ -190,6 +235,7 @@ async def _scan_kubernetes_api(
     scan_id: str,
     started_at: str,
     org_id: str,
+    db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
     base = k8s_api_url.rstrip("/")
     findings: list[dict] = []
@@ -343,6 +389,12 @@ async def _scan_kubernetes_api(
     }
     if org_id:
         _save_scan_result(org_id, record)
+        try:
+            adapted = await _adapt_container_findings(findings)
+            await ingest_findings(db, org_id, source="container_scanner", source_scan_id=scan_id, findings=adapted)
+            await db.commit()
+        except Exception:
+            await db.rollback()
 
     yield _sse("complete", record)
 
@@ -352,6 +404,7 @@ async def _scan_registry(
     scan_id: str,
     started_at: str,
     org_id: str,
+    db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
     base = registry_url.rstrip("/")
     findings: list[dict] = []
@@ -492,6 +545,12 @@ async def _scan_registry(
     }
     if org_id:
         _save_scan_result(org_id, record)
+        try:
+            adapted = await _adapt_container_findings(findings)
+            await ingest_findings(db, org_id, source="container_scanner", source_scan_id=scan_id, findings=adapted)
+            await db.commit()
+        except Exception:
+            await db.rollback()
 
     yield _sse("complete", record)
 
@@ -504,6 +563,7 @@ async def _scan_image(
     scan_id: str,
     started_at: str,
     org_id: str,
+    db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
     findings: list[dict] = []
 
@@ -779,6 +839,12 @@ async def _scan_image(
     }
     if org_id:
         _save_scan_result(org_id, record)
+        try:
+            adapted = await _adapt_container_findings(findings)
+            await ingest_findings(db, org_id, source="container_scanner", source_scan_id=scan_id, findings=adapted)
+            await db.commit()
+        except Exception:
+            await db.rollback()
 
     yield _sse("complete", record)
 
@@ -798,7 +864,7 @@ def _build_summary(findings: list[dict], scan_type: str, target: str) -> dict:
 
 # ── Route dispatcher ──────────────────────────────────────────────────────────
 
-async def _run_container_scan(req: ContainerScanRequest, org_id: str) -> AsyncGenerator[str, None]:
+async def _run_container_scan(req: ContainerScanRequest, org_id: str, db: AsyncSession) -> AsyncGenerator[str, None]:
     scan_id = str(_uuid_mod.uuid4())
     started_at = datetime.now(timezone.utc).isoformat()
 
@@ -807,7 +873,7 @@ async def _run_container_scan(req: ContainerScanRequest, org_id: str) -> AsyncGe
             yield _sse("error", {"message": "k8s_api_url is required for kubernetes_api scan type"})
             return
         async for event in _scan_kubernetes_api(
-            req.k8s_api_url, req.k8s_token, scan_id, started_at, org_id
+            req.k8s_api_url, req.k8s_token, scan_id, started_at, org_id, db
         ):
             yield event
 
@@ -815,7 +881,7 @@ async def _run_container_scan(req: ContainerScanRequest, org_id: str) -> AsyncGe
         if not req.registry_url:
             yield _sse("error", {"message": "registry_url is required for exposed_registry scan type"})
             return
-        async for event in _scan_registry(req.registry_url, scan_id, started_at, org_id):
+        async for event in _scan_registry(req.registry_url, scan_id, started_at, org_id, db):
             yield event
 
     elif req.scan_type == "image":
@@ -824,7 +890,7 @@ async def _run_container_scan(req: ContainerScanRequest, org_id: str) -> AsyncGe
             return
         async for event in _scan_image(
             req.image, req.check_cve, req.check_config, req.check_secrets,
-            scan_id, started_at, org_id
+            scan_id, started_at, org_id, db
         ):
             yield event
 
@@ -877,10 +943,12 @@ async def get_checks(_: CurrentUser) -> dict:
 
 
 @router.post("/scan")
-async def run_scan(req: ContainerScanRequest, org_id: OrgID, _: CurrentUser) -> StreamingResponse:
+async def run_scan(
+    req: ContainerScanRequest, org_id: OrgID, _: CurrentUser, db: AsyncSession = Depends(get_db)
+) -> StreamingResponse:
     """Start a container/Kubernetes security scan. Returns Server-Sent Events."""
     return StreamingResponse(
-        _run_container_scan(req, org_id),
+        _run_container_scan(req, org_id, db),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

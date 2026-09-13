@@ -22,6 +22,7 @@ celery_app = Celery(
         "app.workers.schedule_worker",
         "app.workers.mobile_worker",
         "app.workers.maintenance_worker",
+        "app.workers.easm_worker",
     ],
 )
 
@@ -45,6 +46,7 @@ celery_app.conf.update(
         "app.workers.schedule_worker.check_scheduled_scans": {"queue": "default"},
         "app.workers.mobile_worker.run_mobile_scan": {"queue": "scans"},
         "app.workers.maintenance_worker.expire_stale_suppressions": {"queue": "default"},
+        "app.workers.easm_worker.diff_asset_surface": {"queue": "default"},
     },
     task_default_queue="default",
     broker_connection_retry_on_startup=True,
@@ -77,6 +79,10 @@ celery_app.conf.update(
             # Runs hourly; low urgency (findings are suppressed at worst 1h too long).
             "task": "app.workers.maintenance_worker.expire_stale_suppressions",
             "schedule": 3600.0,  # every hour
+        },
+        "diff-asset-surface-every-6h": {
+            "task": "app.workers.easm_worker.diff_asset_surface",
+            "schedule": 21600.0,  # every 6 hours
         },
     },
 )

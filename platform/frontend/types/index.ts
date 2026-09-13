@@ -13,6 +13,7 @@ export interface User {
   last_login?: string;
   avatar_url?: string;
   tool_permissions: string[] | null;
+  mfa_enabled?: boolean;
 }
 
 export type UserRole = "owner" | "admin" | "analyst" | "viewer";
@@ -34,6 +35,11 @@ export interface AuthResponse {
   refresh_token: string;
   token_type: string;
   expires_in: number;
+}
+
+export interface MfaRequiredResponse {
+  mfa_required: true;
+  mfa_token: string;
 }
 
 // ============================================================

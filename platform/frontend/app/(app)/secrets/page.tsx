@@ -31,6 +31,13 @@ interface SecretFinding {
   match: string;
   line_number: number | null;
   context: string;
+  // git_repo scans only
+  commit_sha?: string;
+  commit_message?: string;
+  author?: string;
+  committed_at?: string;
+  file_path?: string;
+  still_present?: boolean;
 }
 
 interface ScanStats {
@@ -64,6 +71,7 @@ const SCAN_TYPES = [
   { value: "url", label: "URL / Domain", desc: "Scan a website for exposed secrets in JS files" },
   { value: "github_org", label: "GitHub Organization", desc: "Scan all public repos for a GitHub org" },
   { value: "github_user", label: "GitHub User", desc: "Scan all public repos for a GitHub user" },
+  { value: "git_repo", label: "Git Repository (History)", desc: "Clone a repo and scan every commit's diff — finds secrets that were committed then removed" },
 ];
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low"] as const;
@@ -128,21 +136,44 @@ function FindingCard({ finding }: { finding: SecretFinding }) {
                 Exposed File
               </Badge>
             )}
+            {finding.commit_sha && (
+              <Badge
+                variant="outline"
+                className={cn(
+                  "text-[10px]",
+                  finding.still_present === false
+                    ? "text-green-400 border-green-800"
+                    : "text-red-400 border-red-800",
+                )}
+              >
+                {finding.still_present === false ? "removed later" : "still in history"}
+              </Badge>
+            )}
           </div>
-          <div className="mt-1 flex items-center gap-1.5 min-w-0">
-            <code className="text-[11px] text-zinc-400 font-mono truncate max-w-[400px]" title={finding.url}>
-              {finding.url}
-            </code>
-            <a
-              href={finding.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-zinc-600 hover:text-zinc-400 shrink-0"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <ExternalLink className="h-3 w-3" />
-            </a>
-          </div>
+          {finding.commit_sha ? (
+            <div className="mt-1 flex items-center gap-1.5 min-w-0 flex-wrap">
+              <code className="text-[11px] text-zinc-400 font-mono">{finding.commit_sha.slice(0, 10)}</code>
+              <span className="text-[11px] text-zinc-500 truncate">{finding.commit_message}</span>
+              {finding.file_path && (
+                <code className="text-[10px] text-zinc-600 font-mono">{finding.file_path}</code>
+              )}
+            </div>
+          ) : (
+            <div className="mt-1 flex items-center gap-1.5 min-w-0">
+              <code className="text-[11px] text-zinc-400 font-mono truncate max-w-[400px]" title={finding.url}>
+                {finding.url}
+              </code>
+              <a
+                href={finding.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-zinc-600 hover:text-zinc-400 shrink-0"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            </div>
+          )}
         </div>
         <button
           onClick={() => setExpanded(!expanded)}
@@ -198,6 +229,7 @@ export default function SecretsPage() {
   const [githubToken, setGithubToken] = useState("");
   const [includeWayback, setIncludeWayback] = useState(true);
   const [maxJsFiles, setMaxJsFiles] = useState(100);
+  const [maxGitCommits, setMaxGitCommits] = useState(200);
 
   // Scan state
   const [isScanning, setIsScanning] = useState(false);
@@ -297,6 +329,7 @@ export default function SecretsPage() {
           github_token: githubToken.trim() || null,
           include_wayback: includeWayback,
           max_js_files: maxJsFiles,
+          max_git_commits: maxGitCommits,
         }),
         signal: abortRef.current.signal,
       });
@@ -377,7 +410,7 @@ export default function SecretsPage() {
         setScanStatus("idle");
       }
     }
-  }, [target, scanType, githubToken, includeWayback, maxJsFiles]);
+  }, [target, scanType, githubToken, includeWayback, maxJsFiles, maxGitCommits]);
 
   const stopScan = () => {
     abortRef.current?.abort();
@@ -471,6 +504,8 @@ export default function SecretsPage() {
                       ? "Full URL or domain (e.g. https://app.example.com)"
                       : scanType === "github_org"
                       ? "GitHub organization name (e.g. google)"
+                      : scanType === "git_repo"
+                      ? "Clone URL, http(s) only (e.g. https://github.com/org/repo.git)"
                       : "GitHub username (e.g. torvalds)"}
                   </p>
                 </div>
@@ -496,7 +531,7 @@ export default function SecretsPage() {
                 </div>
 
                 {/* GitHub token */}
-                {(scanType === "github_org" || scanType === "github_user") && (
+                {(scanType === "github_org" || scanType === "github_user" || scanType === "git_repo") && (
                   <div className="space-y-1.5">
                     <Label className="text-xs text-zinc-400">
                       GitHub Token <span className="text-zinc-600">(optional)</span>
@@ -509,7 +544,28 @@ export default function SecretsPage() {
                       disabled={isScanning}
                       className="font-mono text-xs"
                     />
-                    <p className="text-[10px] text-zinc-600">Increases rate limits for private orgs</p>
+                    <p className="text-[10px] text-zinc-600">
+                      {scanType === "git_repo"
+                        ? "Required to clone a private repository"
+                        : "Increases rate limits for private orgs"}
+                    </p>
+                  </div>
+                )}
+
+                {/* Max commits (git_repo only) */}
+                {scanType === "git_repo" && (
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-zinc-400">Max Commits</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={1000}
+                      value={maxGitCommits}
+                      onChange={(e) => setMaxGitCommits(Math.max(1, Math.min(1000, parseInt(e.target.value) || 200)))}
+                      disabled={isScanning}
+                      className="font-mono text-xs"
+                    />
+                    <p className="text-[10px] text-zinc-600">Most-recent commits to walk (bounds clone/scan time)</p>
                   </div>
                 )}
 

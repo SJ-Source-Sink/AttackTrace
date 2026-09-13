@@ -5,7 +5,7 @@ import {
   Cloud, Play, Square, Shield, ShieldAlert, ShieldCheck, ShieldX,
   CheckCircle2, XCircle, AlertTriangle, Info, ChevronDown, ChevronRight,
   History, Trash2, Clock, Download, Eye, EyeOff, RefreshCw,
-  Server, Database, Lock, Key, Globe, Layers, AlertCircle,
+  Server, Database, Lock, Key, Globe, Layers,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -73,10 +73,10 @@ interface HistoryDetail extends HistoryRecord {
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const PROVIDERS: { value: Provider; label: string; icon: React.ReactNode; available: boolean }[] = [
-  { value: "aws",        label: "Amazon AWS",    icon: <Cloud className="h-4 w-4" />,    available: true  },
-  { value: "gcp",        label: "Google GCP",    icon: <Globe className="h-4 w-4" />,    available: false },
-  { value: "azure",      label: "Microsoft Azure", icon: <Layers className="h-4 w-4" />, available: false },
-  { value: "kubernetes", label: "Kubernetes",    icon: <Server className="h-4 w-4" />,   available: false },
+  { value: "aws",        label: "Amazon AWS",    icon: <Cloud className="h-4 w-4" />,    available: true },
+  { value: "gcp",        label: "Google GCP",    icon: <Globe className="h-4 w-4" />,    available: true },
+  { value: "azure",      label: "Microsoft Azure", icon: <Layers className="h-4 w-4" />, available: true },
+  { value: "kubernetes", label: "Kubernetes",    icon: <Server className="h-4 w-4" />,   available: true },
 ];
 
 const SEVERITIES: Severity[] = ["critical", "high", "medium", "low", "info"];
@@ -105,6 +105,14 @@ const CATEGORY_ICONS: Record<string, React.ReactNode> = {
   CloudTrail: <Eye className="h-3.5 w-3.5" />,
   KMS:        <Key className="h-3.5 w-3.5" />,
   Lambda:     <Layers className="h-3.5 w-3.5" />,
+  Storage:    <Database className="h-3.5 w-3.5" />,
+  Network:    <Globe className="h-3.5 w-3.5" />,
+  Compute:    <Server className="h-3.5 w-3.5" />,
+  Database:   <Database className="h-3.5 w-3.5" />,
+  KeyVault:   <Key className="h-3.5 w-3.5" />,
+  Cluster:    <Server className="h-3.5 w-3.5" />,
+  Workloads:  <Layers className="h-3.5 w-3.5" />,
+  RBAC:       <Lock className="h-3.5 w-3.5" />,
 };
 
 const AWS_REGIONS = [
@@ -155,6 +163,16 @@ export default function CSPMPage() {
   const [awsSecret, setAwsSecret] = useState("");
   const [awsRegion, setAwsRegion] = useState("us-east-1");
   const [awsSessionToken, setAwsSessionToken] = useState("");
+  const [gcpProjectId, setGcpProjectId] = useState("");
+  const [gcpServiceAccountKey, setGcpServiceAccountKey] = useState("");
+  const [azureSubscriptionId, setAzureSubscriptionId] = useState("");
+  const [azureTenantId, setAzureTenantId] = useState("");
+  const [azureClientId, setAzureClientId] = useState("");
+  const [azureClientSecret, setAzureClientSecret] = useState("");
+  const [k8sApiServer, setK8sApiServer] = useState("");
+  const [k8sToken, setK8sToken] = useState("");
+  const [k8sCaCert, setK8sCaCert] = useState("");
+  const [k8sInsecureSkipTlsVerify, setK8sInsecureSkipTlsVerify] = useState(false);
   const [severityFilter, setSeverityFilter] = useState("medium");
   const [showSecret, setShowSecret] = useState(false);
 
@@ -176,13 +194,13 @@ export default function CSPMPage() {
 
   const abortRef = useRef<AbortController | null>(null);
 
-  // Fetch available checks count on mount
+  // Fetch available checks count whenever the selected provider changes
   useEffect(() => {
-    fetchWithAuth(`${API_BASE}/cspm/checks`)
+    fetchWithAuth(`${API_BASE}/cspm/checks?provider=${provider}`)
       .then((r) => r.json())
-      .then((d) => setTotalChecks(d.total ?? 21))
-      .catch(() => setTotalChecks(21));
-  }, []);
+      .then((d) => setTotalChecks(d.total ?? 0))
+      .catch(() => setTotalChecks(0));
+  }, [provider]);
 
   // ── History helpers ────────────────────────────────────────────────────────
 
@@ -234,6 +252,18 @@ export default function CSPMPage() {
       toast.error("AWS Access Key ID and Secret Access Key are required");
       return;
     }
+    if (provider === "gcp" && (!gcpProjectId.trim() || !gcpServiceAccountKey.trim())) {
+      toast.error("GCP Project ID and Service Account Key are required");
+      return;
+    }
+    if (provider === "azure" && (!azureSubscriptionId.trim() || !azureTenantId.trim() || !azureClientId.trim() || !azureClientSecret.trim())) {
+      toast.error("All Azure fields are required");
+      return;
+    }
+    if (provider === "kubernetes" && (!k8sApiServer.trim() || !k8sToken.trim())) {
+      toast.error("Kubernetes API server URL and token are required");
+      return;
+    }
 
     setIsScanning(true);
     setScanStatus("running");
@@ -254,6 +284,19 @@ export default function CSPMPage() {
         body.aws_secret_key = awsSecret.trim();
         body.aws_region = awsRegion;
         if (awsSessionToken.trim()) body.aws_session_token = awsSessionToken.trim();
+      } else if (provider === "gcp") {
+        body.gcp_project_id = gcpProjectId.trim();
+        body.gcp_service_account_key = gcpServiceAccountKey.trim();
+      } else if (provider === "azure") {
+        body.azure_subscription_id = azureSubscriptionId.trim();
+        body.azure_tenant_id = azureTenantId.trim();
+        body.azure_client_id = azureClientId.trim();
+        body.azure_client_secret = azureClientSecret.trim();
+      } else if (provider === "kubernetes") {
+        body.k8s_api_server = k8sApiServer.trim();
+        body.k8s_token = k8sToken.trim();
+        if (k8sCaCert.trim()) body.k8s_ca_cert = k8sCaCert.trim();
+        body.k8s_insecure_skip_tls_verify = k8sInsecureSkipTlsVerify;
       }
 
       const res = await fetchWithAuth(`${API_BASE}/cspm/scan`, {
@@ -532,14 +575,135 @@ export default function CSPMPage() {
                   </div>
                 )}
 
-                {/* GCP / Azure / K8s placeholder */}
-                {provider !== "aws" && (
-                  <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-4 py-6 text-center">
-                    <AlertCircle className="h-6 w-6 text-zinc-600 mx-auto mb-2" />
-                    <p className="text-xs text-zinc-500">
-                      Native {PROVIDERS.find((p) => p.value === provider)?.label} checks are coming soon.
+                {/* GCP credentials */}
+                {provider === "gcp" && (
+                  <div className="space-y-3">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-zinc-400">Project ID</Label>
+                      <Input
+                        placeholder="my-gcp-project"
+                        value={gcpProjectId}
+                        onChange={(e) => setGcpProjectId(e.target.value)}
+                        disabled={isScanning}
+                        className="font-mono text-xs"
+                        autoComplete="off"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-zinc-400">Service Account Key (JSON)</Label>
+                      <textarea
+                        placeholder='{"type": "service_account", ...}'
+                        value={gcpServiceAccountKey}
+                        onChange={(e) => setGcpServiceAccountKey(e.target.value)}
+                        disabled={isScanning}
+                        rows={4}
+                        className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-2 font-mono text-[10px] text-zinc-300 placeholder:text-zinc-600"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* Azure credentials */}
+                {provider === "azure" && (
+                  <div className="space-y-3">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-zinc-400">Subscription ID</Label>
+                      <Input
+                        value={azureSubscriptionId}
+                        onChange={(e) => setAzureSubscriptionId(e.target.value)}
+                        disabled={isScanning}
+                        className="font-mono text-xs"
+                        autoComplete="off"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-zinc-400">Tenant ID</Label>
+                      <Input
+                        value={azureTenantId}
+                        onChange={(e) => setAzureTenantId(e.target.value)}
+                        disabled={isScanning}
+                        className="font-mono text-xs"
+                        autoComplete="off"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-zinc-400">Client (App) ID</Label>
+                      <Input
+                        value={azureClientId}
+                        onChange={(e) => setAzureClientId(e.target.value)}
+                        disabled={isScanning}
+                        className="font-mono text-xs"
+                        autoComplete="off"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-zinc-400">Client Secret</Label>
+                      <Input
+                        type={showSecret ? "text" : "password"}
+                        value={azureClientSecret}
+                        onChange={(e) => setAzureClientSecret(e.target.value)}
+                        disabled={isScanning}
+                        className="font-mono text-xs"
+                        autoComplete="off"
+                      />
+                    </div>
+                    <p className="text-[10px] text-zinc-600">
+                      Requires a service principal with Reader access on the subscription.
                     </p>
-                    <p className="text-[10px] text-zinc-600 mt-1">Install Prowler CLI for multi-cloud support.</p>
+                  </div>
+                )}
+
+                {/* Kubernetes credentials */}
+                {provider === "kubernetes" && (
+                  <div className="space-y-3">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-zinc-400">API Server URL</Label>
+                      <Input
+                        placeholder="https://kubernetes.example.com:6443"
+                        value={k8sApiServer}
+                        onChange={(e) => setK8sApiServer(e.target.value)}
+                        disabled={isScanning}
+                        className="font-mono text-xs"
+                        autoComplete="off"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-zinc-400">Bearer Token</Label>
+                      <Input
+                        type={showSecret ? "text" : "password"}
+                        value={k8sToken}
+                        onChange={(e) => setK8sToken(e.target.value)}
+                        disabled={isScanning}
+                        className="font-mono text-xs"
+                        autoComplete="off"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs text-zinc-400">CA Certificate <span className="text-zinc-600">(optional, PEM)</span></Label>
+                      <textarea
+                        placeholder="-----BEGIN CERTIFICATE-----"
+                        value={k8sCaCert}
+                        onChange={(e) => setK8sCaCert(e.target.value)}
+                        disabled={isScanning}
+                        rows={3}
+                        className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-2 font-mono text-[10px] text-zinc-300 placeholder:text-zinc-600"
+                      />
+                    </div>
+                    {!k8sCaCert.trim() && (
+                      <label className="flex items-start gap-2 text-[10px] text-zinc-500">
+                        <input
+                          type="checkbox"
+                          checked={k8sInsecureSkipTlsVerify}
+                          onChange={(e) => setK8sInsecureSkipTlsVerify(e.target.checked)}
+                          disabled={isScanning}
+                          className="mt-0.5"
+                        />
+                        <span>
+                          Skip TLS verification (self-signed cluster with no CA cert available). Only use for
+                          clusters you control — this allows a network attacker to intercept your token.
+                        </span>
+                      </label>
+                    )}
                   </div>
                 )}
 
@@ -567,7 +731,12 @@ export default function CSPMPage() {
                 ) : (
                   <Button
                     onClick={startScan}
-                    disabled={provider !== "aws"}
+                    disabled={
+                      (provider === "aws" && (!awsKey.trim() || !awsSecret.trim())) ||
+                      (provider === "gcp" && (!gcpProjectId.trim() || !gcpServiceAccountKey.trim())) ||
+                      (provider === "azure" && (!azureSubscriptionId.trim() || !azureTenantId.trim() || !azureClientId.trim() || !azureClientSecret.trim())) ||
+                      (provider === "kubernetes" && (!k8sApiServer.trim() || !k8sToken.trim()))
+                    }
                     className="w-full gap-2"
                   >
                     <Play className="h-4 w-4" /> Run CSPM Scan

@@ -27,7 +27,10 @@ router = APIRouter(prefix="/notifications", tags=["Notifications"])
 CHANNEL_TYPES = {"slack", "jira", "webhook", "teams"}
 
 # Events that channels can subscribe to
-VALID_EVENTS = {"scan.completed", "finding.critical", "sla.breached"}
+VALID_EVENTS = {
+    "scan.completed", "finding.critical", "sla.breached",
+    "asset.discovered", "port.opened", "cert.expiring",
+}
 
 
 # ---------------------------------------------------------------------------

@@ -19,7 +19,6 @@ import {
   Crosshair,
   Wind,
   Swords,
-  BrainCircuit,
   GitFork,
   Map,
   ScrollText,
@@ -36,6 +35,7 @@ import {
   Bot,
   Link2,
   Target,
+  ClipboardCheck,
   Key,
   Package,
   Mail,
@@ -166,13 +166,6 @@ const attackSuiteItems: NavItem[] = [
     toolKey: "attack_suite",
   },
   {
-    label: "AI Attack Suite",
-    href: "/ai-attack-suite",
-    icon: BrainCircuit,
-    badge: "AI",
-    toolKey: "attack_suite",
-  },
-  {
     label: "Takeover Checker",
     href: "/takeover",
     icon: GitFork,
@@ -247,6 +240,11 @@ const intelligenceItems: NavItem[] = [
     label: "MITRE ATT&CK",
     href: "/mitre",
     icon: Target,
+  },
+  {
+    label: "Compliance",
+    href: "/compliance",
+    icon: ClipboardCheck,
   },
 ];
 

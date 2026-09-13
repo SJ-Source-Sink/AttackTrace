@@ -23,9 +23,13 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings as _get_settings
+from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
+from app.core.remediation import get_remediation
+from app.services.finding_ingest import ingest_findings
 from app.models.db.user import User
 
 router = APIRouter(prefix="/secrets", tags=["Secret Scanner"])
@@ -220,8 +224,7 @@ def _ensure_scheme(url: str) -> str:
     return url
 
 
-def _sse(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+from app.core.sse import sse_event as _sse
 
 
 # ── Core scanning logic ────────────────────────────────────────────────────────
@@ -329,13 +332,158 @@ def _extract_js_urls(html: str, base_url: str) -> list[str]:
     return urls
 
 
+# ── Git history scan (synchronous — run in a thread executor) ────────────────
+
+def _scan_git_history_sync(
+    repo_url: str, github_token: str | None, max_commits: int,
+) -> tuple[list[dict], int]:
+    """Clone a repo (blobless partial clone, no working tree) and scan every
+    commit's diff for secrets introduced anywhere in its history — not just the
+    current default branch, which is all the rest of this file's checks cover.
+
+    Only scans lines actually *added* in a diff (so a secret is attributed to
+    the commit that introduced it, not every later commit that merely touches
+    the same file), and cross-references lines *removed* anywhere else in the
+    walked history to flag whether the secret appears to have been cleaned up
+    since. Bounded by `max_commits` and the caller's overall timeout; always
+    cleans up its temp clone.
+    """
+    import shutil
+    import tempfile
+
+    import git  # GitPython
+
+    tmp_dir = tempfile.mkdtemp(prefix="attacktrace_gitscan_")
+    findings: list[dict] = []
+    commits_scanned = 0
+    try:
+        clone_url = repo_url
+        if github_token and clone_url.startswith("https://"):
+            clone_url = clone_url.replace("https://", f"https://{github_token}@", 1)
+
+        repo = git.Repo.clone_from(
+            clone_url, tmp_dir,
+            multi_options=["--filter=blob:none", "--no-checkout", "--quiet"],
+        )
+
+        introduced: list[tuple[dict, tuple[str, str]]] = []
+        removed_keys: set[tuple[str, str]] = set()
+
+        for commit in repo.iter_commits(max_count=max(1, min(max_commits, 1000))):
+            commits_scanned += 1
+            try:
+                diffs = (
+                    commit.parents[0].diff(commit, create_patch=True)
+                    if commit.parents
+                    else commit.diff(git.NULL_TREE, create_patch=True)
+                )
+            except Exception:
+                continue
+
+            for d in diffs:
+                try:
+                    patch_bytes = d.diff
+                    if not patch_bytes:
+                        continue
+                    patch_text = (
+                        patch_bytes.decode("utf-8", errors="replace")
+                        if isinstance(patch_bytes, bytes) else str(patch_bytes)
+                    )
+                except Exception:
+                    continue
+
+                added_lines, removed_lines = [], []
+                for line in patch_text.splitlines():
+                    if line.startswith("+++") or line.startswith("---"):
+                        continue
+                    if line.startswith("+"):
+                        added_lines.append(line[1:])
+                    elif line.startswith("-"):
+                        removed_lines.append(line[1:])
+
+                path = d.b_path or d.a_path or "unknown"
+                source = f"{repo_url}@{commit.hexsha[:10]}:{path}"
+
+                if added_lines:
+                    for f in _scan_content_for_secrets("\n".join(added_lines), source):
+                        f["commit_sha"] = commit.hexsha
+                        f["commit_message"] = (commit.message or "").strip().splitlines()[0][:200] if commit.message else ""
+                        f["author"] = str(commit.author)
+                        f["committed_at"] = commit.committed_datetime.isoformat()
+                        f["file_path"] = path
+                        introduced.append((f, (f["name"], f["match"])))
+
+                if removed_lines:
+                    for f in _scan_content_for_secrets("\n".join(removed_lines), source + ":removed"):
+                        removed_keys.add((f["name"], f["match"]))
+
+        for f, key in introduced:
+            f["still_present"] = key not in removed_keys
+            findings.append(f)
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    return findings, commits_scanned
+
+
 # ── SSE stream generator ───────────────────────────────────────────────────────
+
+# Patterns with no value_group/min_entropy are strict-format matches (a fixed
+# prefix + length, e.g. AKIA[0-9A-Z]{16}) — inherently low false-positive rate.
+# Patterns with value_group/min_entropy are generic heuristics (e.g. any
+# "secret=..." assignment) — real but weaker signal even after the entropy filter.
+_STRICT_FORMAT_PATTERNS = {
+    "AWS Access Key", "AWS Secret Key", "JWT Token", "Stripe Secret Key",
+    "Stripe Publishable Key", "GitHub Token", "GitHub OAuth", "Google API Key",
+    "Slack Token", "Database URL",
+}
+_CERTAIN_PATTERNS = {"RSA Private Key", "Private Key"}  # a literal PEM header can't false-positive
+_LOW_CONFIDENCE_PATTERNS = {"Internal IP", "Source Map Exposed"}  # often intentional/documented
+
+
+def _adapt_secret_findings(findings: list[dict]) -> list[dict]:
+    """Normalize secrets.py findings for finding_ingest.ingest_findings."""
+    adapted = []
+    for f in findings:
+        name = f.get("name", "")
+        if name in _CERTAIN_PATTERNS or f.get("type") == "exposure":
+            confidence = "certain"  # a literal header match, or an HTTP-confirmed accessible file
+        elif name in _LOW_CONFIDENCE_PATTERNS:
+            confidence = "low"
+        elif name in _STRICT_FORMAT_PATTERNS:
+            confidence = "high"
+        else:
+            confidence = "medium"  # generic entropy-filtered heuristics (Generic API Key/Secret)
+
+        title = name or "Secret exposure"
+        if f.get("commit_sha"):
+            title = f"{title} (introduced in commit {f['commit_sha'][:10]})"
+
+        adapted.append({
+            "title": title,
+            "description": f.get("context", ""),
+            "severity": f.get("severity", "medium"),
+            "category": "secrets",
+            "affected_asset": f.get("url", ""),
+            "evidence": {
+                "match": f.get("match"), "line_number": f.get("line_number"),
+                "context": f.get("context"), "commit_sha": f.get("commit_sha"),
+                "commit_message": f.get("commit_message"), "author": f.get("author"),
+                "file_path": f.get("file_path"), "still_present": f.get("still_present"),
+            },
+            "remediation": get_remediation(category=name),
+            "confidence": confidence,
+        })
+    return adapted
+
 
 async def _stream_secret_scan(
     scan_id: str,
     org_id: str,
     req: "SecretScanRequest",
     request: Request,
+    db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
     start_time = time.monotonic()
     findings: list[dict] = []
@@ -647,6 +795,41 @@ async def _stream_secret_scan(
 
                 await asyncio.sleep(0)
 
+        # ── Phase 6: Git History Scan ────────────────────────────────────────────
+        if req.scan_type == "git_repo":
+            if not req.target.startswith(("http://", "https://")):
+                yield _sse("error", {"message": "git_repo scans only accept http(s) repository URLs"})
+            else:
+                yield _sse("progress", {
+                    "phase": "git_history",
+                    "message": f"Cloning {req.target} and walking commit history (this can take a minute)...",
+                    "count": 0,
+                })
+                loop = asyncio.get_event_loop()
+                try:
+                    git_findings, commits_scanned = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None, _scan_git_history_sync, req.target, req.github_token, req.max_git_commits,
+                        ),
+                        timeout=180,
+                    )
+                except asyncio.TimeoutError:
+                    yield _sse("error", {"message": "Git history scan timed out after 180 seconds"})
+                    git_findings, commits_scanned = [], 0
+                except Exception as exc:
+                    yield _sse("error", {"message": f"Git history scan failed: {exc}"})
+                    git_findings, commits_scanned = [], 0
+
+                for f in git_findings:
+                    findings.append(f)
+                    yield _sse("finding", {"data": f})
+                files_scanned += commits_scanned
+                yield _sse("progress", {
+                    "phase": "git_history",
+                    "message": f"Scanned {commits_scanned} commits.",
+                    "count": commits_scanned,
+                })
+
     # ── Finalize ───────────────────────────────────────────────────────────────
     duration = round(time.monotonic() - start_time, 2)
 
@@ -671,6 +854,13 @@ async def _stream_secret_scan(
     }
     _save_scan_result(org_id, record)
 
+    try:
+        adapted = _adapt_secret_findings(findings)
+        await ingest_findings(db, org_id, source="secrets", source_scan_id=scan_id, findings=adapted)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+
     yield _sse("complete", {
         "scan_id": scan_id,
         "total_findings": len(findings),
@@ -688,6 +878,7 @@ class SecretScanRequest(BaseModel):
     github_token: str | None = None
     include_wayback: bool = True
     max_js_files: int = 100
+    max_git_commits: int = 200  # git_repo scans only — bounds clone/walk cost
 
 
 # ── History endpoints ──────────────────────────────────────────────────────────
@@ -745,6 +936,7 @@ async def run_secret_scan(
     request: Request,
     current_user: Annotated[User, Depends(get_current_user)],
     org_id: str = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     if not payload.target.strip():
         raise HTTPException(
@@ -758,7 +950,7 @@ async def run_secret_scan(
     scan_id = str(_uuid_mod.uuid4())
 
     return StreamingResponse(
-        _stream_secret_scan(scan_id, str(org_id), payload, request),
+        _stream_secret_scan(scan_id, str(org_id), payload, request, db),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -1,16 +1,70 @@
 "use client";
 
 import React, { useCallback } from "react";
-import { Globe, ChevronLeft, ChevronRight } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { Globe, ChevronLeft, ChevronRight, Radar, Plus, Network } from "lucide-react";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/shared/page-header";
 import { EmptyState } from "@/components/shared/empty-state";
 import { AssetTable } from "@/components/assets/asset-table";
 import { AssetFilterPanel } from "@/components/assets/asset-filters";
 import { NLSearchBar } from "@/components/assets/nl-search-bar";
 import { useAssets } from "@/hooks/use-assets";
+import { assetsApi } from "@/lib/api";
 import type { AssetFilters, AssetType } from "@/types";
+
+interface SurfaceDiff {
+  has_data: boolean;
+  latest_snapshot_at?: string;
+  new_assets_count?: number;
+  new_ports_count?: number;
+  new_assets?: { value: string; asset_type: string }[];
+  new_ports?: { value: string; new_ports: number[] }[];
+  message?: string;
+}
+
+function SurfaceChangesCard() {
+  const { data } = useQuery({
+    queryKey: ["assets", "surface-diff"],
+    queryFn: () => assetsApi.surfaceDiff() as Promise<SurfaceDiff>,
+    staleTime: 5 * 60_000,
+  });
+
+  if (!data || !data.has_data) return null;
+  const newAssets = data.new_assets_count ?? 0;
+  const newPorts = data.new_ports_count ?? 0;
+  if (newAssets === 0 && newPorts === 0) return null;
+
+  return (
+    <Card className="border-amber-800/50 bg-amber-950/10">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-semibold text-amber-300 flex items-center gap-2">
+          <Radar className="h-4 w-4" />
+          Attack Surface Changes
+          <span className="text-[10px] font-normal text-zinc-500">
+            since {data.latest_snapshot_at ? new Date(data.latest_snapshot_at).toLocaleString() : "last check"}
+          </span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-wrap gap-4 text-xs">
+        {newAssets > 0 && (
+          <div className="flex items-center gap-1.5 text-zinc-300">
+            <Plus className="h-3.5 w-3.5 text-amber-400" />
+            {newAssets} new asset{newAssets === 1 ? "" : "s"} discovered
+          </div>
+        )}
+        {newPorts > 0 && (
+          <div className="flex items-center gap-1.5 text-zinc-300">
+            <Network className="h-3.5 w-3.5 text-amber-400" />
+            {newPorts} asset{newPorts === 1 ? "" : "s"} with newly opened ports
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 const PER_PAGE = 25;
 
@@ -89,6 +143,8 @@ export default function AssetsPage() {
         title="Asset Inventory"
         description={`${total.toLocaleString()} assets discovered`}
       />
+
+      <SurfaceChangesCard />
 
       {/* NL Search */}
       <NLSearchBar

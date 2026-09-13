@@ -199,3 +199,57 @@ async def asset_type_summary(
     rows = result.all()
 
     return {row.asset_type.value: row.count for row in rows}
+
+
+@router.get("/surface-diff/recent", summary="Recent attack-surface changes from continuous EASM diffing")
+async def get_recent_surface_diff(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+    limit: int = 2,
+) -> dict:
+    """Diff the two most recent periodic AssetSnapshot rows (written by
+    app.workers.easm_worker.diff_asset_surface) and summarize what changed."""
+    from app.models.db.asset import AssetSnapshot
+
+    result = await db.execute(
+        select(AssetSnapshot)
+        .where(AssetSnapshot.org_id == org_id)
+        .order_by(AssetSnapshot.taken_at.desc())
+        .limit(max(2, limit))
+    )
+    snapshots = result.scalars().all()
+    if len(snapshots) < 2:
+        return {
+            "has_data": len(snapshots) == 1,
+            "last_snapshot_at": snapshots[0].taken_at.isoformat() if snapshots else None,
+            "new_assets": [],
+            "message": "Need at least two periodic snapshots to diff — check back after the next EASM run.",
+        }
+
+    latest, previous = snapshots[0], snapshots[1]
+    latest_map: dict = latest.snapshot or {}
+    previous_map: dict = previous.snapshot or {}
+
+    new_assets = [
+        {"asset_id": aid, **latest_map[aid]}
+        for aid in latest_map if aid not in previous_map
+    ][:50]
+    new_ports = []
+    for aid, a in latest_map.items():
+        if aid not in previous_map:
+            continue
+        prev_ports = set((previous_map.get(aid) or {}).get("ports") or [])
+        opened = sorted(set(a.get("ports") or []) - prev_ports)
+        if opened:
+            new_ports.append({"asset_id": aid, "value": a.get("value"), "new_ports": opened})
+
+    return {
+        "has_data": True,
+        "latest_snapshot_at": latest.taken_at.isoformat(),
+        "previous_snapshot_at": previous.taken_at.isoformat(),
+        "new_assets": new_assets,
+        "new_assets_count": len(new_assets),
+        "new_ports": new_ports[:50],
+        "new_ports_count": len(new_ports),
+    }

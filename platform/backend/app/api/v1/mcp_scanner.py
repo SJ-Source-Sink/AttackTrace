@@ -28,9 +28,12 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings as _get_settings
+from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
+from app.services.finding_ingest import ingest_findings
 from app.models.db.user import User
 
 router = APIRouter(prefix="/mcp-scanner", tags=["MCP Scanner"])
@@ -366,9 +369,7 @@ PROMPT_INJECTION_MARKERS = [
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _sse(event: str, data: Any) -> str:
-    """Format a proper SSE message."""
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+from app.core.sse import sse_event as _sse
 
 
 def _scan_for_secrets(text: str) -> list[dict]:
@@ -497,11 +498,48 @@ class MCPScanRequest(BaseModel):
         return (self.target_url or self.target).rstrip("/")
 
 
+_ATTACK_VULN_IDS = {"path_traversal", "rce_eval", "ssrf", "command_injection", "template_injection"}
+
+
+def _adapt_mcp_findings(findings: list[dict]) -> list[dict]:
+    """Normalize mcp_scanner.py findings for finding_ingest.
+
+    Confidence: unauth_* and the TOOL_ATTACKS ids fire only after a real
+    extracted-value match (success_indicators like "uid=", "root:", an actual
+    metadata response) — "certain". exposed_secret is a pattern match — "high"
+    (same tier as secrets.py's strict-format patterns). tool_*/prompt-injection
+    are heuristic flags on tool descriptions, not confirmed exploitation — "medium".
+    """
+    adapted = []
+    for f in findings:
+        vuln_id = f.get("vuln_id", "")
+        if vuln_id.startswith("unauth_") or vuln_id in _ATTACK_VULN_IDS:
+            confidence = "certain"
+        elif vuln_id == "exposed_secret":
+            confidence = "high"
+        else:
+            confidence = "medium"
+
+        adapted.append({
+            "title": f.get("title", "MCP finding"),
+            "description": f.get("description", ""),
+            "severity": f.get("severity", "medium"),
+            "category": f"mcp-{vuln_id}",
+            "affected_asset": f.get("url", ""),
+            "evidence": {"detail": f.get("detail"), "evidence": f.get("evidence"), "tool_name": f.get("tool_name")},
+            "remediation": f.get("remediation", ""),
+            "references": [f["owasp"]] if f.get("owasp") else [],
+            "confidence": confidence,
+        })
+    return adapted
+
+
 async def _run_mcp_scan(
     target_url: str,
     timeout: int,
     check_sse: bool,
     run_attacks: bool,
+    db: AsyncSession,
     scan_id: str = "",
     org_id: str = "",
 ) -> AsyncGenerator[str, None]:
@@ -931,6 +969,12 @@ async def _run_mcp_scan(
             "severity_counts": sev_counts,
             "vuln_ids": list({f["vuln_id"] for f in findings}),
         })
+        try:
+            adapted = _adapt_mcp_findings(findings)
+            await ingest_findings(db, org_id, source="mcp_scanner", source_scan_id=scan_id, findings=adapted)
+            await db.commit()
+        except Exception:
+            await db.rollback()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -952,6 +996,7 @@ async def scan_mcp_server(
     payload: MCPScanRequest,
     current_user: Annotated[User, Depends(get_current_user)],
     org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     if not payload.resolved_target:
         raise HTTPException(
@@ -965,6 +1010,7 @@ async def scan_mcp_server(
             payload.timeout,
             payload.check_sse,
             payload.run_attacks,
+            db,
             scan_id=scan_id,
             org_id=str(org_id),
         ),

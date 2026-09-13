@@ -198,6 +198,12 @@ export const assetsApi = {
     api.post("/assets/bulk/assign", { ids, owner }),
   exportCsv: (params?: Record<string, string | undefined>) =>
     apiFetch<Blob>("/assets/export/csv", { method: "GET", params }),
+  surfaceDiff: () => api.get("/assets/surface-diff/recent"),
+};
+
+export const complianceApi = {
+  frameworks: () => api.get("/compliance/frameworks"),
+  coverage: (framework: string) => api.get(`/compliance/${framework}/coverage`),
 };
 
 export const findingsApi = {
@@ -315,6 +321,9 @@ export const cloudApi = {
   discover: (provider: string, credentials: Record<string, string>) =>
     api.post("/cloud/discover", { provider, credentials }),
   listAssets: () => api.get("/cloud/assets"),
+  history: () => api.get("/cloud/history"),
+  historyItem: (id: string) => api.get(`/cloud/history/${id}`),
+  deleteHistoryItem: (id: string) => api.delete(`/cloud/history/${id}`),
 };
 
 export const orgApi = {

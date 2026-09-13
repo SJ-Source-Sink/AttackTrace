@@ -1302,7 +1302,7 @@ export default function AttackSuitePage() {
                     <div>
                       <p className="text-xs font-medium text-zinc-300">AI Strategy Planner</p>
                       <p className="text-[10px] text-zinc-500 mt-0.5 leading-relaxed">
-                        Claude analyzes target using hunt skill techniques, plans attack strategy, and deep-analyzes critical findings.
+                        Claude analyzes target using the Hunt Harness methodology, plans attack strategy, and deep-analyzes critical findings.
                       </p>
                     </div>
                     <Switch checked={aiAnalysis} onCheckedChange={(v) => {

@@ -7,6 +7,7 @@ import {
   Loader2,
   RefreshCw,
   Server,
+  History,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -244,12 +245,23 @@ export default function CloudDiscoveryPage() {
     staleTime: 60_000,
   });
 
+  const { data: history, isLoading: historyLoading } = useQuery({
+    queryKey: ["cloud", "history"],
+    queryFn: () =>
+      cloudApi.history() as Promise<{
+        items: { id: string; provider: string; discovered: number; created_at: number }[];
+        total: number;
+      }>,
+    staleTime: 30_000,
+  });
+
   const handleResult = (session: DiscoveredSession) => {
     setSessions((prev) => {
       const filtered = prev.filter((s) => s.provider !== session.provider);
       return [...filtered, session];
     });
     queryClient.invalidateQueries({ queryKey: ["cloud", "assets"] });
+    queryClient.invalidateQueries({ queryKey: ["cloud", "history"] });
   };
 
   const allDiscovered: CloudAsset[] = sessions.flatMap((s) => s.result.assets);
@@ -366,6 +378,58 @@ export default function CloudDiscoveryPage() {
                       </td>
                       <td className="px-4 py-3 text-zinc-400 text-xs">
                         {a.last_seen ? new Date(a.last_seen).toLocaleDateString() : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Discovery history */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm font-semibold text-zinc-300 flex items-center gap-2">
+            <History className="h-4 w-4 text-zinc-500" />
+            Discovery History
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          {historyLoading ? (
+            <div className="p-4 space-y-2">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <Skeleton key={i} className="h-10 w-full" />
+              ))}
+            </div>
+          ) : (history?.items ?? []).length === 0 ? (
+            <div className="p-6">
+              <EmptyState
+                icon={<History className="h-8 w-8" />}
+                title="No discovery runs yet"
+                description="Past cloud discovery runs will show up here."
+              />
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-zinc-800 bg-zinc-900/50">
+                    <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500">Provider</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500">Assets Discovered</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-zinc-500">Run At</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {history!.items.map((h) => (
+                    <tr key={h.id} className="border-b border-zinc-800/60 hover:bg-zinc-800/30">
+                      <td className="px-4 py-3">
+                        <Badge variant="outline" className="text-[10px] uppercase">{h.provider}</Badge>
+                      </td>
+                      <td className="px-4 py-3 text-zinc-300 text-xs">{h.discovered}</td>
+                      <td className="px-4 py-3 text-zinc-400 text-xs">
+                        {h.created_at ? new Date(h.created_at * 1000).toLocaleString() : "—"}
                       </td>
                     </tr>
                   ))}
