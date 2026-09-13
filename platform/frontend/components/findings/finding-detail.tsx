@@ -13,6 +13,7 @@ import {
   ChevronRight,
   UserCircle,
   ChevronDown,
+  RefreshCw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -108,6 +109,38 @@ function AssigneeSelector({ finding }: { finding: Finding }) {
   );
 }
 
+function RevalidateButton({ finding }: { finding: Finding }) {
+  const qc = useQueryClient();
+
+  const revalidateMutation = useMutation({
+    mutationFn: () => findingsApi.revalidate(finding.id),
+    onSuccess: (result) => {
+      qc.invalidateQueries({ queryKey: ["findings"] });
+      if (result.checked === "none") {
+        toast.info("Nothing to re-check — this finding has no port/URL in its affected asset.");
+      } else if (result.stale) {
+        toast.warning("No longer reproduces — this may be stale.");
+      } else {
+        toast.success(`Still live — confidence updated to "${result.confidence}".`);
+      }
+    },
+    onError: () => toast.error("Failed to re-verify finding"),
+  });
+
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="h-7 px-2 text-xs gap-1.5 text-zinc-400 hover:text-zinc-200"
+      disabled={revalidateMutation.isPending}
+      onClick={() => revalidateMutation.mutate()}
+    >
+      <RefreshCw className={`h-3.5 w-3.5 ${revalidateMutation.isPending ? "animate-spin" : ""}`} />
+      Re-verify
+    </Button>
+  );
+}
+
 export function FindingDetail({ finding, onClose }: FindingDetailProps) {
   const confidenceColor =
     finding.ai_triage?.confidence !== undefined
@@ -151,6 +184,7 @@ export function FindingDetail({ finding, onClose }: FindingDetailProps) {
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          <RevalidateButton finding={finding} />
           <AssigneeSelector finding={finding} />
           <StatusWorkflow finding={finding} />
           <Button variant="ghost" size="icon" onClick={onClose} className="h-8 w-8">

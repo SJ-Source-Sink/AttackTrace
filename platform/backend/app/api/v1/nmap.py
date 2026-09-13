@@ -3,6 +3,7 @@ Nmap network scanner API — runs nmap and streams results via SSE.
 """
 
 import asyncio
+import ipaddress
 import json
 import re
 import shutil
@@ -18,9 +19,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user, require_tool
+from app.models.db.asset import AssetType
 from app.models.db.audit import AuditLog
 from app.models.db.user import User
+from app.services.asset_upsert import upsert_asset_async
 from app.services.enrichment_service import enrich_cve, batch_enrich_cves, get_kev_catalog
+
+
+_HOST_WITH_RESOLVED_NAME = re.compile(r"^(\S+)\s+\(([0-9a-fA-F:.]+)\)$")
+
+
+def _clean_host_value(host: str) -> str:
+    """nmap's "Nmap scan report for <name>" line becomes "name (ip)" when
+    reverse DNS resolves — use just the IP as the canonical asset value so a
+    hostname+IP compound string never ends up persisted as one Asset.value."""
+    m = _HOST_WITH_RESOLVED_NAME.match(host)
+    return m.group(2) if m else host
+
+
+def _classify_host(host: str) -> AssetType:
+    try:
+        ipaddress.ip_address(host)
+        return AssetType.IP
+    except ValueError:
+        return AssetType.SUBDOMAIN
 
 _CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
 
@@ -261,7 +283,9 @@ def _parse_nmap_output(raw: str) -> list[dict]:
     return hosts
 
 
-async def _stream_nmap(scan_id: str, req: NmapScanRequest, request: Request) -> AsyncGenerator[str, None]:
+async def _stream_nmap(
+    scan_id: str, req: NmapScanRequest, request: Request, org_id: uuid.UUID, db: AsyncSession
+) -> AsyncGenerator[str, None]:
     cmd = _build_nmap_cmd(req)
 
     def _sse(event: str, data: dict) -> str:
@@ -336,6 +360,26 @@ async def _stream_nmap(scan_id: str, req: NmapScanRequest, request: Request) -> 
             "nse_enrichment": nse_enrichment,
         })
 
+        # Persist open ports/services onto the Asset record — this was never
+        # written anywhere before (nmap results were SSE-only + an in-memory
+        # dict lost on restart), which is also why the network map never had
+        # port data to show.
+        try:
+            for host in hosts:
+                open_ports = [
+                    {"port": p["port"], "protocol": p["protocol"], "service": p["service"], "version": p["version"]}
+                    for p in host.get("ports", [])
+                    if p.get("state") == "open"
+                ]
+                clean_value = _clean_host_value(host["host"])
+                await upsert_asset_async(
+                    db, org_id, _classify_host(clean_value), clean_value,
+                    {"ports": open_ports, "os": host.get("os"), "nmap_cve_ids": host.get("cve_ids", [])},
+                )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+
         yield _sse("complete", {
             "scan_id": scan_id,
             "hosts": hosts,
@@ -389,7 +433,7 @@ async def run_nmap_scan(
     await db.commit()
 
     return StreamingResponse(
-        _stream_nmap(scan_id, payload, request),
+        _stream_nmap(scan_id, payload, request, org_id, db),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

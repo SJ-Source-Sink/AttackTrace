@@ -6233,3 +6233,78 @@ async def verify_burp_test_case(
         req_timeout=min(int(body.get("timeout", 10)), 30),
         verify_ssl=bool(body.get("verify_ssl", True)),
     )
+
+
+# ── AI Agent mode: real tool-use, autonomous within scope ─────────────────────
+
+class AttackAgentRunRequest(BaseModel):
+    target: str
+    objective: Optional[str] = None
+    max_turns: int = 20
+    max_seconds: int = 480
+
+    @field_validator("max_turns")
+    @classmethod
+    def _cap_turns(cls, v: int) -> int:
+        return max(1, min(v, 40))
+
+    @field_validator("max_seconds")
+    @classmethod
+    def _cap_seconds(cls, v: int) -> int:
+        return max(30, min(v, 900))
+
+
+async def _stream_attack_agent(payload: AttackAgentRunRequest, org_id: UUID, user_id: UUID, ai_config: dict, db: AsyncSession) -> AsyncGenerator[str, None]:
+    from app.services.attack_agent import run_agent
+    async for event in run_agent(
+        db, org_id, user_id, payload.target, objective=payload.objective,
+        ai_config=ai_config, max_turns=payload.max_turns, max_seconds=payload.max_seconds,
+    ):
+        yield _sse(event["event"], event["data"])
+
+
+@router.post("/agent/run")
+async def run_attack_agent(
+    payload: AttackAgentRunRequest,
+    current_user: Annotated[User, Depends(require_tool("attack_suite"))],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """Run the autonomous, real tool-use AI agent against an in-scope target.
+
+    No per-tool-call human approval — scope enforcement (target must already
+    be a known org Asset), a fixed non-destructive tool envelope, a bounded
+    turn/time budget, and a full AuditLog trail are the compensating controls.
+    Stream stops safely on POST /attack-suite/agent/{run_id}/stop.
+    """
+    from app.services.ai_service import get_org_ai_config
+    ai_config = await get_org_ai_config(org_id, db)
+    return StreamingResponse(
+        _stream_attack_agent(payload, org_id, current_user.id, ai_config, db),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
+                 "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/agent/{run_id}/stop")
+async def stop_attack_agent(
+    run_id: str,
+    current_user: Annotated[User, Depends(require_tool("attack_suite"))],
+) -> dict:
+    from app.services.attack_agent import stop_run
+    if not stop_run(run_id):
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    return {"run_id": run_id, "stopping": True}
+
+
+@router.get("/agent/{run_id}")
+async def get_attack_agent_status(
+    run_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    from app.services.attack_agent import get_run_status
+    status_info = get_run_status(run_id)
+    if status_info is None:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    return status_info

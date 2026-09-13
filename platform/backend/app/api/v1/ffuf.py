@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, AsyncGenerator
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
@@ -21,8 +22,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user, require_tool
+from app.models.db.asset import AssetType
 from app.models.db.audit import AuditLog
 from app.models.db.user import User
+from app.services.asset_upsert import upsert_asset_async
 
 router = APIRouter(prefix="/ffuf", tags=["ffuf"])
 
@@ -309,7 +312,10 @@ def _parse_ejson_file(path: str) -> list[dict]:
         return []
 
 
-async def _stream_ffuf(scan_id: str, req: FfufScanRequest, wordlist_path: str, request: Request) -> AsyncGenerator[str, None]:
+async def _stream_ffuf(
+    scan_id: str, req: FfufScanRequest, wordlist_path: str, request: Request,
+    org_id: uuid.UUID, db: AsyncSession,
+) -> AsyncGenerator[str, None]:
     # ffuf -of ejson -o <file> writes a single JSON object at exit (not streaming lines).
     # Stdout receives plain-text matched paths in real-time — useful for live progress.
     # We stream stdout as discovery events, then parse the JSON file for full results.
@@ -416,6 +422,25 @@ async def _stream_ffuf(scan_id: str, req: FfufScanRequest, wordlist_path: str, r
             "exit_code": proc.returncode,
         })
 
+        # Persist live discovered paths onto the parent host's Asset record —
+        # this was never written anywhere before (ffuf results were SSE-only
+        # + an in-memory dict lost on restart).
+        try:
+            hostname = urlparse(req.url).hostname
+            if hostname:
+                discovered_paths = [
+                    {"url": r["url"], "status": r["status"], "length": r["length"]}
+                    for r in results if r.get("status", 0) < 400
+                ][:200]
+                if discovered_paths:
+                    await upsert_asset_async(
+                        db, org_id, AssetType.SUBDOMAIN, hostname,
+                        {"discovered_paths": discovered_paths},
+                    )
+                    await db.commit()
+        except Exception:
+            await db.rollback()
+
         yield _sse("complete", {
             "scan_id": scan_id,
             "total": len(results),
@@ -509,7 +534,7 @@ async def run_ffuf_scan(
     await db.commit()
 
     return StreamingResponse(
-        _stream_ffuf(scan_id, payload, wordlist, request),
+        _stream_ffuf(scan_id, payload, wordlist, request, org_id, db),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

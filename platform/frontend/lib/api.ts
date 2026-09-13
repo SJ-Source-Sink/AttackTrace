@@ -217,6 +217,10 @@ export const findingsApi = {
   timeline: (params: Record<string, string | number | undefined>) =>
     api.get("/findings/timeline", params),
   assignees: () => api.get<{ items: { id: string; name: string; email: string; role: string }[] }>("/findings/assignees"),
+  revalidate: (id: string) =>
+    api.post<{ finding_id: string; confidence: string; checked: string; still_live?: boolean; stale?: boolean }>(
+      `/findings/${id}/revalidate`, {},
+    ),
 };
 
 export const reportsApi = {

@@ -7,17 +7,23 @@ const CONFIDENCE_CONFIG = {
     dot: "bg-emerald-400",
     title: "Proof-based — OOB callback, credentials verified, data confirmed",
   },
-  firm: {
-    label: "Firm",
+  high: {
+    label: "High",
     className: "bg-blue-900/40 border-blue-500/40 text-blue-300",
     dot: "bg-blue-400",
-    title: "Strong signal — version banner match, service confirmed",
+    title: "Strong signal — two independent confirmations (e.g. dead CNAME + fingerprint match)",
   },
-  tentative: {
-    label: "Tentative",
+  medium: {
+    label: "Medium",
     className: "bg-yellow-900/30 border-yellow-500/30 text-yellow-300",
     dot: "bg-yellow-400",
-    title: "Heuristic only — pattern match, keyword detection",
+    title: "Needs a control/differential to be sure — status-flip, differential response, repeated timing",
+  },
+  low: {
+    label: "Low",
+    className: "bg-zinc-800/60 border-zinc-600/40 text-zinc-400",
+    dot: "bg-zinc-500",
+    title: "Weak or unconfirmed — single heuristic, reflected value, bare signal",
   },
 }
 

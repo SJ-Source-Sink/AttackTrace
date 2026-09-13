@@ -17,6 +17,7 @@ import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import { PageHeader } from "@/components/shared/page-header";
 import { BurpImport } from "@/components/attack-suite/burp-import";
+import { AttackAgentPanel } from "@/components/attack-suite/attack-agent-panel";
 import { cn } from "@/lib/utils";
 import { fetchWithAuth, getAccessToken } from "@/lib/auth";
 import { toast } from "sonner";
@@ -300,7 +301,7 @@ function SectionToggle({
 // Main page
 // ─────────────────────────────────────────────────────────────
 export default function AttackSuitePage() {
-  const [activeTab, setActiveTab] = useState<"scanner" | "burp">("scanner");
+  const [activeTab, setActiveTab] = useState<"scanner" | "burp" | "agent">("scanner");
 
   // Target + basic options
   const [target, setTarget] = useState("");
@@ -675,11 +676,28 @@ export default function AttackSuitePage() {
           <Network className="h-3.5 w-3.5" />
           Burp Import
         </button>
+        <button
+          onClick={() => setActiveTab("agent")}
+          className={cn(
+            "flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors",
+            activeTab === "agent"
+              ? "bg-violet-600 text-white"
+              : "text-zinc-500 hover:text-zinc-300"
+          )}
+        >
+          <BrainCircuit className="h-3.5 w-3.5" />
+          AI Agent
+        </button>
       </div>
 
       {/* ── Burp Import tab ── */}
       {activeTab === "burp" && (
         <BurpImport />
+      )}
+
+      {/* ── AI Agent tab ── */}
+      {activeTab === "agent" && (
+        <AttackAgentPanel defaultTarget={target} />
       )}
 
       {/* ── Scanner tab ── */}

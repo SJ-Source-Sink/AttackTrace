@@ -360,7 +360,7 @@ export interface Finding {
   assigned_to?: string;
   tags: string[];
   // KEV / EPSS / confidence enrichment fields
-  confidence?: 'certain' | 'firm' | 'tentative' | null;
+  confidence?: 'certain' | 'high' | 'medium' | 'low' | null;
   kev_status?: boolean;
   epss_score?: number | null;
   priority_score?: number | null;

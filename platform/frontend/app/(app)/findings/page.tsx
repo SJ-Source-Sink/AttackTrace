@@ -2433,8 +2433,9 @@ export default function FindingsPage() {
             >
               <option value="">All Confidence</option>
               <option value="certain">Certain</option>
-              <option value="firm">Firm</option>
-              <option value="tentative">Tentative</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
             </select>
           </div>
 

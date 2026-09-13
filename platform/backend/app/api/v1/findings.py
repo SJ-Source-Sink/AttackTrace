@@ -787,6 +787,30 @@ async def delete_finding(
 
 
 @router.post(
+    "/{finding_id}/revalidate",
+    summary="Re-check whether a finding still reproduces live",
+    description=(
+        "Live re-confirms a port/endpoint-shaped finding (raw TCP connect or "
+        "HTTP GET against affected_asset) rather than trusting whatever a past "
+        "scan recorded indefinitely. Bumps confidence to 'certain' if it still "
+        "reproduces, or reports it as stale if it doesn't."
+    ),
+)
+async def revalidate_finding_endpoint(
+    finding_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from app.services.validation_service import revalidate_finding
+
+    finding = await _get_finding_or_404(db, finding_id, org_id)
+    result = await revalidate_finding(db, finding)
+    db.add(finding)
+    return {"finding_id": str(finding_id), "confidence": finding.confidence, **result}
+
+
+@router.post(
     "/{finding_id}/comments",
     response_model=FindingCommentResponse,
     status_code=status.HTTP_201_CREATED,

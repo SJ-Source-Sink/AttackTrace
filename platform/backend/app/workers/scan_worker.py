@@ -618,7 +618,7 @@ def _persist_module_results_partial(
                     cvss_score=f.cvss_score,
                     false_positive=f.false_positive,
                     status=FindingStatus.OPEN,
-                    confidence=getattr(f, "confidence", "firm"),
+                    confidence=getattr(f, "confidence", "medium"),
                     dedup_hash=dedup_hash,
                 )
                 # SLA deadline and compliance tags
@@ -796,7 +796,7 @@ def _persist_session_results(db_session, scan_job, attacktrace_session, org_id: 
                 cvss_score=f.cvss_score,
                 false_positive=f.false_positive,
                 status=FindingStatus.OPEN,
-                confidence=getattr(f, "confidence", "firm"),
+                confidence=getattr(f, "confidence", "medium"),
                 dedup_hash=dedup_hash,
             )
             # SLA deadline and compliance tags
