@@ -13,6 +13,7 @@ existing scan evidence into the shape an auditor/compliance team can use.
 from __future__ import annotations
 
 import csv
+import html as _html
 import io
 from datetime import datetime, timezone
 from typing import Annotated, Optional
@@ -150,6 +151,17 @@ async def _build_coverage(db: AsyncSession, org_id, framework: str) -> dict:
     }
 
 
+def _csv_safe(value: str) -> str:
+    """Neutralize CSV formula injection (CWE-1236): a cell starting with
+    =, +, -, @, or a tab/CR that a spreadsheet app would interpret as a
+    formula prefix. Finding titles can originate from an untrusted scan
+    target (e.g. a git commit message), so this must not be skipped."""
+    s = str(value or "").replace("\r", " ").replace("\n", " ")
+    if s and s[0] in ("=", "+", "-", "@", "\t"):
+        return "'" + s
+    return s
+
+
 def _validate_framework(framework: str) -> str:
     if framework not in VALID_FRAMEWORKS:
         raise HTTPException(
@@ -199,7 +211,7 @@ async def export_evidence(
             writer.writerow([
                 row["control_id"], row["name"], row["state"],
                 len(row["failing_findings"]),
-                "; ".join(f["title"] for f in row["failing_findings"][:10]),
+                _csv_safe("; ".join(f["title"] for f in row["failing_findings"][:10])),
             ])
         buf.seek(0)
         return StreamingResponse(
@@ -226,15 +238,16 @@ async def export_evidence(
         findings_html = ""
         if row["failing_findings"]:
             items = "".join(
-                f"<li>{f['severity'].upper()} — {f['title']} ({f['affected_asset'] or 'n/a'})</li>"
+                f"<li>{_html.escape(f['severity'].upper())} — {_html.escape(f['title'])} "
+                f"({_html.escape(f['affected_asset']) if f['affected_asset'] else 'n/a'})</li>"
                 for f in row["failing_findings"][:20]
             )
             findings_html = f"<ul style='margin:4px 0 0 16px;font-size:11px;color:#52525b'>{items}</ul>"
         rows_html += f"""
         <tr>
-          <td style="padding:8px;border-bottom:1px solid #e4e4e7;font-family:monospace">{row['control_id']}</td>
-          <td style="padding:8px;border-bottom:1px solid #e4e4e7">{row['name']}<br/>
-              <span style="font-size:11px;color:#71717a">{row['description']}</span>{findings_html}</td>
+          <td style="padding:8px;border-bottom:1px solid #e4e4e7;font-family:monospace">{_html.escape(row['control_id'])}</td>
+          <td style="padding:8px;border-bottom:1px solid #e4e4e7">{_html.escape(row['name'])}<br/>
+              <span style="font-size:11px;color:#71717a">{_html.escape(row['description'])}</span>{findings_html}</td>
           <td style="padding:8px;border-bottom:1px solid #e4e4e7;text-align:center">
               <span style="color:{state_colors[row['state']]};font-weight:bold">{state_labels[row['state']]}</span>
           </td>
@@ -251,8 +264,8 @@ async def export_evidence(
       .stat {{ font-size: 20px; font-weight: bold; }}
       .stat-label {{ font-size: 11px; color: #71717a; }}
     </style></head><body>
-      <h1>{framework_labels.get(framework, framework)} Compliance Evidence Bundle</h1>
-      <p class="meta">Generated {coverage['generated_at']} by AttackTrace — derived from live scan findings.
+      <h1>{_html.escape(framework_labels.get(framework, framework))} Compliance Evidence Bundle</h1>
+      <p class="meta">Generated {_html.escape(coverage['generated_at'])} by AttackTrace — derived from live scan findings.
       This is evidence packaging, not a certification.</p>
       <div class="summary">
         <div><div class="stat" style="color:#16a34a">{coverage['passing']}</div><div class="stat-label">PASSING</div></div>
@@ -266,7 +279,16 @@ async def export_evidence(
     </body></html>
     """
 
-    pdf_bytes = HTML(string=html).write_pdf()
+    # Reject every external resource fetch (images, stylesheets, fonts) — the
+    # template embeds its own <style> and references nothing external, so
+    # this closes the SSRF vector without breaking rendering. Finding titles
+    # are HTML-escaped above, but a URL fetcher is defense-in-depth against
+    # any injection that slips through (e.g. a CSS url() in an unescaped field
+    # added later) and against WeasyPrint following redirects on its own.
+    def _no_external_fetch(url: str, *args, **kwargs):
+        raise ValueError(f"External resource fetching is disabled (blocked: {url})")
+
+    pdf_bytes = HTML(string=html, url_fetcher=_no_external_fetch).write_pdf()
     return StreamingResponse(
         iter([pdf_bytes]),
         media_type="application/pdf",
