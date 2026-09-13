@@ -174,6 +174,7 @@ def _build_nodes(
     for asset in assets:
         meta = asset.metadata_ or {}
         finfo = finding_index.get(asset.id, {"count": 0, "worst_severity": "none"})
+        geolocation = meta.get("geolocation") or {}
         node = {
             "id": f"asset:{asset.id}",
             "type": asset.asset_type.value,
@@ -183,16 +184,24 @@ def _build_nodes(
             "risk_score": asset.risk_score,
             "scan_id": str(asset.scan_job_id) if asset.scan_job_id else None,
             "metadata": {
-                "ip": meta.get("ip"),
-                "ips": meta.get("ips", []),
+                # IP assets: the asset's own value IS the IP. Subdomain/domain
+                # assets store their resolved IPs under "resolved_ips", not
+                # "ip"/"ips" (a naming mismatch that also broke resolves_to
+                # edges below — kept both keys read here for forward compat).
+                "ip": asset.value if asset.asset_type == AssetType.IP else meta.get("ip"),
+                "ips": meta.get("resolved_ips") or meta.get("ips", []),
+                # Port/tech/CDN detection isn't wired into the discovery
+                # pipeline yet — these stay empty until that data exists.
                 "ports": meta.get("ports", []),
                 "tech": meta.get("tech", []),
                 "cdn": meta.get("cdn"),
                 "asn": meta.get("asn"),
-                "country": meta.get("country"),
-                "status_code": meta.get("status_code"),
+                "country": geolocation.get("country") or meta.get("country"),
+                # webapp writes "status_code", subdomain writes "http_status"
+                "status_code": meta.get("status_code") or meta.get("http_status"),
                 "title": meta.get("title"),
-                "cloud_provider": meta.get("cloud_provider"),
+                # IP writes "cloud_provider", CLOUD-type assets write "provider"
+                "cloud_provider": meta.get("cloud_provider") or meta.get("provider"),
             },
         }
         nodes.append(node)
@@ -225,12 +234,15 @@ def _build_edges(assets: list[Asset]) -> list[dict]:
         meta = asset.metadata_ or {}
 
         # resolves_to: subdomain / domain → IP asset
+        # (subdomains store their resolved IPs under "resolved_ips" — the
+        # "ip"/"ips" keys checked here as a fallback are never actually
+        # written by the discovery pipeline, but kept for forward compat)
         if asset.asset_type in (AssetType.SUBDOMAIN, AssetType.DOMAIN):
             candidate_ips: list[str] = []
             single_ip = meta.get("ip")
             if single_ip:
                 candidate_ips.append(str(single_ip).lower())
-            for ip in meta.get("ips", []):
+            for ip in (meta.get("resolved_ips") or meta.get("ips") or []):
                 candidate_ips.append(str(ip).lower())
             for ip_val in candidate_ips:
                 target_node = value_to_node_id.get(ip_val)

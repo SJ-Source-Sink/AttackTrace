@@ -14,14 +14,11 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sqlalchemy import select
-
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
-from app.models.db.scan import ScanJob
 from app.models.db.user import User
-from app.services.report_service import generate_report, generate_pdf_report
+from app.services.report_service import generate_report, generate_pdf_report, scan_id_belongs_to_org
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
 settings = get_settings()
@@ -126,11 +123,9 @@ async def download_report(
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> FileResponse:
-    # Verify scan belongs to this org (prevents IDOR)
-    result = await db.execute(
-        select(ScanJob).where(ScanJob.id == scan_job_id, ScanJob.org_id == org_id)
-    )
-    if result.scalar_one_or_none() is None:
+    # Verify scan belongs to this org (prevents IDOR) — a "scan" here may be an
+    # orchestrated ScanJob or a standalone scanner run (cspm/secrets/etc.)
+    if not await scan_id_belongs_to_org(db, scan_job_id, org_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error": {"code": "NOT_FOUND", "message": "Scan not found"}},
@@ -187,11 +182,9 @@ async def download_pdf_report(
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> FileResponse:
-    # Verify scan belongs to this org (prevents IDOR)
-    result = await db.execute(
-        select(ScanJob).where(ScanJob.id == scan_job_id, ScanJob.org_id == org_id)
-    )
-    if result.scalar_one_or_none() is None:
+    # Verify scan belongs to this org (prevents IDOR) — a "scan" here may be an
+    # orchestrated ScanJob or a standalone scanner run (cspm/secrets/etc.)
+    if not await scan_id_belongs_to_org(db, scan_job_id, org_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error": {"code": "NOT_FOUND", "message": "Scan not found"}},

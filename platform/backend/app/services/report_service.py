@@ -1,6 +1,6 @@
 """
 Report generation service.
-Builds HTML reports using AttackTrace's html_template and stores them.
+Builds HTML reports from a scan's findings and stores them.
 """
 
 import asyncio
@@ -25,6 +25,65 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+async def _load_scan_context(db: AsyncSession, scan_job_id: UUID, org_id: UUID):
+    """Resolve a report target to either an orchestrated ScanJob (the main
+    scan pipeline) or a standalone scanner run (cspm/secrets/supply_chain/
+    container_scanner/firewall_physical/exposure_scanner/mcp_scanner/
+    takeover/email_security) — those write findings with scan_job_id=None
+    and source_scan_id=<their own scan id> instead of a ScanJob row, so a
+    report for one of those ids previously always 404'd or came back empty.
+
+    Returns (job_or_none, findings, assets, target_domains, company_name).
+    Raises ValueError if nothing in this org matches scan_job_id at all.
+    """
+    job_result = await db.execute(
+        select(ScanJob).where(ScanJob.id == scan_job_id, ScanJob.org_id == org_id)
+    )
+    job = job_result.scalar_one_or_none()
+
+    if job is not None:
+        if job.status != ScanStatus.COMPLETED:
+            raise ValueError(f"Cannot generate report for scan in status: {job.status.value}")
+
+        findings_result = await db.execute(
+            select(Finding).where(Finding.scan_job_id == scan_job_id, Finding.org_id == org_id)
+        )
+        findings = findings_result.scalars().all()
+
+        assets_result = await db.execute(
+            select(Asset).where(Asset.scan_job_id == scan_job_id, Asset.org_id == org_id)
+        )
+        assets = assets_result.scalars().all()
+
+        return job, findings, assets, (job.target_domains or []), job.company_name
+
+    # Not an orchestrated scan — look for a standalone-scanner run tagged
+    # with this id via source_scan_id.
+    findings_result = await db.execute(
+        select(Finding).where(Finding.source_scan_id == str(scan_job_id), Finding.org_id == org_id)
+    )
+    findings = findings_result.scalars().all()
+    if not findings:
+        raise ValueError(f"Scan {scan_job_id} not found")
+
+    target_domains = sorted({f.affected_asset for f in findings if f.affected_asset})[:10]
+    return None, findings, [], target_domains, None
+
+
+async def scan_id_belongs_to_org(db: AsyncSession, scan_job_id: UUID, org_id: UUID) -> bool:
+    """Ownership check for the report download routes — true if scan_job_id
+    is either a ScanJob or a standalone-scanner source_scan_id in this org."""
+    job = (await db.execute(
+        select(ScanJob.id).where(ScanJob.id == scan_job_id, ScanJob.org_id == org_id)
+    )).scalar_one_or_none()
+    if job is not None:
+        return True
+    finding = (await db.execute(
+        select(Finding.id).where(Finding.source_scan_id == str(scan_job_id), Finding.org_id == org_id).limit(1)
+    )).scalar_one_or_none()
+    return finding is not None
+
+
 async def generate_report(
     db: AsyncSession,
     scan_job_id: UUID,
@@ -34,46 +93,18 @@ async def generate_report(
     requester_user_id: Optional[UUID] = None,
 ) -> dict:
     """
-    Generate a security report for a completed scan.
+    Generate a security report for a completed scan (orchestrated ScanJob
+    or a standalone scanner run — see _load_scan_context).
 
     Returns:
         Dict with report metadata: id, path, url, format, generated_at, summary.
     """
-    # Load scan job
-    result = await db.execute(
-        select(ScanJob).where(
-            ScanJob.id == scan_job_id,
-            ScanJob.org_id == org_id,
-        )
-    )
-    job = result.scalar_one_or_none()
-    if job is None:
-        raise ValueError(f"Scan job {scan_job_id} not found")
+    job, findings, assets, target_domains, company_name = await _load_scan_context(db, scan_job_id, org_id)
 
-    if job.status != ScanStatus.COMPLETED:
-        raise ValueError(f"Cannot generate report for scan in status: {job.status.value}")
+    if not include_evidence:
+        findings = [f for f in findings if f.severity.value != "info"]
 
-    # Load findings
-    findings_result = await db.execute(
-        select(Finding).where(Finding.scan_job_id == scan_job_id, Finding.org_id == org_id)
-    )
-    findings = findings_result.scalars().all()
-
-    # Load assets
-    assets_result = await db.execute(
-        select(Asset).where(Asset.scan_job_id == scan_job_id, Asset.org_id == org_id)
-    )
-    assets = assets_result.scalars().all()
-
-    # Try to use AttackTrace's HTML template if available
-    report_path = None
-    report_content = None
-
-    try:
-        report_content = _build_html_report(job, findings, assets, include_evidence)
-    except Exception as e:
-        logger.warning(f"Failed to use AttackTrace html_template: {e}. Using built-in template.")
-        report_content = _build_fallback_html_report(job, findings, assets)
+    report_content = _build_html_report(scan_job_id, target_domains, company_name, findings, assets)
 
     # Save to disk
     report_dir = Path(settings.ATTACKTRACE_WORKSPACE_DIR) / "reports" / str(org_id)
@@ -171,56 +202,25 @@ def _count_by_type(assets) -> dict:
     return counts
 
 
-def _build_html_report(job: ScanJob, findings, assets, include_evidence: bool) -> str:
-    """Attempt to use AttackTrace's native HTML template."""
-    import sys
-
-    # Add AttackTrace to path
-    repo_path = Path(__file__).parents[5]
-    if str(repo_path) not in sys.path:
-        sys.path.insert(0, str(repo_path))
-
-    from attacktrace.reporting.html_template import HTMLReporter
-    from attacktrace.core.models import ScanSession, ScanStatus as AttackTraceStatus, Finding as AttackTraceFinding, Severity
-
-    # Build a minimal ScanSession from our DB data
-    session = ScanSession(
-        id=str(job.id),
-        target_company=job.company_name or "",
-        target_domains=job.target_domains or [],
-        status=AttackTraceStatus.COMPLETED,
-    )
-
-    # Map findings
-    for f in findings:
-        if not include_evidence and f.severity.value == "info":
-            continue
-        try:
-            at_finding = AttackTraceFinding(
-                title=f.title,
-                description=f.description,
-                severity=Severity(f.severity.value),
-                category=f.category,
-                affected_asset=f.affected_asset,
-                remediation=f.remediation,
-                cve=f.cve or [],
-                cvss_score=f.cvss_score,
-            )
-            session.findings.append(at_finding)
-        except Exception:
-            pass
-
-    session.update_statistics()
-
-    reporter = HTMLReporter()
-    return reporter.generate(session)
+_SOURCE_LABELS = {
+    "attacktrace": "Core Scan Pipeline",
+    "cspm": "CSPM",
+    "secrets": "Secret Scanner",
+    "supply_chain": "Supply Chain Scanner",
+    "container_scanner": "Container/K8s Scanner",
+    "firewall_physical": "Physical Firewall Scanner",
+    "exposure_scanner": "Exposure Scanner",
+    "mcp_scanner": "MCP Scanner",
+    "takeover": "Takeover Scanner",
+    "email_security": "Email Security Scanner",
+    "msra": "Mobile Scanner",
+}
 
 
-def _build_fallback_html_report(job: ScanJob, findings, assets) -> str:
-    """Built-in HTML report template as fallback."""
-    fc = job.findings_count or {}
-    rs = job.results_summary or {}
-
+def _build_html_report(scan_job_id: UUID, target_domains: list[str], company_name: Optional[str], findings, assets) -> str:
+    """Build the HTML report. Severity counts are computed directly from the
+    findings actually being rendered (not a separately cached ScanJob field)
+    so the summary can never drift from what's shown below it."""
     severity_colors = {
         "critical": "#dc2626",
         "high": "#ea580c",
@@ -229,11 +229,16 @@ def _build_fallback_html_report(job: ScanJob, findings, assets) -> str:
         "info": "#6b7280",
     }
 
+    by_severity = _count_by_severity(findings)
+    order = ["critical", "high", "medium", "low", "info"]
+
     findings_html = ""
-    for f in sorted(findings, key=lambda x: ["critical", "high", "medium", "low", "info"].index(x.severity.value)):
+    for f in sorted(findings, key=lambda x: order.index(x.severity.value)):
         color = severity_colors.get(f.severity.value, "#6b7280")
         cves = escape(", ".join(f.cve)) if f.cve else "N/A"
         cvss = f"{f.cvss_score:.1f}" if f.cvss_score else "N/A"
+        confidence = escape(f.confidence) if f.confidence else "N/A"
+        source_label = escape(_SOURCE_LABELS.get(f.source, f.source or "attacktrace"))
         evidence_json = escape(json.dumps(f.evidence or {}, indent=2)) if f.evidence else "N/A"
         findings_html += f"""
         <div class="finding" style="border-left: 4px solid {color}; padding: 16px; margin: 12px 0; background: #f9fafb; border-radius: 4px;">
@@ -246,13 +251,16 @@ def _build_fallback_html_report(job: ScanJob, findings, assets) -> str:
           <p style="color:#6b7280; margin:4px 0; font-size:13px;">
             {escape(f.category or "")} | Affected: {escape(f.affected_asset or "")} | CVE: {cves} | CVSS: {cvss}
           </p>
+          <p style="color:#9ca3af; margin:0 0 8px 0; font-size:12px;">
+            Source: {source_label} | Confidence: {confidence} | Status: {escape(f.status.value if f.status else "open")}
+          </p>
           <p style="margin:8px 0;">{escape(f.description or "")}</p>
-          <p><strong>Remediation:</strong> {escape(f.remediation or "")}</p>
+          <p><strong>Remediation:</strong> {escape(f.remediation or "") or "N/A"}</p>
           <pre style="background:#1f2937; color:#e5e7eb; padding:12px; border-radius:4px; font-size:12px; overflow:auto;">{evidence_json}</pre>
         </div>"""
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    domains = ", ".join(job.target_domains or [])
+    domains = ", ".join(target_domains) if target_domains else "N/A"
     total_findings = len(findings)
 
     return f"""<!DOCTYPE html>
@@ -260,7 +268,7 @@ def _build_fallback_html_report(job: ScanJob, findings, assets) -> str:
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AttackTrace Security Report - {domains}</title>
+  <title>AttackTrace Security Report - {escape(domains)}</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#fff; color:#111827; }}
@@ -279,40 +287,38 @@ def _build_fallback_html_report(job: ScanJob, findings, assets) -> str:
 </head>
 <body>
   <div class="header">
-    <h1>AttackTrace External Attack Surface Report</h1>
+    <h1>AttackTrace Security Report</h1>
     <div class="meta">
-      Target: {domains} | Company: {job.company_name or 'N/A'} | Generated: {now} | Scan ID: {job.id}
+      Target: {escape(domains)} | Company: {escape(company_name or 'N/A')} | Generated: {now} | Scan ID: {scan_job_id}
     </div>
   </div>
   <div class="container">
     <div class="section">
       <h2>Executive Summary</h2>
-      <p>This report presents the results of an external attack surface discovery scan
-      targeting <strong>{domains}</strong>. The scan discovered
-      <strong>{rs.get('total_assets', len(assets))}</strong> assets and
-      identified <strong>{total_findings}</strong> security findings.</p>
+      <p>This report presents <strong>{total_findings}</strong> security finding(s) for
+      <strong>{escape(domains)}</strong> across <strong>{len(assets)}</strong> discovered asset(s).</p>
     </div>
     <div class="section">
       <h2>Findings by Severity</h2>
       <div class="stats">
         <div class="stat-card">
-          <div class="number" style="color:#dc2626;">{fc.get('critical', 0)}</div>
+          <div class="number" style="color:#dc2626;">{by_severity.get('critical', 0)}</div>
           <div class="label">Critical</div>
         </div>
         <div class="stat-card">
-          <div class="number" style="color:#ea580c;">{fc.get('high', 0)}</div>
+          <div class="number" style="color:#ea580c;">{by_severity.get('high', 0)}</div>
           <div class="label">High</div>
         </div>
         <div class="stat-card">
-          <div class="number" style="color:#d97706;">{fc.get('medium', 0)}</div>
+          <div class="number" style="color:#d97706;">{by_severity.get('medium', 0)}</div>
           <div class="label">Medium</div>
         </div>
         <div class="stat-card">
-          <div class="number" style="color:#2563eb;">{fc.get('low', 0)}</div>
+          <div class="number" style="color:#2563eb;">{by_severity.get('low', 0)}</div>
           <div class="label">Low</div>
         </div>
         <div class="stat-card">
-          <div class="number" style="color:#6b7280;">{fc.get('info', 0)}</div>
+          <div class="number" style="color:#6b7280;">{by_severity.get('info', 0)}</div>
           <div class="label">Info</div>
         </div>
       </div>
