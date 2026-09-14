@@ -5897,22 +5897,29 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, ai_config:
 
         # ── AI Strategy Planning ───────────────────────────────────────────
         _resolved_cfg = ai_config or {}
-        _ai_key = _resolved_cfg.get("api_key") or req.anthropic_api_key or settings.ANTHROPIC_API_KEY or None
-        if req.ai_analysis and _ai_key:
-            yield _sse("progress", {"message": "🤖 Claude analyzing target with hunt skill context...", "module": "ai"})
+        # A Qwen setup legitimately has no api_key (self-hosted servers often need
+        # none) — gating on api_key alone silently skipped AI analysis for every
+        # Qwen-configured org and misreported it as "no ANTHROPIC_API_KEY set"
+        # even though the org's real provider was fully configured and working.
+        _org_ai_ready = bool(_resolved_cfg.get("api_key")) or (
+            _resolved_cfg.get("provider") == "qwen" and bool(_resolved_cfg.get("base_url"))
+        )
+        _ai_key = req.anthropic_api_key or settings.ANTHROPIC_API_KEY  # legacy per-scan override / global fallback
+        if req.ai_analysis and (_org_ai_ready or _ai_key):
+            yield _sse("progress", {"message": "🤖 AI analyzing target with hunt skill context...", "module": "ai"})
             try:
                 plan = await _ai_plan_attack(
                     req.target, crawl_result.tech_stack,
                     list(crawl_result.endpoints)[:30], req.modules,
-                    ai_config=_resolved_cfg or {"api_key": _ai_key},
+                    ai_config=_resolved_cfg if _org_ai_ready else {"provider": "anthropic", "api_key": _ai_key},
                 )
                 if plan:
                     yield _sse("ai_plan", {"plan": plan, "tech_stack": crawl_result.tech_stack})
                     yield _sse("progress", {"message": f"🤖 AI Strategy ready ({len(plan)} chars)", "module": "ai"})
             except Exception as e:
                 yield _sse("progress", {"message": f"AI planning skipped: {e}", "module": "ai"})
-        elif req.ai_analysis and not _ai_key:
-            yield _sse("progress", {"message": "⚠️ AI analysis enabled but no ANTHROPIC_API_KEY set — skipping", "module": "ai"})
+        elif req.ai_analysis and not (_org_ai_ready or _ai_key):
+            yield _sse("progress", {"message": "⚠️ AI analysis enabled but no AI provider configured — skipping", "module": "ai"})
 
         # ── Run modules ────────────────────────────────────────────────────
         # Collect WAF-specific bypass payloads for relevant modules
@@ -5981,10 +5988,13 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, ai_config:
                         })
                         await asyncio.sleep(0)
                         continue
-                    # AI deep-analysis for critical/high findings when key available
-                    if _ai_key and finding.get("is_vulnerable") and finding.get("severity") in ("critical", "high"):
+                    # AI deep-analysis for critical/high findings when a provider is available
+                    if (_org_ai_ready or _ai_key) and finding.get("is_vulnerable") and finding.get("severity") in ("critical", "high"):
                         try:
-                            ai_note = await _ai_analyze_finding(finding, req.target, ai_config=_resolved_cfg or {"api_key": _ai_key})
+                            ai_note = await _ai_analyze_finding(
+                                finding, req.target,
+                                ai_config=_resolved_cfg if _org_ai_ready else {"provider": "anthropic", "api_key": _ai_key},
+                            )
                             if ai_note:
                                 finding["ai_analysis"] = ai_note
                         except Exception:

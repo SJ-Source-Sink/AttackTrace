@@ -1545,11 +1545,23 @@ async def scan_ai_endpoints(
         )
     # Resolve grader config: explicit payload key override → org DB credential
     # (provider/base_url/model included, so a Qwen-configured org's grader
-    # actually uses Qwen instead of silently always calling Claude) → system env
+    # actually uses Qwen instead of silently always calling Claude) → system env.
+    # Gating on api_key alone breaks Qwen setups (a self-hosted server
+    # legitimately needs no key) — same class of bug fixed in attack_suite.py's
+    # AI-planning gate; org_ai_ready checks whether the org's own config is
+    # actually usable before falling back to a per-request key override.
     from app.services.ai_service import get_org_ai_config
     ai_config = await get_org_ai_config(org_id, db)
-    grader_key = payload.llm_grader_key.strip() or ai_config.get("api_key") or None
-    grader_config = {**ai_config, "api_key": grader_key} if grader_key else None
+    org_ai_ready = bool(ai_config.get("api_key")) or (
+        ai_config.get("provider") == "qwen" and bool(ai_config.get("base_url"))
+    )
+    override_key = payload.llm_grader_key.strip() or None
+    if org_ai_ready and not override_key:
+        grader_config = ai_config
+    elif override_key:
+        grader_config = {**ai_config, "provider": "anthropic", "api_key": override_key}
+    else:
+        grader_config = None
     return StreamingResponse(
         _run_ai_scan(
             payload.resolved_target,
