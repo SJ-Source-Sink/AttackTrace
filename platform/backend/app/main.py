@@ -70,11 +70,25 @@ limiter = Limiter(
 
 
 # --- Request timeout middleware ---
-# Prevents slow DB queries or hung external calls from holding connections open indefinitely.
-# SSE streaming endpoints are excluded (they intentionally run for minutes).
+# Prevents a hung request (stuck DB query, hung external call) from holding a
+# connection open forever, WITHOUT cutting off legitimate long-running SSE
+# streams. Previously did this by matching the path against a fixed list of
+# suffixes ("/stream", "/events", "/scan") and skipping the timeout entirely
+# for matches — fragile (any new streaming endpoint not ending in one of
+# those three strings silently inherits the hard cutoff) and confirmed
+# broken in practice: POST /attack-suite/agent/run streams via SSE but
+# doesn't match any suffix, so a real agent run past 60s got its connection
+# killed by this middleware mid-stream, and a scan of every StreamingResponse
+# route in the app found 11 other pre-existing endpoints with the same gap.
+#
+# Correct behavior-based fix: only enforce the timeout on time-to-first-byte.
+# Once the wrapped app has sent its response headers (started producing
+# output at all — the case for every streaming endpoint, which all emit
+# an SSE "start" event almost immediately), the request is no longer "hung"
+# by definition and runs to completion with no further time limit. A request
+# that never produces so much as a first byte within the timeout is aborted
+# with a 504, exactly as before.
 class TimeoutMiddleware:
-    """Abort non-streaming requests that take longer than REQUEST_TIMEOUT_SECONDS."""
-
     def __init__(self, app, timeout: float = 60.0):
         self.app = app
         self.timeout = timeout
@@ -84,20 +98,46 @@ class TimeoutMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        path = scope.get("path", "")
-        # SSE streams and long-poll endpoints must not be cut off
-        if path.endswith("/stream") or path.endswith("/events") or path.endswith("/scan"):
-            await self.app(scope, receive, send)
-            return
+
+        started = asyncio.Event()
+
+        async def wrapped_send(message):
+            if message["type"] == "http.response.start":
+                started.set()
+            await send(message)
+
+        app_task = asyncio.ensure_future(self.app(scope, receive, wrapped_send))
+        started_task = asyncio.ensure_future(started.wait())
         try:
-            await asyncio.wait_for(self.app(scope, receive, send), timeout=self.timeout)
-        except asyncio.TimeoutError:
-            if scope["type"] == "http":
-                body = b'{"detail":"Request timed out","code":"GATEWAY_TIMEOUT"}'
-                await send({"type": "http.response.start", "status": 504,
-                            "headers": [[b"content-type", b"application/json"],
-                                        [b"content-length", str(len(body)).encode()]]})
-                await send({"type": "http.response.body", "body": body})
+            await asyncio.wait(
+                {app_task, started_task}, timeout=self.timeout, return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            if not started_task.done():
+                started_task.cancel()
+
+        if app_task.done():
+            exc = app_task.exception()
+            if exc:
+                raise exc
+            return
+
+        if started.is_set():
+            # Response has started — no longer "hung"; let it run to completion.
+            await app_task
+            return
+
+        # Neither the app finished nor produced any output within the timeout.
+        app_task.cancel()
+        try:
+            await app_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        body = b'{"detail":"Request timed out","code":"GATEWAY_TIMEOUT"}'
+        await send({"type": "http.response.start", "status": 504,
+                    "headers": [[b"content-type", b"application/json"],
+                                [b"content-length", str(len(body)).encode()]]})
+        await send({"type": "http.response.body", "body": body})
 
 
 @asynccontextmanager
