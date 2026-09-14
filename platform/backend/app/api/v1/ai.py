@@ -5,7 +5,8 @@ AI-powered endpoints: finding triage, natural language search, executive summary
 from typing import Annotated, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -377,3 +378,30 @@ async def generate_ticket_endpoint(
         )
 
     return {"finding_id": str(finding_id), "ticket": ticket}
+
+
+@router.get(
+    "/activity/stream",
+    summary="Live feed of every AI/LLM call made in this org",
+    description=(
+        "Server-Sent Events stream of every AI call anywhere in the platform "
+        "(triage, Attack Suite planning, the autonomous agent, the AI/LLM "
+        "scanner's grader, etc.) as it happens — provider/model, the full "
+        "request sent, the full response, latency, success/failure. Live-only: "
+        "nothing is persisted or replayed on reconnect, same as the Attack "
+        "Suite AI Agent's transcript. Any org member can watch — this is a "
+        "visibility feature, not a privileged action."
+    ),
+)
+async def stream_ai_activity(
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+) -> StreamingResponse:
+    from app.services.ai_activity import stream_activity
+    return StreamingResponse(
+        stream_activity(str(org_id), request),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
+                 "X-Accel-Buffering": "no"},
+    )

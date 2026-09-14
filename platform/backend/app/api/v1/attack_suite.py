@@ -983,7 +983,7 @@ Provide:
 Max 250 words. Be specific — reference actual endpoints and tech detected above."""
 
     from app.services import llm_client
-    return await llm_client.complete(cfg, system_prompt, [{"role": "user", "content": user_prompt}], 500)
+    return await llm_client.complete(cfg, system_prompt, [{"role": "user", "content": user_prompt}], 500, label="attack_suite_planner")
 
 
 async def _ai_analyze_finding(finding: dict, target: str, ai_config: dict | None = None) -> str:
@@ -1001,7 +1001,7 @@ async def _ai_analyze_finding(finding: dict, target: str, ai_config: dict | None
             f"Evidence: {str(finding.get('evidence', ''))[:300]}\n\n"
             "In 2-3 sentences: what is the real-world impact and what is the fastest "
             "exploitation path? Reference any relevant Hunt Harness technique."
-        )}], 200)
+        )}], 200, label="attack_suite_finding_analysis")
     except llm_client.LLMConfigError:
         return ""
 

@@ -505,7 +505,7 @@ async def run_agent(
             yield {"event": "error", "data": {"run_id": run_id, "message": "AI circuit breaker open — Anthropic API is currently degraded"}}
             break
         try:
-            turn_result = await llm_client.chat_turn(cfg, system_prompt, messages, AGENT_TOOLS, _AGENT_MAX_TOKENS)
+            turn_result = await llm_client.chat_turn(cfg, system_prompt, messages, AGENT_TOOLS, _AGENT_MAX_TOKENS, label="attack_suite_agent")
             await _cb_record_success()
         except Exception as exc:
             await _cb_record_failure()

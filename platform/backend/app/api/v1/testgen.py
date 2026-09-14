@@ -3957,7 +3957,7 @@ OUTPUT: Return ONLY the JSON array. Do not wrap in an object. Do not add any tex
         full_text = ""
         yield f"event: start\ndata: {json.dumps({'message': 'Generating AI test cases…'})}\n\n"
 
-        async for chunk in llm_client.stream_complete(cfg, system_prompt, [{"role": "user", "content": user_message}], 8192):
+        async for chunk in llm_client.stream_complete(cfg, system_prompt, [{"role": "user", "content": user_message}], 8192, label="test_case_generator"):
             full_text += chunk
             yield f"event: token\ndata: {json.dumps({'text': chunk})}\n\n"
 

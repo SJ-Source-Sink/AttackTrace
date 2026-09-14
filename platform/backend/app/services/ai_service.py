@@ -125,10 +125,13 @@ async def get_org_ai_config(org_id, db) -> dict:
         except Exception as exc:
             logger.warning(f"Could not fetch org AI config for {org_id}: {exc}")
 
-    return {"provider": provider, "api_key": api_key, "base_url": base_url, "model": model}
+    return {
+        "provider": provider, "api_key": api_key, "base_url": base_url, "model": model,
+        "org_id": str(org_id) if org_id else None,
+    }
 
 
-async def _call_llm_with_retry(ai_config: dict, system: str | None, messages: list[dict], max_tokens: int) -> str:
+async def _call_llm_with_retry(ai_config: dict, system: str | None, messages: list[dict], max_tokens: int, label: str = "unknown") -> str:
     """Call the configured provider (Claude or Qwen, via llm_client.complete)
     with exponential backoff on transient errors and circuit breaker
     protection. Provider-agnostic: both SDKs expose the same exception
@@ -143,7 +146,7 @@ async def _call_llm_with_retry(ai_config: dict, system: str | None, messages: li
     last_exc: Exception = RuntimeError("No attempts made")
     for attempt in range(_AI_MAX_RETRIES):
         try:
-            result = await llm_client.complete(ai_config, system, messages, max_tokens)
+            result = await llm_client.complete(ai_config, system, messages, max_tokens, label=label)
             await _cb_record_success()
             return result
         except (anthropic.RateLimitError, openai.RateLimitError) as exc:
@@ -230,6 +233,7 @@ Respond with this exact JSON (no other text):
     try:
         text = await _call_llm_with_retry(
             cfg, system_prompt, [{"role": "user", "content": user_message}], settings.AI_MAX_TOKENS,
+            label="triage_finding",
         )
         # Strip markdown code fences if present
         if text.startswith("```"):
@@ -307,7 +311,7 @@ Return {{}} if the query is too vague or matches no schema fields.
 Respond with ONLY the JSON object."""
 
     try:
-        text = await _call_llm_with_retry(cfg, system_prompt, [{"role": "user", "content": user_message}], 512)
+        text = await _call_llm_with_retry(cfg, system_prompt, [{"role": "user", "content": user_message}], 512, label="nl_to_filter")
         # Strip markdown fences if Claude wrapped the response
         if text.startswith("```"):
             text = text.split("```")[1]

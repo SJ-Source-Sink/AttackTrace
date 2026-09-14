@@ -44,6 +44,7 @@ import {
   Wifi,
   ServerCrash,
   ScanLine,
+  Activity,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -67,6 +68,11 @@ const navItems: NavItem[] = [
     label: "Executive Dashboard",
     href: "/dashboard/executive",
     icon: BarChart3,
+  },
+  {
+    label: "AI Activity",
+    href: "/ai-activity",
+    icon: Activity,
   },
   {
     label: "Scans",

@@ -1599,6 +1599,7 @@ async def run_burp_analysis(
                 "You are a senior penetration tester. Be specific, concise, and technical. Always reference exact endpoint paths from the data provided.",
                 [{"role": "user", "content": prompt}],
                 2000,
+                label="burp_analyzer_ai",
             ):
                 ai_text += chunk
                 yield _sse("ai_chunk", {"text": chunk})
