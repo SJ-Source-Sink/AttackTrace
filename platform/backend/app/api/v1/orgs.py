@@ -1058,10 +1058,17 @@ async def test_ai_connection(
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Sends a trivial prompt through whichever provider/credentials are given
-    (falling back to the org's already-saved credential for any field left
-    blank, since GET /credentials never returns decrypted secrets to prefill
-    with) so a user can validate connectivity before saving."""
+    """Sends a trivial prompt through whichever provider/credentials are given,
+    so a user can validate connectivity before saving.
+
+    Only falls back to the org's already-saved secret when base_url is ALSO
+    left blank (i.e. testing the exact already-configured endpoint as-is) —
+    never when the caller supplies a different base_url. Falling back to a
+    real saved API key against a caller-chosen base_url would let this
+    endpoint be used to exfiltrate that secret to an arbitrary attacker
+    server (confirmed exploitable: the real key was captured verbatim on a
+    local test server by supplying its URL here with no api_key).
+    """
     await _require_org_role(db, current_user.id, org_id, [MemberRole.OWNER, MemberRole.ADMIN])
 
     result = await db.execute(select(OrgCredentials).where(OrgCredentials.org_id == org_id))
@@ -1071,18 +1078,19 @@ async def test_ai_connection(
         return decrypt_credential(enc) if (creds and enc) else None
 
     provider = payload.provider or "anthropic"
+    using_saved_endpoint = not payload.base_url
     if provider == "qwen":
         ai_config = {
             "provider": "qwen",
             "base_url": payload.base_url or _saved(creds.qwen_base_url_enc if creds else None),
-            "api_key": payload.api_key or _saved(creds.qwen_api_key_enc if creds else None),
+            "api_key": payload.api_key or (_saved(creds.qwen_api_key_enc if creds else None) if using_saved_endpoint else None),
             "model": payload.model or _saved(creds.qwen_model_enc if creds else None),
         }
     else:
         ai_config = {
             "provider": "anthropic",
             "base_url": payload.base_url or _saved(creds.ai_base_url_enc if creds else None) or settings.AI_BASE_URL,
-            "api_key": payload.api_key or _saved(creds.anthropic_key_enc if creds else None) or settings.ANTHROPIC_API_KEY,
+            "api_key": payload.api_key or (_saved(creds.anthropic_key_enc if creds else None) if using_saved_endpoint else None) or (settings.ANTHROPIC_API_KEY if using_saved_endpoint else None),
             "model": payload.model or _saved(creds.ai_model_override_enc if creds else None) or settings.AI_MODEL,
         }
 
