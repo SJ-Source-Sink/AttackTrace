@@ -332,6 +332,23 @@ def _build_html_report(
 
     sources_used = sorted({f.source or "attacktrace" for f in findings})
 
+    # --- Top remediation priorities ------------------------------------
+    # A mature security report doesn't just list every finding by raw
+    # severity — it tells the reader where to start. Rank across ALL open
+    # findings (not just critical/high) by the same urgency signal used for
+    # in-tier ordering below: actively-exploited-in-the-wild (KEV) first,
+    # then exploitation probability (EPSS), then CVSS, then severity rank —
+    # so a KEV-listed HIGH can rank above a CRITICAL with no known exploit.
+    _sev_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+    _open_findings = [f for f in findings if f.status.value != "false_positive"]
+    top_priority_findings = sorted(
+        _open_findings,
+        key=lambda f: (
+            not f.kev_status, -(f.epss_score or 0.0), -(f.cvss_score or 0.0),
+            -_sev_rank.get(f.severity.value, 0),
+        ),
+    )[:3]
+
     # --- Scope & methodology ------------------------------------------------
     scan_meta_rows = f"""
       <tr><td>Scan ID</td><td><code>{scan_job_id}</code></td></tr>
@@ -381,6 +398,16 @@ def _build_html_report(
         sev_findings = [f for f in findings if f.severity.value == sev]
         if not sev_findings:
             continue
+        # Within a severity tier, surface the most urgent findings first:
+        # actively-exploited-in-the-wild (CISA KEV) outranks everything,
+        # then higher exploitation-probability (EPSS), then higher CVSS.
+        # Two CRITICAL findings are not equally urgent if only one is a
+        # known, weaponized exploit — severity alone shouldn't decide
+        # reading order (industry best practice per CVSS+EPSS+KEV
+        # prioritization guidance).
+        sev_findings.sort(
+            key=lambda f: (not f.kev_status, -(f.epss_score or 0.0), -(f.cvss_score or 0.0))
+        )
         color = _SEVERITY_COLORS[sev]
         findings_html += f'<h3 class="sev-group-header" style="color:{color};">{sev.upper()} <span class="muted">({len(sev_findings)})</span></h3>'
         for f in sev_findings:
@@ -451,6 +478,23 @@ def _build_html_report(
 
     avg_cvss_str = f"{avg_cvss:.1f}" if avg_cvss is not None else "N/A"
 
+    def _priority_reason(f) -> str:
+        if f.kev_status:
+            return "actively exploited in the wild (CISA KEV)"
+        if f.epss_score and f.epss_score >= 0.1:
+            return f"{f.epss_score * 100:.0f}% predicted exploitation probability (EPSS)"
+        if f.cvss_score:
+            return f"CVSS {f.cvss_score:.1f}"
+        return f"{f.severity.value.upper()} severity"
+
+    top_priorities_html = "".join(
+        f"""<li><strong>{escape(f.title or "Untitled finding")}</strong>
+            <span class="muted"> — {escape(f.affected_asset or "N/A")} ({_priority_reason(f)})</span>
+            {f'<div class="priority-impact">{escape(f.ai_business_impact)}</div>' if getattr(f, "ai_business_impact", None) else ""}
+        </li>"""
+        for f in top_priority_findings
+    ) if top_priority_findings else "<li class=\"muted\">No open findings to prioritize.</li>"
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -499,6 +543,10 @@ def _build_html_report(
     .stat-card {{ background:#f9fafb; border:1px solid #e5e7eb; border-radius:8px; padding:14px 8px; text-align:center; }}
     .stat-card .number {{ font-size:26px; font-weight:800; }}
     .stat-card .label {{ font-size:11px; color:#6b7280; margin-top:2px; text-transform:uppercase; letter-spacing:0.5px; }}
+
+    .priority-list {{ margin:10px 0 0 0; padding-left:22px; }}
+    .priority-list li {{ margin-bottom:10px; line-height:1.5; }}
+    .priority-impact {{ font-size:12px; color:#4b5563; margin-top:2px; font-style:italic; }}
 
     table {{ width:100%; border-collapse:collapse; font-size:12.5px; }}
     table.meta-table td {{ padding:6px 4px; border-bottom:1px solid #f1f5f9; }}
@@ -588,6 +636,9 @@ def _build_html_report(
       <div class="stat-card"><div class="number" style="color:{_SEVERITY_COLORS['low']};">{by_severity.get('low', 0)}</div><div class="label">Low</div></div>
       <div class="stat-card"><div class="number" style="color:{_SEVERITY_COLORS['info']};">{by_severity.get('info', 0)}</div><div class="label">Info</div></div>
     </div>
+    <h3 style="margin-top:24px;">Top Remediation Priorities</h3>
+    <p class="muted" style="margin-top:-8px;">Ranked by real-world exploitability (active exploitation, then predicted exploitation probability, then technical severity) — not raw severity alone, since not every CRITICAL finding carries the same actual risk.</p>
+    <ol class="priority-list">{top_priorities_html}</ol>
   </div>
 
   <div class="section" id="risk-overview">
