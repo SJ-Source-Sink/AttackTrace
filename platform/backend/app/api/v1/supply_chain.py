@@ -32,6 +32,7 @@ from app.core.config import get_settings as _get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
 from app.services.enrichment_service import batch_enrich_cves
+from app.api.v1.dashboard import invalidate_dashboard_cache
 from app.services.finding_ingest import ingest_findings
 from app.models.db.user import User
 
@@ -854,6 +855,7 @@ async def _scan_generator(
         adapted = await _adapt_supply_chain_findings(all_findings)
         await ingest_findings(db, org_id, source="supply_chain", source_scan_id=scan_id, findings=adapted)
         await db.commit()
+        await invalidate_dashboard_cache(org_id)
     except Exception:
         await db.rollback()
 

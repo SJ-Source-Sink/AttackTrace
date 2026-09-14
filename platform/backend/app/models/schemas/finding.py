@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from pydantic import BaseModel, Field
 
+from app.core.finding_confidence import explain_oracle
+
 
 class FindingCommentResponse(BaseModel):
     id: str
@@ -68,6 +70,17 @@ class FindingResponse(BaseModel):
     epss_score: Optional[float] = None
     priority_score: Optional[float] = None
 
+    # How this finding was actually verified (the false-positive-gate
+    # doctrine, surfaced for the reader) — oracle is the raw machine-readable
+    # type (e.g. "pattern-entropy"), confidence_explanation is the full
+    # human-readable sentence explaining what that oracle actually proved
+    # and what it didn't. Both derived from evidence["oracle"] when present
+    # (currently set by the Attack Suite AI Agent's record_finding tool and
+    # any scanner that calls app.core.finding_confidence.grade_confidence
+    # directly) — None for scanners that don't report an oracle.
+    oracle: Optional[str] = None
+    confidence_explanation: Optional[str] = None
+
     # SLA / compliance / risk
     sla_deadline: Optional[datetime] = None
     compliance_tags: Optional[list[str]] = None
@@ -100,6 +113,9 @@ class FindingResponse(BaseModel):
 
         cve_list = finding.cve or []
         remediation_steps = [s.strip() for s in finding.remediation.split("\n") if s.strip()] if finding.remediation else []
+
+        oracle = finding.evidence.get("oracle") if isinstance(finding.evidence, dict) else None
+        confidence_explanation = explain_oracle(oracle)
 
         ai_triage = None
         if finding.ai_severity:
@@ -147,6 +163,8 @@ class FindingResponse(BaseModel):
             kev_status=getattr(finding, "kev_status", False) or False,
             epss_score=getattr(finding, "epss_score", None),
             priority_score=getattr(finding, "priority_score", None),
+            oracle=oracle,
+            confidence_explanation=confidence_explanation,
             # SLA / compliance / risk
             sla_deadline=getattr(finding, "sla_deadline", None),
             compliance_tags=getattr(finding, "compliance_tags", None),

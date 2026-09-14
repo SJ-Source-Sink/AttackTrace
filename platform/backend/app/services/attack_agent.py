@@ -42,6 +42,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.dashboard import invalidate_dashboard_cache
 from app.core.config import get_settings
 from app.core.finding_confidence import grade_confidence
 from app.models.db.asset import Asset
@@ -198,7 +199,19 @@ AGENT_TOOLS = [
                 "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
                 "category": {"type": "string"},
                 "affected_asset": {"type": "string", "description": "Host, host:port, or URL this finding applies to — must be in scope."},
-                "evidence": {"type": "string", "description": "Concrete evidence: request/response details, matched strings, tool outputs."},
+                "evidence": {"type": "string", "description": "Concrete evidence: request/response details, matched strings, tool outputs. Write this as a full sentence a reader unfamiliar with the scan can understand — do not assume they can see your tool calls."},
+                "location_url": {
+                    "type": "string",
+                    "description": "The EXACT URL/file where this was found, if different from affected_asset (e.g. affected_asset is the site's hostname, but the secret was in a specific .js file at a different path/subdomain). Omit if affected_asset already is the exact location.",
+                },
+                "location_line": {
+                    "type": "integer",
+                    "description": "Line number within the file/response where the evidence appears, if applicable (e.g. a line in a JS bundle, a header's position). Omit if not applicable.",
+                },
+                "location_snippet": {
+                    "type": "string",
+                    "description": "The exact matched text/code — the literal substring or line that triggered this finding (e.g. the actual regex match, the exact header value, the exact vulnerable code line). This is what a reviewer would grep for to find it themselves. Omit only if genuinely not applicable (e.g. a port-open finding).",
+                },
                 "remediation": {"type": "string"},
                 "oracle": {
                     "type": "string",
@@ -413,13 +426,26 @@ async def _execute_tool(db: AsyncSession, org_id, user_id, run_id: str, name: st
                 return await _reject_out_of_scope(db, org_id, user_id, run_id, name, tool_input)
             oracle = tool_input.get("oracle", "bare-signal")
             confidence = grade_confidence(oracle)
+            # Deliberately NOT keyed "file"/"line"/"snippet" — EvidenceBlock's
+            # frontend renderer switches to an MSRA-only display for that
+            # exact shape and would silently drop `raw`/`oracle` alongside
+            # it. "location_*" keys fall through to the generic key/value
+            # table instead, showing everything together (which is what a
+            # reader asking "what/where/how was this found" actually wants).
+            evidence: dict = {"raw": tool_input.get("evidence", ""), "oracle": oracle}
+            if tool_input.get("location_url"):
+                evidence["location_url"] = tool_input["location_url"]
+            if tool_input.get("location_line") is not None:
+                evidence["location_line"] = tool_input["location_line"]
+            if tool_input.get("location_snippet"):
+                evidence["location_snippet"] = tool_input["location_snippet"]
             finding_dict = {
                 "title": tool_input.get("title"),
                 "description": tool_input.get("description"),
                 "severity": tool_input.get("severity", "info"),
                 "category": tool_input.get("category") or "attack-suite-agent",
                 "affected_asset": asset,
-                "evidence": {"raw": tool_input.get("evidence", ""), "oracle": oracle},
+                "evidence": evidence,
                 "remediation": tool_input.get("remediation", ""),
                 "cve": tool_input.get("cve") or [],
                 "confidence": confidence,
@@ -565,6 +591,7 @@ async def run_agent(
             break
 
         tool_results = []
+        turn_recorded_finding = False
         for tc in tool_calls:
             run_state = await _run_get(run_id)
             if run_state is None or run_state.get("stop"):
@@ -572,10 +599,13 @@ async def run_agent(
             result = await _execute_tool(db, org_id, user_id, run_id, tc["name"], tc["input"])
             if tc["name"] == "record_finding" and result.get("recorded"):
                 findings_recorded += 1
+                turn_recorded_finding = True
             yield {"event": "tool_call", "data": {"run_id": run_id, "turn": turn, "tool": tc["name"], "input": tc["input"], "result": result}}
             tool_results.append({"id": tc["id"], "content": json.dumps(result, default=str)[:4000]})
 
         await db.commit()
+        if turn_recorded_finding:
+            await invalidate_dashboard_cache(org_id)
 
         run_state = await _run_get(run_id)
         if run_state is None or run_state.get("stop"):

@@ -32,6 +32,7 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
 from app.models.db.user import User
 from app.services.enrichment_service import batch_enrich_cves
+from app.api.v1.dashboard import invalidate_dashboard_cache
 from app.services.finding_ingest import ingest_findings
 
 # ── Filesystem history ────────────────────────────────────────────────────────
@@ -417,6 +418,7 @@ async def _scan_kubernetes_api(
             adapted = await _adapt_container_findings(findings)
             await ingest_findings(db, org_id, source="container_scanner", source_scan_id=scan_id, findings=adapted)
             await db.commit()
+            await invalidate_dashboard_cache(org_id)
         except Exception:
             await db.rollback()
 
@@ -573,6 +575,7 @@ async def _scan_registry(
             adapted = await _adapt_container_findings(findings)
             await ingest_findings(db, org_id, source="container_scanner", source_scan_id=scan_id, findings=adapted)
             await db.commit()
+            await invalidate_dashboard_cache(org_id)
         except Exception:
             await db.rollback()
 
@@ -867,6 +870,7 @@ async def _scan_image(
             adapted = await _adapt_container_findings(findings)
             await ingest_findings(db, org_id, source="container_scanner", source_scan_id=scan_id, findings=adapted)
             await db.commit()
+            await invalidate_dashboard_cache(org_id)
         except Exception:
             await db.rollback()
 

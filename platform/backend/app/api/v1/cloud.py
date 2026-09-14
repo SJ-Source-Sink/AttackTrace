@@ -28,6 +28,7 @@ from app.core.remediation import get_remediation
 from app.models.db.asset import Asset, AssetType
 from app.models.db.user import User
 from app.services.asset_upsert import upsert_asset_async
+from app.api.v1.dashboard import invalidate_dashboard_cache
 from app.services.finding_ingest import ingest_findings
 
 router = APIRouter(prefix="/cloud", tags=["Cloud Discovery"])
@@ -326,6 +327,7 @@ async def discover_cloud_assets(
             adapted = _adapt_cloud_findings(assets, provider)
             await ingest_findings(db, org_id, source="cloud", source_scan_id=record["id"], findings=adapted)
             await db.commit()
+            await invalidate_dashboard_cache(org_id)
         except Exception:
             await db.rollback()
 

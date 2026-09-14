@@ -381,6 +381,12 @@ export interface Finding {
   tags: string[];
   // KEV / EPSS / confidence enrichment fields
   confidence?: 'certain' | 'high' | 'medium' | 'low' | null;
+  // How this finding was actually verified — oracle is the raw machine type
+  // (e.g. "pattern-entropy"), confidence_explanation is the full sentence
+  // explaining what that oracle proved and didn't. Null when the source
+  // scanner didn't report an oracle.
+  oracle?: string | null;
+  confidence_explanation?: string | null;
   kev_status?: boolean;
   epss_score?: number | null;
   priority_score?: number | null;

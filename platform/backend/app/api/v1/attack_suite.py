@@ -39,6 +39,7 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.remediation import get_remediation
 from app.models.db.user import User
+from app.api.v1.dashboard import invalidate_dashboard_cache
 from app.services.finding_ingest import ingest_findings
 from app.services.waf_service import detect_waf, get_waf_bypass_payloads
 from app.api.v1.attack_patterns import (
@@ -6071,6 +6072,7 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, org_id: UU
             adapted = _adapt_attack_suite_findings(findings)
             await ingest_findings(db, org_id, source="attack_suite", source_scan_id=scan_id, findings=adapted)
             await db.commit()
+            await invalidate_dashboard_cache(org_id)
         except Exception as e:
             await db.rollback()
             yield _sse("progress", {"message": f"Warning: failed to persist findings to database: {e}", "module": "ingest"})

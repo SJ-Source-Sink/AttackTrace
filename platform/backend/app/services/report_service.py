@@ -219,6 +219,18 @@ _SOURCE_LABELS = {
     "email_security": "Email Security Scanner",
     "msra": "Mobile Scanner",
     "attack_suite_agent": "Attack Suite AI Agent",
+    "attack_suite": "Attack Suite Scanner",
+    "js_scanner": "JavaScript Analysis Scanner",
+    "api_scanner": "API Security Scanner",
+    "ai_scanner": "AI/LLM Red-Team Scanner",
+    "cloud": "Cloud Discovery Scanner",
+    "firewall_waf_bypass": "Firewall — WAF Bypass Scanner",
+    "firewall_port_map": "Firewall — Port/Service Mapper",
+    "firewall_rules_analyze": "Firewall — Rule Analyzer",
+    "firewall_rate_limit": "Firewall — Rate-Limit Probe",
+    "firewall_smuggling": "Firewall — Request Smuggling Probe",
+    "correlation_engine": "Cross-Scanner Correlation Engine",
+    "manual": "Manually Added",
 }
 
 _SOURCE_METHODOLOGY = {
@@ -234,6 +246,18 @@ _SOURCE_METHODOLOGY = {
     "email_security": "DNS record analysis of SPF, DKIM, and DMARC configuration for email spoofing exposure.",
     "msra": "Static and dynamic analysis of mobile application binaries and API traffic.",
     "attack_suite_agent": "Autonomous, tool-using AI agent testing grounded in enumerated assets, restricted to in-scope targets.",
+    "attack_suite": "Active probing for XSS, SQLi, SSRF, IDOR, CSRF, auth bypass, and ~35 other web application vulnerability classes, each with an AI-assisted deep-analysis pass.",
+    "js_scanner": "Static analysis of loaded JavaScript bundles for hardcoded secrets, dangerous DOM sinks, prototype pollution, and outdated/vulnerable client-side libraries.",
+    "api_scanner": "Active testing against the OWASP API Security Top 10 — broken object/function-level authorization, excessive data exposure, SSRF, misconfiguration.",
+    "ai_scanner": "Adversarial red-teaming of LLM/AI endpoints for prompt injection, jailbreaks, information disclosure, and access-control bypass.",
+    "cloud": "API-based enumeration of cloud provider resources, flagging those confirmed reachable from the public internet.",
+    "firewall_waf_bypass": "Automated WAF/filter bypass technique testing (encoding, case, comment-injection variants) against protected endpoints.",
+    "firewall_port_map": "Service/version fingerprinting of open ports correlated against known CVE advisories.",
+    "firewall_rules_analyze": "Static analysis of firewall rule sets for shadowed, conflicting, overly-broad, or missing-default-deny rules.",
+    "firewall_rate_limit": "Active probing for missing or bypassable rate limiting on sensitive endpoints.",
+    "firewall_smuggling": "Active HTTP request-smuggling/desync probing between the edge proxy and origin server.",
+    "correlation_engine": "Cross-referencing this org's other findings and asset metadata for compound risk patterns a single scanner wouldn't see alone (e.g. a subdomain-takeover candidate with a live exposed admin port).",
+    "manual": "Added directly by a team member, not from an automated scan.",
 }
 
 _CONFIDENCE_LABELS = {

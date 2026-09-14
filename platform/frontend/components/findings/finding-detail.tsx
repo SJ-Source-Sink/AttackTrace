@@ -15,6 +15,8 @@ import {
   ChevronDown,
   RefreshCw,
   Trash2,
+  Search,
+  MapPin,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -36,6 +38,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { SeverityBadge } from "@/components/findings/severity-badge";
+import { ConfidenceBadge } from "@/components/findings/confidence-badge";
 import { StatusWorkflow } from "@/components/findings/status-workflow";
 import { EvidenceBlock } from "@/components/findings/evidence-block";
 import { FindingComments } from "@/components/findings/finding-comments";
@@ -50,6 +53,35 @@ interface FindingDetailProps {
   finding: Finding;
   onClose: () => void;
 }
+
+// Mirrors app/services/report_service.py's _SOURCE_LABELS — keep in sync
+// when a new scanner source is added on the backend.
+const SOURCE_LABELS: Record<string, string> = {
+  attacktrace: "Core Scan Pipeline",
+  cspm: "Cloud Security Posture Management",
+  secrets: "Secret Scanner",
+  supply_chain: "Supply Chain Scanner",
+  container_scanner: "Container/Kubernetes Scanner",
+  firewall_physical: "Physical Firewall Scanner",
+  exposure_scanner: "Exposure Scanner",
+  mcp_scanner: "MCP Scanner",
+  takeover: "Subdomain Takeover Scanner",
+  email_security: "Email Security Scanner",
+  msra: "Mobile Scanner",
+  attack_suite_agent: "Attack Suite AI Agent",
+  attack_suite: "Attack Suite Scanner",
+  js_scanner: "JavaScript Analysis Scanner",
+  api_scanner: "API Security Scanner",
+  ai_scanner: "AI/LLM Red-Team Scanner",
+  cloud: "Cloud Discovery Scanner",
+  firewall_waf_bypass: "Firewall — WAF Bypass Scanner",
+  firewall_port_map: "Firewall — Port/Service Mapper",
+  firewall_rules_analyze: "Firewall — Rule Analyzer",
+  firewall_rate_limit: "Firewall — Rate-Limit Probe",
+  firewall_smuggling: "Firewall — Request Smuggling Probe",
+  correlation_engine: "Cross-Scanner Correlation Engine",
+  manual: "Manually Added",
+};
 
 function AssigneeSelector({ finding }: { finding: Finding }) {
   const qc = useQueryClient();
@@ -239,6 +271,54 @@ export function FindingDetail({ finding, onClose }: FindingDetailProps) {
           {/* Description */}
           <div>
             <p className="text-sm text-zinc-300 leading-relaxed">{finding.description}</p>
+          </div>
+
+          {/* Detection Details — what found this, where, and how confident to be.
+              Answers "what does this mean / where did it find it / how did it
+              find it" directly on the finding, rather than leaving the reader
+              to infer it from a raw evidence blob. */}
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
+            <h3 className="flex items-center gap-2 text-sm font-semibold text-zinc-300">
+              <Search className="h-4 w-4 text-zinc-400" />
+              Detection Details
+            </h3>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-xs">
+              <div>
+                <p className="text-zinc-500 mb-1">Found By</p>
+                <p className="text-zinc-300">
+                  {SOURCE_LABELS[finding.source ?? ""] ?? finding.source ?? "Unknown"}
+                </p>
+              </div>
+              <div>
+                <p className="text-zinc-500 mb-1">Confidence</p>
+                {finding.confidence ? (
+                  <ConfidenceBadge confidence={finding.confidence} />
+                ) : (
+                  <span className="text-zinc-500">Not graded</span>
+                )}
+              </div>
+              <div className="col-span-2">
+                <p className="text-zinc-500 mb-1 flex items-center gap-1">
+                  <MapPin className="h-3 w-3" /> Location / Affected Asset
+                </p>
+                <p className="text-zinc-300 font-mono break-all">
+                  {finding.asset_value || "Not specified"}
+                </p>
+              </div>
+            </div>
+            {finding.confidence_explanation && (
+              <div className="pt-1 border-t border-zinc-800">
+                <p className="text-zinc-500 mb-1 text-xs">
+                  How this was verified
+                  {finding.oracle && (
+                    <span className="text-zinc-600 font-mono"> ({finding.oracle})</span>
+                  )}
+                </p>
+                <p className="text-xs text-zinc-400 leading-relaxed">
+                  {finding.confidence_explanation}
+                </p>
+              </div>
+            )}
           </div>
 
           {/* AI Triage */}

@@ -37,6 +37,7 @@ from app.core.remediation import get_remediation
 from app.models.db.audit import AuditLog
 from app.models.db.user import User
 from app.services.enrichment_service import batch_enrich_cves
+from app.api.v1.dashboard import invalidate_dashboard_cache
 from app.services.finding_ingest import ingest_findings
 
 logger = logging.getLogger(__name__)
@@ -1328,6 +1329,7 @@ async def _stream_bypass(
         adapted = _build_waf_bypass_findings(req.target, req.path, results, bypass_rate_by_category)
         ingest_result = await ingest_findings(db, org_id, source="firewall_waf_bypass", source_scan_id=scan_id, findings=adapted)
         await db.commit()
+        await invalidate_dashboard_cache(org_id)
     except Exception:
         await db.rollback()
         logger.warning(f"firewall waf_bypass: ingest_findings failed for scan {scan_id}", exc_info=True)
@@ -1965,6 +1967,7 @@ async def _stream_port_map(
         adapted = _build_port_map_findings(req.target, modes_run)
         ingest_result = await ingest_findings(db, org_id, source="firewall_port_map", source_scan_id=scan_id, findings=adapted)
         await db.commit()
+        await invalidate_dashboard_cache(org_id)
     except Exception:
         await db.rollback()
         logger.warning(f"firewall port_map: ingest_findings failed for scan {scan_id}", exc_info=True)
@@ -2609,6 +2612,7 @@ async def analyze_firewall_rules(
         adapted = _build_rule_anomaly_findings(filename, fmt, anomalies)
         ingest_result = await ingest_findings(db, org_id, source="firewall_rules_analyze", source_scan_id=scan_id, findings=adapted)
         await db.commit()
+        await invalidate_dashboard_cache(org_id)
     except Exception:
         await db.rollback()
         logger.warning(f"firewall rules_analyze: ingest_findings failed for scan {scan_id}", exc_info=True)
@@ -2860,6 +2864,7 @@ async def _stream_rate_limit(
         adapted = _build_rate_limit_findings(req.target, req.path, req.max_rps, profile)
         ingest_result = await ingest_findings(db, org_id, source="firewall_rate_limit", source_scan_id=scan_id, findings=adapted)
         await db.commit()
+        await invalidate_dashboard_cache(org_id)
     except Exception:
         await db.rollback()
         logger.warning(f"firewall rate_limit: ingest_findings failed for scan {scan_id}", exc_info=True)
@@ -3129,6 +3134,7 @@ async def _stream_smuggling(
         adapted = _build_smuggling_findings(req.target, desync_risk, anomalies_detected, probes_run, probe_results, recommendation)
         ingest_result = await ingest_findings(db, org_id, source="firewall_smuggling", source_scan_id=scan_id, findings=adapted)
         await db.commit()
+        await invalidate_dashboard_cache(org_id)
     except Exception:
         await db.rollback()
         logger.warning(f"firewall smuggling: ingest_findings failed for scan {scan_id}", exc_info=True)
@@ -4549,6 +4555,7 @@ async def _run_physical_scan(
         )
         await ingest_findings(db, org_id, source="firewall_physical", source_scan_id=scan_id, findings=adapted)
         await db.commit()
+        await invalidate_dashboard_cache(org_id)
     except Exception:
         await db.rollback()
 

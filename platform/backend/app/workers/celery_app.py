@@ -24,6 +24,7 @@ celery_app = Celery(
         "app.workers.maintenance_worker",
         "app.workers.easm_worker",
         "app.workers.correlation_worker",
+        "app.workers.standalone_scan_worker",
     ],
 )
 
@@ -51,6 +52,7 @@ celery_app.conf.update(
         "app.workers.easm_worker.diff_asset_surface": {"queue": "default"},
         "app.workers.correlation_worker.correlate_after_scan": {"queue": "default"},
         "app.workers.correlation_worker.correlate_all_orgs": {"queue": "default"},
+        "app.workers.standalone_scan_worker.run_standalone_scanners_after_scan": {"queue": "scans"},
     },
     task_default_queue="default",
     broker_connection_retry_on_startup=True,

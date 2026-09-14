@@ -1072,7 +1072,7 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
     r = _get_sync_redis()
 
     with SessionFactory() as db:
-        from app.models.db.scan import ScanJob, ScanStatus as DBScanStatus
+        from app.models.db.scan import ScanJob, ScanStatus as DBScanStatus, ScanIntensity as DBScanIntensity
         from app.models.db.org import OrgCredentials
         from sqlalchemy import select as sync_select
 
@@ -1311,6 +1311,18 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
                 correlate_after_scan.delay(scan_job_id)
             except Exception as e:
                 logger.warning(f"Failed to dispatch correlate_after_scan: {e}")
+
+            # AGGRESSIVE scans additionally auto-chain a curated set of
+            # standalone scanner tools (nuclei, secrets, js_scanner,
+            # takeover) against the discovered domains/subdomains — so
+            # "aggressive" means everything runs, not just a deeper core
+            # pipeline pass. NORMAL/PASSIVE scans don't get this (cost/time).
+            if job.intensity == DBScanIntensity.AGGRESSIVE:
+                try:
+                    from app.workers.standalone_scan_worker import run_standalone_scanners_after_scan
+                    run_standalone_scanners_after_scan.delay(scan_job_id)
+                except Exception as e:
+                    logger.warning(f"Failed to dispatch run_standalone_scanners_after_scan: {e}")
 
             # Notifications: scan.completed channels (Slack, Jira, Teams, webhooks)
             try:

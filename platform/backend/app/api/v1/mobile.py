@@ -37,6 +37,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+from app.api.v1.dashboard import invalidate_dashboard_cache
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, get_current_org_id, require_tool
@@ -657,6 +658,9 @@ async def _sync_msra_to_db(org_id: str, db: AsyncSession) -> dict:
         await db.rollback()
         logger.error("MSRA sync commit failed: %s", exc)
         return {"error": str(exc), "inserted": inserted, "updated": updated, "skipped": skipped, "errors": errors + 1}
+
+    if inserted or updated:
+        await invalidate_dashboard_cache(org_id)
 
     # Notify configured channels (Slack/Jira/Teams/webhooks) for newly-created
     # CRITICAL/HIGH findings only — never for updates to an already-synced row.

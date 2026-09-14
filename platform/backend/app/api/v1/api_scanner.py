@@ -36,6 +36,7 @@ from app.core.dependencies import get_current_org_id, get_current_user
 from app.core.finding_confidence import grade_confidence
 from app.core.remediation import get_remediation
 from app.models.db.user import User
+from app.api.v1.dashboard import invalidate_dashboard_cache
 from app.services.finding_ingest import ingest_findings
 
 router = APIRouter(prefix="/api-scanner", tags=["API Security Scanner"])
@@ -579,6 +580,7 @@ async def scan_api(
                 adapted = _adapt_api_findings(all_findings)
                 await ingest_findings(db, org_id, source="api_scanner", source_scan_id=scan_id, findings=adapted)
                 await db.commit()
+                await invalidate_dashboard_cache(org_id)
             except Exception:
                 await db.rollback()
 
