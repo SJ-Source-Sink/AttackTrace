@@ -73,13 +73,21 @@ async def _run_standalone_scanners(org_id, user_id, target_domains: list[str], s
                 results["nuclei"] = {"status": "skipped", "reason": "nuclei not installed"}
             else:
                 from app.api.v1.nuclei import _stream_nuclei, NucleiScanRequest
+                # Bounded to high-signal categories, not nuclei's full default
+                # template set — verified via live testing that a full-template
+                # run against one real domain alone can run for 1+ hour, which
+                # would make "aggressive scan" auto-chaining impractically slow
+                # stacked across multiple domains and 3 more tools after it.
+                # "takeovers" excluded deliberately: the dedicated takeover.py
+                # tool below does that fingerprinting more thoroughly already.
+                _NUCLEI_AUTO_CATEGORIES = ["cves", "misconfiguration", "exposures", "default-logins"]
                 for domain in domains:
                     async with Session() as db:
                         scan_id = str(_uuid.uuid4())
-                        req = NucleiScanRequest(target=domain)
+                        req = NucleiScanRequest(target=domain, categories=_NUCLEI_AUTO_CATEGORIES)
                         async for _ in _stream_nuclei(scan_id, req, fake_request, org_id):
                             pass
-                results["nuclei"] = {"status": "completed", "domains_scanned": len(domains)}
+                results["nuclei"] = {"status": "completed", "domains_scanned": len(domains), "categories": _NUCLEI_AUTO_CATEGORIES}
         except Exception as e:
             logger.exception(f"Auto nuclei scan failed: {e}")
             results["nuclei"] = {"status": "error", "error": str(e)[:500]}
