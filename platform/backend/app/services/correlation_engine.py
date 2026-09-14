@@ -206,8 +206,16 @@ def _rule_ai_bypass_plus_api_surface(group: _AssetGroup) -> Optional[dict]:
 def _rule_injection_on_cloud_asset(group: _AssetGroup) -> Optional[dict]:
     if group.asset is None or group.asset.asset_type.value != "cloud":
         return None
+    # Deliberately NOT a bare "attack-suite" substring match: the classic
+    # Attack Suite scanner uses category=f"attack-suite-{module}" for ALL ~39
+    # of its modules (headers, cors, jwt, csrf, ...), most of which have
+    # nothing to do with injection/SSRF — a blanket match would fire this
+    # cloud-metadata-theft narrative on e.g. a missing-security-header
+    # finding, which is a real precision bug, not a stricter-is-safer choice.
     injection = _has_category_containing(
-        group.findings, "ssrf", "injection", "sqli", "attack-suite", "attack_suite"
+        group.findings,
+        "ssrf", "sqli", "nosql", "ssti", "xxe", "request_forgery", "server-side request forgery",
+        "attack-suite-ssrf", "attack-suite-sqli", "attack-suite-nosql", "attack-suite-ssti", "attack-suite-xxe",
     )
     if not injection:
         return None
