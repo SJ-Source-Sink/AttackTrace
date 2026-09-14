@@ -560,8 +560,9 @@ async def run_nuclei_scan(
     db.add(log)
     await db.commit()
 
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _stream_nuclei(scan_id, payload, request, org_id),
+        tee_scan_activity(org_id, "nuclei", payload.target, scan_id, _stream_nuclei(scan_id, payload, request, org_id)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

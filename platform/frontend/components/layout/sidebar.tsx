@@ -46,6 +46,7 @@ import {
   ScanLine,
   Activity,
   GitBranch,
+  Waypoints,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -74,6 +75,11 @@ const navItems: NavItem[] = [
     label: "AI Activity",
     href: "/ai-activity",
     icon: Activity,
+  },
+  {
+    label: "Scan Activity",
+    href: "/scan-activity",
+    icon: Waypoints,
   },
   {
     label: "Scans",
