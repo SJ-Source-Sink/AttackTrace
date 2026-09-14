@@ -36,6 +36,7 @@ one scan's batch.
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -54,6 +55,16 @@ logger = logging.getLogger(__name__)
 
 SOURCE = "correlation_engine"
 _NOTIFY_SEVERITIES = (FindingSeverity.CRITICAL, FindingSeverity.HIGH)
+
+# Bound on how many asset groups get an AI correlation pass per run — the
+# hand-written rules above are free (pure Python, no I/O), but an AI pass is
+# an LLM call per group. Generous rather than cost-driven for a Qwen
+# (self-hosted, no per-token cost) org — see app.services.llm_client's
+# provider-aware philosophy elsewhere in this codebase — but still bounded
+# so one org with thousands of asset groups can't turn a scan-triggered
+# correlation pass into an hours-long chain of sequential LLM calls.
+_MAX_AI_GROUPS_PER_RUN = 25
+_MAX_EVIDENCE_CHARS = 400
 
 _SEVERITY_RANK = {
     FindingSeverity.CRITICAL: 4, FindingSeverity.HIGH: 3,
@@ -261,6 +272,129 @@ def _rule_convergent_risk(group: _AssetGroup) -> Optional[dict]:
     }
 
 
+async def _ai_correlate_group(group: _AssetGroup, ai_config: dict) -> Optional[dict]:
+    """
+    AI-driven complement to the hand-written rules above: asks the org's
+    configured model (Claude or, more commonly for this bounded a fan-out,
+    self-hosted Qwen) whether 2+ of this asset's findings combine into a
+    realistic attack chain that none of the fixed keyword-matched rules
+    would catch — e.g. a chain the rules have no category keywords for at
+    all, or one that spans findings from sources the rules don't specifically
+    pair.
+
+    Same false-positive-gate discipline as everywhere else AI output touches
+    a Finding (app.core.finding_confidence, the Attack Suite Agent's
+    record_finding): the model's claim is never trusted at face value. Its
+    `finding_ids` are intersected against the group's REAL finding ids before
+    anything is persisted — any id it invents or hallucinates is silently
+    dropped, and if fewer than 2 real ids survive that filter, the whole
+    result is discarded rather than persisting a "chain" of one. The model
+    also cannot invent severity/category outside a fixed allowlist. Runs at
+    confidence="medium" (LLM-inferred), never "high" (reserved for the
+    deterministic pattern-matched rules above) — this is a real, load-bearing
+    distinction surfaced to the user via the finding's confidence badge.
+    """
+    from app.services import llm_client
+
+    if len(group.findings) < 2 or group.asset is None:
+        return None  # nothing to chain, or no asset context to ground it in
+
+    by_id = {str(f.id): f for f in group.findings}
+    findings_block = "\n".join(
+        f"- id={fid} | title=\"{f.title}\" | severity={f.severity.value} | "
+        f"category={f.category or 'n/a'} | source={f.source} | confidence={f.confidence or 'n/a'} | "
+        f"evidence_excerpt={json.dumps(f.evidence or {})[:_MAX_EVIDENCE_CHARS]}"
+        for fid, f in by_id.items()
+    )
+    ports = _open_ports(group.asset)
+    port_block = ", ".join(f"{p.get('port')}/{p.get('service', '?')}" for p in ports[:10]) or "none known"
+
+    system_prompt = (
+        "You are a senior security analyst looking for compound attack chains — cases where "
+        "two or more independently-reported findings on the SAME asset combine into a materially "
+        "worse, more realistic attack path than any of them represents alone. You are extremely "
+        "conservative: most finding combinations do NOT form a real chain, and saying so is the "
+        "correct, expected answer most of the time. Only report a chain when there is a concrete, "
+        "specific technical reason the findings compound (e.g. one finding grants the access "
+        "another finding needs, or one confirms exploitability the other only suggests) — never "
+        "because they merely share an asset or a vague thematic similarity like \"both are web bugs\". "
+        "You may ONLY reference finding ids given to you; never invent an id, a CVE, or a fact not "
+        "present in the findings below. Respond ONLY with valid JSON — no markdown, no explanation."
+    )
+    user_message = f"""Asset: {group.asset.value} (type: {group.asset.asset_type.value})
+Known open ports/services: {port_block}
+
+Findings on this asset:
+{findings_block}
+
+Respond with this exact JSON (no other text):
+{{
+  "chain_found": true|false,
+  "finding_ids": ["...", "..."],
+  "title": "short specific title naming the chain, or empty string if chain_found is false",
+  "narrative": "2-4 sentences: the concrete mechanism by which these specific findings compound — cite what each contributes, or empty string if chain_found is false",
+  "severity": "critical|high|medium"
+}}"""
+
+    try:
+        text = await llm_client.complete(
+            ai_config, system_prompt, [{"role": "user", "content": user_message}],
+            max_tokens=600, label="correlation_engine_ai",
+        )
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        result = json.loads(text)
+    except json.JSONDecodeError as e:
+        logger.warning(f"AI correlation returned invalid JSON for asset {group.asset.value}: {e}")
+        return None
+    except Exception as e:
+        logger.warning(f"AI correlation call failed for asset {group.asset.value}: {e}")
+        return None
+
+    if not result.get("chain_found"):
+        return None
+
+    # Never trust the model's ids/severity/title at face value — filter to
+    # only ids that are real findings in this exact group, and validate
+    # every other field against a fixed allowlist before persisting anything.
+    claimed_ids = result.get("finding_ids") or []
+    real_ids = [fid for fid in claimed_ids if fid in by_id]
+    if len(real_ids) < 2:
+        if claimed_ids:
+            logger.info(
+                f"AI correlation for asset {group.asset.value} claimed a chain but "
+                f"{len(claimed_ids) - len(real_ids)} of {len(claimed_ids)} ids weren't real "
+                f"findings in this group — discarding rather than persisting a partial/fabricated chain."
+            )
+        return None
+
+    severity_map = {
+        "critical": FindingSeverity.CRITICAL, "high": FindingSeverity.HIGH, "medium": FindingSeverity.MEDIUM,
+    }
+    severity = severity_map.get(str(result.get("severity", "")).lower(), FindingSeverity.MEDIUM)
+    title = (result.get("title") or "").strip()[:200]
+    narrative = (result.get("narrative") or "").strip()
+    if not title or not narrative:
+        return None
+
+    constituents = [by_id[fid] for fid in real_ids]
+    return {
+        "title": title,
+        "description": (
+            f"{narrative}\n\n(Identified by AI-assisted correlation across findings already "
+            f"reported by other scanners on {group.asset.value} — not itself an independent "
+            f"detection. Verify the underlying mechanism before treating this chain as confirmed.)"
+        ),
+        "severity": severity,
+        "category": "correlated-ai-inferred",
+        "constituents": constituents,
+        "affected_asset": group.asset.value,
+        "confidence": "medium",
+    }
+
+
 _RULES: list[Callable[[_AssetGroup], Optional[dict]]] = [
     _rule_takeover_plus_exposed_service,
     _rule_secret_on_reachable_host,
@@ -271,11 +405,76 @@ _RULES: list[Callable[[_AssetGroup], Optional[dict]]] = [
 ]
 
 
+async def _persist_spec(
+    db: AsyncSession, org_id: UUID | str, spec: dict, rule_name: str,
+) -> tuple[Optional[Finding], bool, bool]:
+    """Shared upsert-by-dedup_hash persistence for a compound-finding spec,
+    used by both the deterministic rules and the AI correlation pass above.
+    Returns (finding_or_none_if_unchanged, created, updated)."""
+    constituents: list[Finding] = spec["constituents"]
+    constituent_ids = sorted(str(f.id) for f in constituents)
+    dedup = compute_dedup_hash(org_id, spec["title"], spec["affected_asset"], [])
+
+    existing = (
+        await db.execute(select(Finding).where(Finding.org_id == org_id, Finding.dedup_hash == dedup))
+    ).scalar_one_or_none()
+
+    remediation = get_remediation(spec["category"], spec["title"]) or (
+        "Review and remediate each underlying finding listed below; this compound "
+        "finding exists because their combination raises real-world risk beyond any "
+        "one of them individually."
+    )
+    evidence = {
+        "rule": rule_name,
+        "constituent_findings": [_finding_ref(f) for f in constituents],
+        "constituent_finding_ids": constituent_ids,
+    }
+
+    if existing is None:
+        new_finding = Finding(
+            org_id=org_id,
+            scan_job_id=None,
+            source=SOURCE,
+            source_scan_id=None,
+            title=spec["title"],
+            description=spec["description"],
+            severity=spec["severity"],
+            category=spec["category"],
+            affected_asset=spec["affected_asset"],
+            evidence=evidence,
+            remediation=remediation,
+            references=[],
+            cve=[],
+            status=FindingStatus.OPEN,
+            confidence=spec.get("confidence", "high"),
+            correlated_finding_ids=constituent_ids,
+            dedup_hash=dedup,
+        )
+        db.add(new_finding)
+        return new_finding, True, False
+
+    if existing.correlated_finding_ids != constituent_ids:
+        existing.correlated_finding_ids = constituent_ids
+        existing.evidence = evidence
+        return None, False, True
+
+    return None, False, False
+
+
 async def run_correlation(db: AsyncSession, org_id: UUID | str) -> dict:
-    """Run all correlation rules for one org's current open findings.
-    Idempotent: re-running with the same underlying findings produces the
-    same dedup_hash and upserts rather than duplicating. Does not commit —
-    caller commits (matching app.services.finding_ingest's convention)."""
+    """Run all correlation rules — deterministic pattern-matched rules always,
+    plus an AI-assisted pass when the org has AI configured — for one org's
+    current open findings. Idempotent: re-running with the same underlying
+    findings produces the same dedup_hash and upserts rather than
+    duplicating. Does not commit — caller commits (matching
+    app.services.finding_ingest's convention)."""
+    from app.services.ai_service import get_org_ai_config
+
+    ai_config = await get_org_ai_config(org_id, db)
+    ai_ready = bool(ai_config.get("api_key")) or (
+        ai_config.get("provider") == "qwen" and bool(ai_config.get("base_url"))
+    )
+
     findings = (
         await db.execute(
             select(Finding).where(
@@ -308,6 +507,7 @@ async def run_correlation(db: AsyncSession, org_id: UUID | str) -> dict:
 
     created = 0
     updated = 0
+    ai_groups_run = 0
     newly_created_critical_high: list[Finding] = []
 
     for group in groups.values():
@@ -326,54 +526,29 @@ async def run_correlation(db: AsyncSession, org_id: UUID | str) -> dict:
             if not spec:
                 continue
 
-            constituents: list[Finding] = spec["constituents"]
-            constituent_ids = sorted(str(f.id) for f in constituents)
-            dedup = compute_dedup_hash(org_id, spec["title"], spec["affected_asset"], [])
+            new_finding, was_created, was_updated = await _persist_spec(db, org_id, spec, rule.__name__)
+            created += int(was_created)
+            updated += int(was_updated)
+            if was_created and new_finding is not None and spec["severity"] in _NOTIFY_SEVERITIES:
+                newly_created_critical_high.append(new_finding)
 
-            existing = (
-                await db.execute(select(Finding).where(Finding.org_id == org_id, Finding.dedup_hash == dedup))
-            ).scalar_one_or_none()
-
-            remediation = get_remediation(spec["category"], spec["title"]) or (
-                "Review and remediate each underlying finding listed below; this compound "
-                "finding exists because their combination raises real-world risk beyond any "
-                "one of them individually."
-            )
-            evidence = {
-                "rule": rule.__name__,
-                "constituent_findings": [_finding_ref(f) for f in constituents],
-                "constituent_finding_ids": constituent_ids,
-            }
-
-            if existing is None:
-                new_finding = Finding(
-                    org_id=org_id,
-                    scan_job_id=None,
-                    source=SOURCE,
-                    source_scan_id=None,
-                    title=spec["title"],
-                    description=spec["description"],
-                    severity=spec["severity"],
-                    category=spec["category"],
-                    affected_asset=spec["affected_asset"],
-                    evidence=evidence,
-                    remediation=remediation,
-                    references=[],
-                    cve=[],
-                    status=FindingStatus.OPEN,
-                    confidence="high",
-                    correlated_finding_ids=constituent_ids,
-                    dedup_hash=dedup,
-                )
-                db.add(new_finding)
-                created += 1
-                if spec["severity"] in _NOTIFY_SEVERITIES:
+        # AI-assisted pass: only for groups with 2+ findings (the deterministic
+        # rules already cover the 1-finding-plus-asset-context cases), only
+        # when the org actually has AI configured, and bounded per run so a
+        # large org can't turn this into an unbounded sequential LLM chain.
+        if ai_ready and len(group.findings) >= 2 and ai_groups_run < _MAX_AI_GROUPS_PER_RUN:
+            ai_groups_run += 1
+            try:
+                ai_spec = await _ai_correlate_group(group, ai_config)
+            except Exception as exc:
+                logger.warning(f"AI correlation raised for asset {group.asset.value if group.asset else '?'}: {exc}")
+                ai_spec = None
+            if ai_spec:
+                new_finding, was_created, was_updated = await _persist_spec(db, org_id, ai_spec, "ai_inferred")
+                created += int(was_created)
+                updated += int(was_updated)
+                if was_created and new_finding is not None and ai_spec["severity"] in _NOTIFY_SEVERITIES:
                     newly_created_critical_high.append(new_finding)
-            else:
-                if existing.correlated_finding_ids != constituent_ids:
-                    existing.correlated_finding_ids = constituent_ids
-                    existing.evidence = evidence
-                    updated += 1
 
     if newly_created_critical_high:
         try:
@@ -398,5 +573,11 @@ async def run_correlation(db: AsyncSession, org_id: UUID | str) -> dict:
         except Exception as exc:
             logger.warning(f"Correlation engine: notification dispatch setup failed: {exc}")
 
-    logger.info(f"Correlation engine for org {org_id}: {created} created, {updated} updated")
-    return {"status": "completed", "created": created, "updated": updated, "asset_groups_considered": len(groups)}
+    logger.info(
+        f"Correlation engine for org {org_id}: {created} created, {updated} updated "
+        f"({ai_groups_run} groups got an AI-assisted pass, ai_ready={ai_ready})"
+    )
+    return {
+        "status": "completed", "created": created, "updated": updated,
+        "asset_groups_considered": len(groups), "ai_groups_analyzed": ai_groups_run,
+    }

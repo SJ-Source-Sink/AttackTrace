@@ -836,6 +836,25 @@ def _persist_session_results(db_session, scan_job, attacktrace_session, org_id: 
         if existing:
             # Still count it in findings_count
             findings_count[sev_value] = findings_count.get(sev_value, 0) + 1
+            # Backfill asset_id if the partial-persist callback created this
+            # finding before its asset existed. _persist_module_results_partial
+            # only upserts DOMAIN-type assets per module (not subdomains/ips/
+            # webapps/cloud), so a finding whose affected_asset is e.g. a
+            # webapp URL discovered by a later module got asset_id=NULL at
+            # creation time — permanently, since findings are never re-visited
+            # after that. By the time this final full-session persist runs,
+            # every asset type has just been upserted above, so re-resolving
+            # here catches every one of those cross-module timing gaps. This
+            # was found live: 259 of 260 findings from one real scan had
+            # asset_id=NULL despite a matching Asset row existing in the DB —
+            # which silently breaks the Asset detail page's finding list and
+            # starves the correlation engine's asset-grouping of almost all
+            # its input.
+            if existing.asset_id is None:
+                resolved = _resolve_asset_id_sync(db_session, org_id, f.affected_asset or "")
+                if resolved:
+                    existing.asset_id = resolved
+                    db_session.add(existing)
             continue
 
         findings_count[sev_value] = findings_count.get(sev_value, 0) + 1
@@ -1299,9 +1318,15 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
             # Trigger AI triage (passive classification of what the scanners found)
             triage_scan_findings.delay(scan_job_id)
 
-            # Trigger active AI testing/validation (Attack Suite AI Agent) against
-            # this scan's targets — the follow-up step after passive triage.
-            run_ai_agent_after_scan.delay(scan_job_id)
+            # Active AI testing/validation (Attack Suite AI Agent) auto-trigger is
+            # DISABLED pending explicit, independently-verified authorization for
+            # the org's current scan targets — see
+            # the engagement's scope.lock.md.
+            # The agent remains available for manual, explicit invocation via
+            # POST /attack-suite/agent/run; it must not fire automatically on
+            # every scan until that's resolved. Do not re-enable this without
+            # confirming authorization first.
+            # run_ai_agent_after_scan.delay(scan_job_id)
 
             # Trigger cross-scanner correlation — looks for compound risk
             # patterns (e.g. takeover + exposed service on the same asset)
@@ -1318,11 +1343,21 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
             # "aggressive" means everything runs, not just a deeper core
             # pipeline pass. NORMAL/PASSIVE scans don't get this (cost/time).
             if job.intensity == DBScanIntensity.AGGRESSIVE:
+                # Dispatched as four independent tasks (not one combined task)
+                # so a slow/hung tool (e.g. takeover against a long subdomain
+                # list) can't consume the whole chain's time budget and starve
+                # the other three — see standalone_scan_worker.py's module
+                # docstring for the SoftTimeLimitExceeded incident this fixed.
                 try:
-                    from app.workers.standalone_scan_worker import run_standalone_scanners_after_scan
-                    run_standalone_scanners_after_scan.delay(scan_job_id)
+                    from app.workers.standalone_scan_worker import (
+                        run_auto_nuclei, run_auto_secrets, run_auto_js_scanner, run_auto_takeover,
+                    )
+                    run_auto_nuclei.delay(scan_job_id)
+                    run_auto_secrets.delay(scan_job_id)
+                    run_auto_js_scanner.delay(scan_job_id)
+                    run_auto_takeover.delay(scan_job_id)
                 except Exception as e:
-                    logger.warning(f"Failed to dispatch run_standalone_scanners_after_scan: {e}")
+                    logger.warning(f"Failed to dispatch standalone-scanner auto-chain: {e}")
 
             # Notifications: scan.completed channels (Slack, Jira, Teams, webhooks)
             try:

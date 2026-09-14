@@ -770,11 +770,21 @@ async def update_finding(
     if payload.remediation is not None:
         finding.remediation = payload.remediation
 
-    if payload.assigned_to is not None:
-        try:
-            finding.assigned_to = UUID(payload.assigned_to) if payload.assigned_to else None
-        except ValueError:
-            pass
+    # "assigned_to" explicitly present in the request body — whether as a
+    # UUID string, "", or JSON null — means "act on this field"; omitted
+    # entirely means "leave it alone." Checking `is not None` instead of
+    # membership in model_fields_set used to silently no-op on an explicit
+    # `{"assigned_to": null}` (the natural way a client would ask to clear
+    # the field), while only "" actually cleared it — surprising, undocumented
+    # behavior found via live testing.
+    if "assigned_to" in payload.model_fields_set:
+        if not payload.assigned_to:
+            finding.assigned_to = None
+        else:
+            try:
+                finding.assigned_to = UUID(payload.assigned_to)
+            except ValueError:
+                pass
 
     if payload.accept_risk_info is not None:
         # Server-authoritative accepted_at/accepted_by — never trust client-supplied
