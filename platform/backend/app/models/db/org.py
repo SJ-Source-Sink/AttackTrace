@@ -165,6 +165,12 @@ class OrgCredentials(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     ai_base_url_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Optional model ID override (e.g. a specific Bedrock model ARN or version)
     ai_model_override_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Which provider is active: "anthropic" (default) or "qwen". Not a secret, stored plain.
+    ai_provider: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # Self-hosted Qwen (or any OpenAI-compatible server) connection details
+    qwen_base_url_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    qwen_api_key_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    qwen_model_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     shodan_key_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     censys_id_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     censys_secret_enc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

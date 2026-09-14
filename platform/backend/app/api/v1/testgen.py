@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 from typing import Annotated, AsyncGenerator
 from uuid import UUID
 
-import anthropic
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -3885,17 +3884,12 @@ class AIRequest(BaseModel):
 
 async def _stream_ai_testcases(payload: AIRequest, ai_config: dict | None = None) -> AsyncGenerator[str, None]:
     cfg = ai_config or {}
-    api_key = cfg.get("api_key") or settings.ANTHROPIC_API_KEY
-    if not api_key:
+    if cfg.get("provider", "anthropic") != "qwen" and not (cfg.get("api_key") or settings.ANTHROPIC_API_KEY):
         yield f"event: error\ndata: {json.dumps({'message': 'ANTHROPIC_API_KEY is not configured'})}\n\n"
         return
-
-    client_kwargs: dict = {"api_key": api_key}
-    effective_base_url = cfg.get("base_url") or settings.AI_BASE_URL
-    if effective_base_url:
-        client_kwargs["base_url"] = effective_base_url
-    model = cfg.get("model") or settings.AI_MODEL
-    client = anthropic.Anthropic(**client_kwargs)
+    if cfg.get("provider") == "qwen" and not cfg.get("base_url"):
+        yield f"event: error\ndata: {json.dumps({'message': 'Qwen base_url is not configured'})}\n\n"
+        return
 
     target_desc  = payload.target or "unspecified target"
     types_desc   = ", ".join(payload.target_types) if payload.target_types else "web application"
@@ -3959,18 +3953,13 @@ REAL PAYLOADS TO USE IN YOUR STEPS (copy these exactly — do not invent payload
 OUTPUT: Return ONLY the JSON array. Do not wrap in an object. Do not add any text before or after the array."""
 
     try:
+        from app.services import llm_client
         full_text = ""
         yield f"event: start\ndata: {json.dumps({'message': 'Generating AI test cases…'})}\n\n"
 
-        with client.messages.stream(
-            model=model,
-            max_tokens=8192,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_message}],
-        ) as stream:
-            for chunk in stream.text_stream:
-                full_text += chunk
-                yield f"event: token\ndata: {json.dumps({'text': chunk})}\n\n"
+        async for chunk in llm_client.stream_complete(cfg, system_prompt, [{"role": "user", "content": user_message}], 8192):
+            full_text += chunk
+            yield f"event: token\ndata: {json.dumps({'text': chunk})}\n\n"
 
         text = full_text.strip()
         if text.startswith("```"):

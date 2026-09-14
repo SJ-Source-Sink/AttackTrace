@@ -34,7 +34,6 @@ from datetime import datetime, timezone
 from typing import AsyncGenerator, Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
-import anthropic
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,6 +42,7 @@ from app.core.config import get_settings
 from app.core.finding_confidence import grade_confidence
 from app.models.db.asset import Asset
 from app.models.db.audit import AuditLog
+from app.services import llm_client
 from app.services.ai_service import _cb_is_open, _cb_record_failure, _cb_record_success
 from app.services.enumeration_context import _asset_matches_target, build_context
 from app.services.finding_ingest import ingest_findings
@@ -464,17 +464,14 @@ async def run_agent(
         return
 
     cfg = ai_config or {}
-    effective_key = cfg.get("api_key") or settings.ANTHROPIC_API_KEY
-    if not effective_key:
+    if cfg.get("provider", "anthropic") != "qwen" and not (cfg.get("api_key") or settings.ANTHROPIC_API_KEY):
         AGENT_RUNS[run_id]["status"] = "error"
         yield {"event": "error", "data": {"run_id": run_id, "message": "ANTHROPIC_API_KEY is not configured"}}
         return
-
-    client_kwargs: dict = {"api_key": effective_key}
-    if cfg.get("base_url") or settings.AI_BASE_URL:
-        client_kwargs["base_url"] = cfg.get("base_url") or settings.AI_BASE_URL
-    ac = anthropic.AsyncAnthropic(**client_kwargs)
-    model = cfg.get("model") or settings.AI_MODEL
+    if cfg.get("provider") == "qwen" and not cfg.get("base_url"):
+        AGENT_RUNS[run_id]["status"] = "error"
+        yield {"event": "error", "data": {"run_id": run_id, "message": "Qwen base_url is not configured"}}
+        return
 
     domain_guess = _host_of(target)
     context = await build_context(db, org_id, target=domain_guess)
@@ -508,10 +505,7 @@ async def run_agent(
             yield {"event": "error", "data": {"run_id": run_id, "message": "AI circuit breaker open — Anthropic API is currently degraded"}}
             break
         try:
-            resp = await ac.messages.create(
-                model=model, max_tokens=_AGENT_MAX_TOKENS,
-                system=system_prompt, tools=AGENT_TOOLS, messages=messages,
-            )
+            turn_result = await llm_client.chat_turn(cfg, system_prompt, messages, AGENT_TOOLS, _AGENT_MAX_TOKENS)
             await _cb_record_success()
         except Exception as exc:
             await _cb_record_failure()
@@ -519,28 +513,26 @@ async def run_agent(
             yield {"event": "error", "data": {"run_id": run_id, "message": f"AI call failed: {exc}"}}
             break
 
-        assistant_content = resp.content
-        messages.append({"role": "assistant", "content": assistant_content})
+        messages.append(turn_result["assistant_message"])
 
-        text_parts = [b.text for b in assistant_content if b.type == "text"]
-        if text_parts:
-            yield {"event": "reasoning", "data": {"run_id": run_id, "turn": turn, "text": "\n".join(text_parts)}}
+        if turn_result["text"]:
+            yield {"event": "reasoning", "data": {"run_id": run_id, "turn": turn, "text": "\n".join(turn_result["text"])}}
 
-        tool_uses = [b for b in assistant_content if b.type == "tool_use"]
-        if not tool_uses:
+        tool_calls = turn_result["tool_calls"]
+        if not tool_calls:
             AGENT_RUNS[run_id]["status"] = "completed"
             yield {"event": "done", "data": {"run_id": run_id, "reason": "model stopped calling tools", "turns": turn}}
             break
 
         tool_results = []
-        for tu in tool_uses:
+        for tc in tool_calls:
             if AGENT_RUNS[run_id]["stop"]:
                 break
-            result = await _execute_tool(db, org_id, user_id, run_id, tu.name, tu.input)
-            if tu.name == "record_finding" and result.get("recorded"):
+            result = await _execute_tool(db, org_id, user_id, run_id, tc["name"], tc["input"])
+            if tc["name"] == "record_finding" and result.get("recorded"):
                 findings_recorded += 1
-            yield {"event": "tool_call", "data": {"run_id": run_id, "turn": turn, "tool": tu.name, "input": tu.input, "result": result}}
-            tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": json.dumps(result, default=str)[:4000]})
+            yield {"event": "tool_call", "data": {"run_id": run_id, "turn": turn, "tool": tc["name"], "input": tc["input"], "result": result}}
+            tool_results.append({"id": tc["id"], "content": json.dumps(result, default=str)[:4000]})
 
         await db.commit()
 
@@ -549,7 +541,7 @@ async def run_agent(
             yield {"event": "stopped", "data": {"run_id": run_id, "turns": turn}}
             return
 
-        messages.append({"role": "user", "content": tool_results})
+        messages.extend(llm_client.build_tool_result_messages(cfg, tool_results))
 
     yield {"event": "summary", "data": {
         "run_id": run_id, "turns": turn, "findings_recorded": findings_recorded,

@@ -13,6 +13,7 @@ import {
   GitBranch,
   Copy,
   Check,
+  Wifi,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -39,18 +40,6 @@ interface Integration {
 }
 
 const INTEGRATIONS: Integration[] = [
-  {
-    id: "anthropic",
-    name: "Anthropic Claude",
-    description: "Powers AI-assisted triage, executive summaries, and the AI mode in the Security Test Case Generator.",
-    category: "AI",
-    docsUrl: "https://console.anthropic.com/settings/keys",
-    fields: [
-      { key: "anthropic_key", label: "API Key", placeholder: "sk-ant-api03-...", hint: "Required for AI Test Case Generator and AI triage features" },
-      { key: "ai_base_url", label: "API Gateway URL (optional)", placeholder: "https://your-bedrock-proxy.example.com", hint: "Custom Anthropic-compatible endpoint (AWS Bedrock proxy, etc.). Leave blank to use the default Anthropic API." },
-      { key: "ai_model_override", label: "Model Override (optional)", placeholder: "claude-sonnet-4-6", hint: "Override the default model. Leave blank to use claude-sonnet-4-6." },
-    ],
-  },
   {
     id: "shodan",
     name: "Shodan",
@@ -123,6 +112,204 @@ const CATEGORY_COLORS: Record<string, string> = {
   "Threat Intel": "bg-red-500/10 text-red-400 border-red-500/20",
 };
 
+type AIProvider = "anthropic" | "qwen";
+
+const AI_FIELDS: Record<AIProvider, { key: string; label: string; placeholder: string; hint?: string; secret: boolean }[]> = {
+  anthropic: [
+    { key: "anthropic_key", label: "API Key", placeholder: "sk-ant-api03-...", hint: "Required for AI-assisted triage, executive summaries, Attack Suite planning, and the AI Agent.", secret: true },
+    { key: "ai_base_url", label: "API Gateway URL (optional)", placeholder: "https://your-bedrock-proxy.example.com", hint: "Custom Anthropic-compatible endpoint (AWS Bedrock proxy, etc.). Leave blank for the default Anthropic API.", secret: false },
+    { key: "ai_model_override", label: "Model Override (optional)", placeholder: "claude-sonnet-4-6", hint: "Leave blank to use claude-sonnet-4-6.", secret: false },
+  ],
+  qwen: [
+    { key: "qwen_base_url", label: "Base URL", placeholder: "http://localhost:8000/v1", hint: "Your self-hosted Qwen (or any OpenAI-compatible) server's chat completions endpoint.", secret: false },
+    { key: "qwen_api_key", label: "API Key (optional)", placeholder: "leave blank if your server needs none", hint: "Most self-hosted servers don't require one.", secret: true },
+    { key: "qwen_model", label: "Model", placeholder: "Qwen2.5-72B-Instruct", hint: "Must match the model name your server serves.", secret: false },
+  ],
+};
+
+function AIProviderCard({
+  credentials,
+  onSave,
+  isSaving,
+}: {
+  credentials: Record<string, boolean | string>;
+  onSave: (values: Record<string, string | null>) => void;
+  isSaving: boolean;
+}) {
+  const savedProvider = ((credentials.ai_provider as AIProvider) || "anthropic");
+  const [provider, setProvider] = useState<AIProvider>(savedProvider);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [showFields, setShowFields] = useState<Record<string, boolean>>({});
+  const [isDirty, setIsDirty] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; error?: string | null; reply?: string | null } | null>(null);
+  const [testing, setTesting] = useState(false);
+
+  const fields = AI_FIELDS[provider];
+  const isConfigured = provider === "anthropic"
+    ? Boolean(credentials.anthropic_key)
+    : Boolean(credentials.qwen_base_url) && Boolean(credentials.qwen_model);
+
+  const handleChange = (key: string, value: string) => {
+    setValues((prev) => ({ ...prev, [key]: value }));
+    setIsDirty(true);
+    setTestResult(null);
+  };
+
+  const handleProviderChange = (next: AIProvider) => {
+    if (next === provider) return;
+    setProvider(next);
+    setValues({});
+    setTestResult(null);
+    setIsDirty(next !== savedProvider);
+  };
+
+  const handleSave = () => {
+    const payload: Record<string, string | null> = {};
+    fields.forEach((f) => {
+      if (values[f.key] !== undefined) payload[f.key] = values[f.key] || null;
+    });
+    if (provider !== savedProvider) payload.ai_provider = provider;
+    if (Object.keys(payload).length > 0) {
+      onSave(payload);
+      setValues({});
+      setIsDirty(false);
+    }
+  };
+
+  const handleTest = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const payload: { provider: string; base_url?: string; api_key?: string; model?: string } = { provider };
+      if (provider === "anthropic") {
+        if (values.anthropic_key) payload.api_key = values.anthropic_key;
+        if (values.ai_base_url) payload.base_url = values.ai_base_url;
+        if (values.ai_model_override) payload.model = values.ai_model_override;
+      } else {
+        if (values.qwen_base_url) payload.base_url = values.qwen_base_url;
+        if (values.qwen_api_key) payload.api_key = values.qwen_api_key;
+        if (values.qwen_model) payload.model = values.qwen_model;
+      }
+      const result = await orgApi.testAIConnection(payload);
+      setTestResult(result);
+      if (result.ok) toast.success("Connection successful");
+      else toast.error(result.error || "Connection failed");
+    } catch (e) {
+      setTestResult({ ok: false, error: (e as Error).message });
+      toast.error((e as Error).message || "Connection test failed");
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <Card className={cn("border transition-colors", isConfigured ? "border-emerald-800/40" : "border-zinc-800")}>
+      <CardHeader className="pb-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex-1">
+            <div className="flex items-center gap-2.5">
+              <CardTitle className="text-sm font-semibold text-zinc-100">AI Provider</CardTitle>
+              <Badge variant="outline" className={cn("text-[10px] px-1.5 py-0 h-4", CATEGORY_COLORS.AI)}>AI</Badge>
+              {isConfigured && (
+                <span className="flex items-center gap-1 text-[11px] text-emerald-400">
+                  <CheckCircle2 className="h-3 w-3" /> Configured
+                </span>
+              )}
+            </div>
+            <CardDescription className="mt-1 text-xs leading-relaxed">
+              Powers AI-assisted triage, executive summaries, Attack Suite planning/analysis, the Security
+              Test Case Generator, and the autonomous Attack Suite AI Agent.
+            </CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="pt-0 space-y-3">
+        <div className="flex items-center gap-1 rounded-lg bg-zinc-900 border border-zinc-800 p-1 w-fit">
+          <button
+            type="button"
+            onClick={() => handleProviderChange("anthropic")}
+            className={cn(
+              "px-3 py-1.5 rounded text-xs font-medium transition-colors",
+              provider === "anthropic" ? "bg-zinc-700 text-zinc-100" : "text-zinc-500 hover:text-zinc-300"
+            )}
+          >
+            Claude API
+          </button>
+          <button
+            type="button"
+            onClick={() => handleProviderChange("qwen")}
+            className={cn(
+              "px-3 py-1.5 rounded text-xs font-medium transition-colors",
+              provider === "qwen" ? "bg-violet-600 text-white" : "text-zinc-500 hover:text-zinc-300"
+            )}
+          >
+            Self-hosted Qwen
+          </button>
+        </div>
+
+        {fields.map((field) => {
+          const isSet = Boolean(credentials[field.key]);
+          const currentValue = values[field.key] ?? "";
+          return (
+            <div key={field.key} className="space-y-1">
+              <div className="flex items-center justify-between">
+                <Label className="text-xs text-zinc-400">{field.label}</Label>
+                {isSet && !currentValue && (
+                  <span className="text-[10px] text-emerald-400 flex items-center gap-1">
+                    <CheckCircle2 className="h-2.5 w-2.5" /> Set
+                  </span>
+                )}
+              </div>
+              <div className="relative">
+                <Input
+                  type={field.secret && !showFields[field.key] ? "password" : "text"}
+                  placeholder={isSet ? "••••••••••••••••" : field.placeholder}
+                  value={currentValue}
+                  onChange={(e) => handleChange(field.key, e.target.value)}
+                  className="pr-9 text-xs font-mono"
+                />
+                {field.secret && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="absolute right-1 top-1/2 -translate-y-1/2 h-6 w-6 text-zinc-500 hover:text-zinc-300"
+                    onClick={() => setShowFields((prev) => ({ ...prev, [field.key]: !prev[field.key] }))}
+                  >
+                    {showFields[field.key] ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                  </Button>
+                )}
+              </div>
+              {field.hint && <p className="text-[10px] text-zinc-600">{field.hint}</p>}
+            </div>
+          );
+        })}
+
+        {testResult && (
+          <div className={cn(
+            "rounded-lg border px-3 py-2 text-xs flex items-start gap-2",
+            testResult.ok ? "border-emerald-600/30 bg-emerald-600/5 text-emerald-300" : "border-red-600/30 bg-red-600/5 text-red-300"
+          )}>
+            {testResult.ok ? <CheckCircle2 className="h-3.5 w-3.5 mt-0.5 shrink-0" /> : <XCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />}
+            <span>{testResult.ok ? `Connected — model replied: "${testResult.reply}"` : testResult.error}</span>
+          </div>
+        )}
+
+        <div className="flex items-center justify-between pt-1">
+          <Button size="sm" variant="outline" onClick={handleTest} disabled={testing} className="h-7 text-xs gap-1.5">
+            {testing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wifi className="h-3 w-3" />}
+            {testing ? "Testing..." : "Test Connection"}
+          </Button>
+          <Button size="sm" onClick={handleSave} disabled={!isDirty || isSaving} className="h-7 text-xs gap-1.5">
+            {isSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+            {isSaving ? "Saving..." : "Save"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function IntegrationCard({
   integration,
   configuredFields,
@@ -130,7 +317,7 @@ function IntegrationCard({
   isSaving,
 }: {
   integration: Integration;
-  configuredFields: Record<string, boolean>;
+  configuredFields: Record<string, boolean | string>;
   onSave: (values: Record<string, string | null>) => void;
   isSaving: boolean;
 }) {
@@ -317,7 +504,7 @@ export default function IntegrationsPage() {
     updateMutation.mutate(values);
   };
 
-  const configuredFields: Record<string, boolean> = credentials ?? {};
+  const configuredFields: Record<string, boolean | string> = credentials ?? {};
 
   const configuredCount = INTEGRATIONS.filter((i) =>
     i.fields.every((f) => configuredFields[f.key])
@@ -343,6 +530,16 @@ export default function IntegrationsPage() {
           Leave a field blank to keep the existing value.
         </p>
       </div>
+
+      {isLoading ? (
+        <div className="h-56 rounded-lg border border-zinc-800 bg-zinc-900 animate-pulse" />
+      ) : (
+        <AIProviderCard
+          credentials={configuredFields}
+          onSave={(values) => handleSave("ai-provider", values)}
+          isSaving={savingId === "ai-provider" && updateMutation.isPending}
+        />
+      )}
 
       {isLoading ? (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">

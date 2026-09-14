@@ -342,9 +342,13 @@ export const orgApi = {
   apiKeys: () => api.get("/org/api-keys"),
   createApiKey: (data: unknown) => api.post("/org/api-keys", data),
   deleteApiKey: (id: string) => api.delete(`/org/api-keys/${id}`),
-  getCredentials: () => api.get<Record<string, boolean>>("/org/credentials"),
+  getCredentials: () => api.get<Record<string, boolean | string>>("/org/credentials"),
   updateCredentials: (data: Record<string, string | null>) =>
-    api.put<Record<string, boolean>>("/org/credentials", data),
+    api.put<Record<string, boolean | string>>("/org/credentials", data),
+  testAIConnection: (data: { provider: string; base_url?: string; api_key?: string; model?: string }) =>
+    api.post<{ ok: boolean; model: string | null; reply: string | null; error: string | null }>(
+      "/org/credentials/test-ai", data,
+    ),
   inviteCodes: () => api.get<{ items: InviteCodeItem[] }>("/org/invite-codes"),
   createInviteCode: (params: { role?: string; email?: string; expires_in_days?: number }) =>
     api.post<InviteCodeItem>("/org/invite-codes", undefined, {

@@ -1502,9 +1502,7 @@ from app.core.sse import sse_event as _sse
 async def run_burp_analysis(
     content: bytes,
     ai_analysis: bool,
-    anthropic_api_key: str,
-    base_url: str | None = None,
-    model: str | None = None,
+    ai_config: dict,
     org_id: str | None = None,
     filename: str = "burp_history.xml",
 ) -> AsyncGenerator[str, None]:
@@ -1587,26 +1585,23 @@ async def run_burp_analysis(
 
     # 7. AI analysis
     ai_text = ""
-    if ai_analysis and anthropic_api_key:
+    # Qwen needs only a base_url (an API key is often unnecessary for a
+    # self-hosted server); Anthropic needs an api_key.
+    ai_configured = bool(ai_config.get("api_key")) or (ai_config.get("provider") == "qwen" and bool(ai_config.get("base_url")))
+    if ai_analysis and ai_configured:
         yield _sse("ai_start", {"message": "Running AI analysis — this may take 15-30 seconds…"})
         prompt = build_ai_prompt(items, profiles, tech_stack, auth_mechs, interesting)
 
         try:
-            import anthropic  # type: ignore[import]
-            effective_model = model or _settings.AI_MODEL
-            client_kwargs: dict = {"api_key": anthropic_api_key}
-            if base_url:
-                client_kwargs["base_url"] = base_url
-            client = anthropic.AsyncAnthropic(**client_kwargs)
-            async with client.messages.stream(
-                model=effective_model,
-                max_tokens=2000,
-                system="You are a senior penetration tester. Be specific, concise, and technical. Always reference exact endpoint paths from the data provided.",
-                messages=[{"role": "user", "content": prompt}],
-            ) as stream:
-                async for chunk in stream.text_stream:
-                    ai_text += chunk
-                    yield _sse("ai_chunk", {"text": chunk})
+            from app.services import llm_client
+            async for chunk in llm_client.stream_complete(
+                ai_config,
+                "You are a senior penetration tester. Be specific, concise, and technical. Always reference exact endpoint paths from the data provided.",
+                [{"role": "user", "content": prompt}],
+                2000,
+            ):
+                ai_text += chunk
+                yield _sse("ai_chunk", {"text": chunk})
         except Exception as exc:
             yield _sse("ai_error", {"message": f"AI analysis unavailable: {exc}"})
 

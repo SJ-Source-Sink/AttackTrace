@@ -9,6 +9,7 @@ from typing import Annotated, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -665,6 +666,14 @@ async def update_credentials(
         creds.ai_base_url_enc = encrypt_credential(payload.ai_base_url) if payload.ai_base_url else None
     if payload.ai_model_override is not None:
         creds.ai_model_override_enc = encrypt_credential(payload.ai_model_override) if payload.ai_model_override else None
+    if payload.ai_provider is not None:
+        creds.ai_provider = payload.ai_provider or None
+    if payload.qwen_base_url is not None:
+        creds.qwen_base_url_enc = encrypt_credential(payload.qwen_base_url) if payload.qwen_base_url else None
+    if payload.qwen_api_key is not None:
+        creds.qwen_api_key_enc = encrypt_credential(payload.qwen_api_key) if payload.qwen_api_key else None
+    if payload.qwen_model is not None:
+        creds.qwen_model_enc = encrypt_credential(payload.qwen_model) if payload.qwen_model else None
     if payload.shodan_key is not None:
         creds.shodan_key_enc = encrypt_credential(payload.shodan_key) if payload.shodan_key else None
     if payload.censys_id is not None:
@@ -701,6 +710,10 @@ async def update_credentials(
         "anthropic_key": bool(creds.anthropic_key_enc),
         "ai_base_url": bool(creds.ai_base_url_enc),
         "ai_model_override": bool(creds.ai_model_override_enc),
+        "ai_provider": creds.ai_provider or "anthropic",
+        "qwen_base_url": bool(creds.qwen_base_url_enc),
+        "qwen_api_key": bool(creds.qwen_api_key_enc),
+        "qwen_model": bool(creds.qwen_model_enc),
         "shodan_key": bool(creds.shodan_key_enc),
         "censys_id": bool(creds.censys_id_enc),
         "censys_secret": bool(creds.censys_secret_enc),
@@ -916,6 +929,10 @@ async def get_current_org_credentials(
             "anthropic_key": False,
             "ai_base_url": False,
             "ai_model_override": False,
+            "ai_provider": "anthropic",
+            "qwen_base_url": False,
+            "qwen_api_key": False,
+            "qwen_model": False,
             "shodan_key": False,
             "censys_id": False,
             "censys_secret": False,
@@ -929,6 +946,10 @@ async def get_current_org_credentials(
         "anthropic_key": bool(creds.anthropic_key_enc),
         "ai_base_url": bool(creds.ai_base_url_enc),
         "ai_model_override": bool(creds.ai_model_override_enc),
+        "ai_provider": creds.ai_provider or "anthropic",
+        "qwen_base_url": bool(creds.qwen_base_url_enc),
+        "qwen_api_key": bool(creds.qwen_api_key_enc),
+        "qwen_model": bool(creds.qwen_model_enc),
         "shodan_key": bool(creds.shodan_key_enc),
         "censys_id": bool(creds.censys_id_enc),
         "censys_secret": bool(creds.censys_secret_enc),
@@ -965,6 +986,14 @@ async def update_current_org_credentials(
         creds.ai_base_url_enc = encrypt_credential(payload.ai_base_url) if payload.ai_base_url else None
     if payload.ai_model_override is not None:
         creds.ai_model_override_enc = encrypt_credential(payload.ai_model_override) if payload.ai_model_override else None
+    if payload.ai_provider is not None:
+        creds.ai_provider = payload.ai_provider or None
+    if payload.qwen_base_url is not None:
+        creds.qwen_base_url_enc = encrypt_credential(payload.qwen_base_url) if payload.qwen_base_url else None
+    if payload.qwen_api_key is not None:
+        creds.qwen_api_key_enc = encrypt_credential(payload.qwen_api_key) if payload.qwen_api_key else None
+    if payload.qwen_model is not None:
+        creds.qwen_model_enc = encrypt_credential(payload.qwen_model) if payload.qwen_model else None
     if payload.shodan_key is not None:
         creds.shodan_key_enc = encrypt_credential(payload.shodan_key) if payload.shodan_key else None
     if payload.censys_id is not None:
@@ -1000,6 +1029,10 @@ async def update_current_org_credentials(
         "anthropic_key": bool(creds.anthropic_key_enc),
         "ai_base_url": bool(creds.ai_base_url_enc),
         "ai_model_override": bool(creds.ai_model_override_enc),
+        "ai_provider": creds.ai_provider or "anthropic",
+        "qwen_base_url": bool(creds.qwen_base_url_enc),
+        "qwen_api_key": bool(creds.qwen_api_key_enc),
+        "qwen_model": bool(creds.qwen_model_enc),
         "shodan_key": bool(creds.shodan_key_enc),
         "censys_id": bool(creds.censys_id_enc),
         "censys_secret": bool(creds.censys_secret_enc),
@@ -1009,6 +1042,60 @@ async def update_current_org_credentials(
         "passivetotal_user": bool(creds.passivetotal_user_enc),
         "passivetotal_key": bool(creds.passivetotal_key_enc),
     }
+
+
+class AITestConnectionRequest(BaseModel):
+    provider: str = "anthropic"
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+
+
+@org_router.post("/credentials/test-ai", summary="Test AI provider connectivity before saving")
+async def test_ai_connection(
+    payload: AITestConnectionRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Sends a trivial prompt through whichever provider/credentials are given
+    (falling back to the org's already-saved credential for any field left
+    blank, since GET /credentials never returns decrypted secrets to prefill
+    with) so a user can validate connectivity before saving."""
+    await _require_org_role(db, current_user.id, org_id, [MemberRole.OWNER, MemberRole.ADMIN])
+
+    result = await db.execute(select(OrgCredentials).where(OrgCredentials.org_id == org_id))
+    creds = result.scalar_one_or_none()
+
+    def _saved(enc: Optional[str]) -> Optional[str]:
+        return decrypt_credential(enc) if (creds and enc) else None
+
+    provider = payload.provider or "anthropic"
+    if provider == "qwen":
+        ai_config = {
+            "provider": "qwen",
+            "base_url": payload.base_url or _saved(creds.qwen_base_url_enc if creds else None),
+            "api_key": payload.api_key or _saved(creds.qwen_api_key_enc if creds else None),
+            "model": payload.model or _saved(creds.qwen_model_enc if creds else None),
+        }
+    else:
+        ai_config = {
+            "provider": "anthropic",
+            "base_url": payload.base_url or _saved(creds.ai_base_url_enc if creds else None) or settings.AI_BASE_URL,
+            "api_key": payload.api_key or _saved(creds.anthropic_key_enc if creds else None) or settings.ANTHROPIC_API_KEY,
+            "model": payload.model or _saved(creds.ai_model_override_enc if creds else None) or settings.AI_MODEL,
+        }
+
+    from app.services import llm_client
+    try:
+        reply = await llm_client.complete(
+            ai_config, None,
+            [{"role": "user", "content": "Reply with exactly one word: OK"}],
+            10,
+        )
+        return {"ok": True, "model": ai_config.get("model"), "reply": reply[:200], "error": None}
+    except Exception as exc:
+        return {"ok": False, "model": ai_config.get("model"), "reply": None, "error": str(exc)}
 
 
 # --- Direct Member Creation ---

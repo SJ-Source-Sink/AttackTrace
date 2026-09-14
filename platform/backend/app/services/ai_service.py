@@ -17,7 +17,6 @@ from app.core.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-_AI_TIMEOUT = 60  # seconds per request
 _AI_MAX_RETRIES = 3
 
 # --- Redis-backed AI circuit breaker ---
@@ -81,39 +80,25 @@ async def _cb_record_failure() -> None:
         pass
 
 
-def _get_client(
-    api_key: str | None = None,
-    base_url: str | None = None,
-) -> anthropic.Anthropic:
-    resolved_key = api_key or settings.ANTHROPIC_API_KEY
-    if not resolved_key:
-        raise RuntimeError(
-            "Anthropic API key not configured. "
-            "Set it in Settings → Integrations → Anthropic Claude, "
-            "or set the ANTHROPIC_API_KEY environment variable."
-        )
-    resolved_base_url = base_url or settings.AI_BASE_URL
-    kwargs: dict = {
-        "api_key": resolved_key,
-        "timeout": _AI_TIMEOUT,
-        "max_retries": 0,
-    }
-    if resolved_base_url:
-        kwargs["base_url"] = resolved_base_url
-    return anthropic.Anthropic(**kwargs)
-
-
 async def get_org_ai_config(org_id, db) -> dict:
     """
     Resolve the effective AI configuration for an org.
 
-    Priority: org DB credential > system env var / config default.
-    Returns dict with keys: api_key, base_url, model.
+    Priority: org DB credential > system env var / config default. When the
+    org has selected "qwen" as its provider, api_key/base_url/model resolve
+    from the qwen_* fields instead — there is no global-settings fallback
+    for Qwen (there's no equivalent of ANTHROPIC_API_KEY for a self-hosted
+    server), so an incomplete Qwen config surfaces as a clear error at call
+    time rather than silently falling back to Claude.
+
+    Returns dict with keys: provider ("anthropic" | "qwen"), api_key,
+    base_url, model.
     """
     from app.core.security import decrypt_credential
     from app.models.db.org import OrgCredentials
     from sqlalchemy import select
 
+    provider = "anthropic"
     api_key: str | None = settings.ANTHROPIC_API_KEY
     base_url: str | None = settings.AI_BASE_URL
     model: str = settings.AI_MODEL
@@ -125,42 +110,55 @@ async def get_org_ai_config(org_id, db) -> dict:
             )
             creds = result.scalar_one_or_none()
             if creds:
-                if creds.anthropic_key_enc:
-                    api_key = decrypt_credential(creds.anthropic_key_enc)
-                if creds.ai_base_url_enc:
-                    base_url = decrypt_credential(creds.ai_base_url_enc)
-                if creds.ai_model_override_enc:
-                    model = decrypt_credential(creds.ai_model_override_enc)
+                if creds.ai_provider == "qwen":
+                    provider = "qwen"
+                    api_key = decrypt_credential(creds.qwen_api_key_enc) if creds.qwen_api_key_enc else None
+                    base_url = decrypt_credential(creds.qwen_base_url_enc) if creds.qwen_base_url_enc else None
+                    model = decrypt_credential(creds.qwen_model_enc) if creds.qwen_model_enc else None
+                else:
+                    if creds.anthropic_key_enc:
+                        api_key = decrypt_credential(creds.anthropic_key_enc)
+                    if creds.ai_base_url_enc:
+                        base_url = decrypt_credential(creds.ai_base_url_enc)
+                    if creds.ai_model_override_enc:
+                        model = decrypt_credential(creds.ai_model_override_enc)
         except Exception as exc:
             logger.warning(f"Could not fetch org AI config for {org_id}: {exc}")
 
-    return {"api_key": api_key, "base_url": base_url, "model": model}
+    return {"provider": provider, "api_key": api_key, "base_url": base_url, "model": model}
 
 
-async def _call_with_retry(client: anthropic.Anthropic, **kwargs) -> anthropic.types.Message:
-    """Call Claude with exponential backoff on transient errors and circuit breaker protection."""
+async def _call_llm_with_retry(ai_config: dict, system: str | None, messages: list[dict], max_tokens: int) -> str:
+    """Call the configured provider (Claude or Qwen, via llm_client.complete)
+    with exponential backoff on transient errors and circuit breaker
+    protection. Provider-agnostic: both SDKs expose the same exception
+    names (RateLimitError, APITimeoutError, APIConnectionError,
+    APIStatusError with .status_code), so one retry policy covers both."""
+    import openai
+    from app.services import llm_client
+
     if await _cb_is_open():
         raise RuntimeError("AI circuit breaker is open — Anthropic API is currently degraded")
 
     last_exc: Exception = RuntimeError("No attempts made")
     for attempt in range(_AI_MAX_RETRIES):
         try:
-            result = client.messages.create(**kwargs)
+            result = await llm_client.complete(ai_config, system, messages, max_tokens)
             await _cb_record_success()
             return result
-        except anthropic.RateLimitError as exc:
+        except (anthropic.RateLimitError, openai.RateLimitError) as exc:
             wait = 2 ** attempt
             logger.warning(f"AI rate limited, retrying in {wait}s (attempt {attempt + 1})")
             await _cb_record_failure()
             await asyncio.sleep(wait)
             last_exc = exc
-        except (anthropic.APITimeoutError, anthropic.APIConnectionError) as exc:
+        except (anthropic.APITimeoutError, anthropic.APIConnectionError, openai.APITimeoutError, openai.APIConnectionError) as exc:
             wait = 2 ** attempt
             logger.warning(f"AI transient error: {exc}, retrying in {wait}s (attempt {attempt + 1})")
             await _cb_record_failure()
             await asyncio.sleep(wait)
             last_exc = exc
-        except anthropic.APIStatusError as exc:
+        except (anthropic.APIStatusError, openai.APIStatusError) as exc:
             if exc.status_code >= 500:
                 wait = 2 ** attempt
                 logger.warning(f"AI server error {exc.status_code}, retrying in {wait}s")
@@ -186,8 +184,6 @@ async def triage_finding(
     ai_config: optional dict with keys api_key, base_url, model (from get_org_ai_config).
     """
     cfg = ai_config or {}
-    client = _get_client(api_key=cfg.get("api_key"), base_url=cfg.get("base_url"))
-    model = cfg.get("model") or settings.AI_MODEL
 
     evidence_str = json.dumps(finding.evidence or {}, indent=2)
 
@@ -232,14 +228,9 @@ Respond with this exact JSON (no other text):
 }}"""
 
     try:
-        response = await _call_with_retry(
-            client,
-            model=model,
-            max_tokens=settings.AI_MAX_TOKENS,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_message}],
+        text = await _call_llm_with_retry(
+            cfg, system_prompt, [{"role": "user", "content": user_message}], settings.AI_MAX_TOKENS,
         )
-        text = response.content[0].text.strip()
         # Strip markdown code fences if present
         if text.startswith("```"):
             text = text.split("```")[1]
@@ -282,8 +273,6 @@ async def nl_to_filter(query: str, schema: dict, ai_config: dict | None = None) 
         Structured filter dict matching AssetFilter or FindingFilter schema.
     """
     cfg = ai_config or {}
-    client = _get_client(api_key=cfg.get("api_key"), base_url=cfg.get("base_url"))
-    model = cfg.get("model") or settings.AI_MODEL
 
     system_prompt = (
         "You are a search query parser for a security platform. "
@@ -318,14 +307,7 @@ Return {{}} if the query is too vague or matches no schema fields.
 Respond with ONLY the JSON object."""
 
     try:
-        response = await _call_with_retry(
-            client,
-            model=model,
-            max_tokens=512,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_message}],
-        )
-        text = response.content[0].text.strip()
+        text = await _call_llm_with_retry(cfg, system_prompt, [{"role": "user", "content": user_message}], 512)
         # Strip markdown fences if Claude wrapped the response
         if text.startswith("```"):
             text = text.split("```")[1]

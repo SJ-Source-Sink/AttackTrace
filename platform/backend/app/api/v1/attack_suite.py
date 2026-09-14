@@ -955,16 +955,8 @@ async def _ai_plan_attack(target: str, tech_stack: list[str],
     Raises any Anthropic API exception so the caller can emit a proper SSE error event.
     """
     cfg = ai_config or {}
-    effective_key = cfg.get("api_key") or settings.ANTHROPIC_API_KEY
-    if not effective_key:
+    if cfg.get("provider", "anthropic") != "qwen" and not (cfg.get("api_key") or settings.ANTHROPIC_API_KEY):
         raise RuntimeError("ANTHROPIC_API_KEY is not configured")
-
-    import anthropic
-    client_kwargs: dict = {"api_key": effective_key}
-    if cfg.get("base_url") or settings.AI_BASE_URL:
-        client_kwargs["base_url"] = cfg.get("base_url") or settings.AI_BASE_URL
-    ac = anthropic.AsyncAnthropic(**client_kwargs)
-    model = cfg.get("model") or settings.AI_MODEL
 
     system_prompt = (
         "You are an expert penetration tester and bug bounty hunter operating the Hunt "
@@ -990,42 +982,28 @@ Provide:
 
 Max 250 words. Be specific — reference actual endpoints and tech detected above."""
 
-    msg = await ac.messages.create(
-        model=model,
-        max_tokens=500,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-    return msg.content[0].text.strip()
+    from app.services import llm_client
+    return await llm_client.complete(cfg, system_prompt, [{"role": "user", "content": user_prompt}], 500)
 
 
 async def _ai_analyze_finding(finding: dict, target: str, ai_config: dict | None = None) -> str:
     """Use Claude to deeply analyze a specific finding and suggest exploitation steps."""
     cfg = ai_config or {}
-    effective_key = cfg.get("api_key") or settings.ANTHROPIC_API_KEY
-    if not effective_key:
+    if cfg.get("provider", "anthropic") != "qwen" and not (cfg.get("api_key") or settings.ANTHROPIC_API_KEY):
         return ""
 
-    import anthropic
-    client_kwargs: dict = {"api_key": effective_key}
-    if cfg.get("base_url") or settings.AI_BASE_URL:
-        client_kwargs["base_url"] = cfg.get("base_url") or settings.AI_BASE_URL
-    ac = anthropic.AsyncAnthropic(**client_kwargs)
-    model = cfg.get("model") or settings.AI_MODEL
-
-    msg = await ac.messages.create(
-        model=model,
-        max_tokens=200,
-        messages=[{"role": "user", "content": (
+    from app.services import llm_client
+    try:
+        return await llm_client.complete(cfg, None, [{"role": "user", "content": (
             f"Security finding on {target}:\n"
             f"Title: {finding.get('title')}\n"
             f"Severity: {finding.get('severity')}\n"
             f"Evidence: {str(finding.get('evidence', ''))[:300]}\n\n"
             "In 2-3 sentences: what is the real-world impact and what is the fastest "
             "exploitation path? Reference any relevant Hunt Harness technique."
-        )}],
-    )
-    return msg.content[0].text.strip()
+        )}], 200)
+    except llm_client.LLMConfigError:
+        return ""
 
 
 # ── Module: Security Headers ──────────────────────────────────────────────────
@@ -6151,14 +6129,10 @@ async def analyze_burp_file(
         raise HTTPException(status_code=413, detail="File too large — maximum 500 MB")
 
     ai_config = await get_org_ai_config(org_id, db)
-    api_key = ai_config.get("api_key") or ""
-    base_url = ai_config.get("base_url")
-    model = ai_config.get("model") or settings.AI_MODEL
 
     return StreamingResponse(
         run_burp_analysis(
-            content, ai_analysis, api_key,
-            base_url=base_url, model=model,
+            content, ai_analysis, ai_config,
             org_id=str(org_id),
             filename=file.filename or "burp_history.xml",
         ),
