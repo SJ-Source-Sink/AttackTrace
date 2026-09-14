@@ -606,6 +606,7 @@ def _persist_module_results_partial(
                 new_finding = DBFinding(
                     org_id=org_id,
                     scan_job_id=scan_job_uuid,
+                    asset_id=_resolve_asset_id_sync(db_session, org_id, f.affected_asset or ""),
                     title=(f.title or "")[:1000],
                     description=f.description,
                     severity=FindingSeverity(sev_value),
@@ -695,6 +696,55 @@ def _upsert_asset(db_session, **kwargs):
         set_=update_cols,
     )
     db_session.execute(stmt)
+
+
+def _extract_hostname_sync(affected_asset: str) -> Optional[str]:
+    """Sync-context twin of app.services.asset_upsert._extract_hostname —
+    duplicated rather than imported since this file's persist functions run
+    on a sync SQLAlchemy session (Celery context) and that helper's sibling
+    resolve_asset_id is async. Kept in sync (heh) manually; it's a tiny pure
+    function so the duplication is low-risk."""
+    if not affected_asset:
+        return None
+    value = affected_asset.strip()
+    if "://" in value:
+        from urllib.parse import urlparse
+        try:
+            host = urlparse(value).hostname
+        except ValueError:
+            host = None
+        return host.lower() if host else None
+    candidate = value.split("/")[0].split(":")[0].strip().lower()
+    if not candidate or " " in candidate or "." not in candidate:
+        return None
+    return candidate
+
+
+def _resolve_asset_id_sync(db_session, org_id: UUID, affected_asset: str) -> Optional[UUID]:
+    """Sync-context best-effort Finding.affected_asset -> Asset.id lookup —
+    see app.services.asset_upsert.resolve_asset_id for the full rationale
+    (no scanner links findings to Asset rows today, which silently breaks
+    the Asset detail page's finding list and the correlation engine's
+    asset-grouping). Read-only, never creates an Asset."""
+    # Asset.value is only unique per (org_id, value, asset_type) — the same
+    # string can legitimately exist as more than one asset_type row, so this
+    # must tolerate multiple matches (`.limit(1)`) rather than assume at
+    # most one.
+    from sqlalchemy import select as _select
+    from app.models.db.asset import Asset
+    if not affected_asset:
+        return None
+    exact = db_session.execute(
+        _select(Asset.id).where(Asset.org_id == org_id, Asset.value == affected_asset.strip()).limit(1)
+    ).scalar_one_or_none()
+    if exact:
+        return exact
+    host = _extract_hostname_sync(affected_asset)
+    if not host:
+        return None
+    return db_session.execute(
+        _select(Asset.id).where(Asset.org_id == org_id, Asset.value == host).limit(1)
+    ).scalar_one_or_none()
 
 
 def _persist_session_results(db_session, scan_job, attacktrace_session, org_id: UUID, org_sla_config: Optional[dict] = None) -> tuple:
@@ -797,6 +847,7 @@ def _persist_session_results(db_session, scan_job, attacktrace_session, org_id: 
             new_finding = DBFinding(
                 org_id=org_id,
                 scan_job_id=scan_job.id,
+                asset_id=_resolve_asset_id_sync(db_session, org_id, f.affected_asset or ""),
                 title=(f.title or "")[:1000],
                 description=f.description,
                 severity=FindingSeverity(sev_value),

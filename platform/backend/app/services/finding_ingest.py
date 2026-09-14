@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dedup import compute_dedup_hash
 from app.models.db.finding import Finding, FindingSeverity, FindingStatus
+from app.services.asset_upsert import resolve_asset_id
 from app.services.notification_service import dispatch_notifications
 
 logger = logging.getLogger(__name__)
@@ -99,9 +100,11 @@ async def ingest_findings(
             evidence = {"raw": evidence}
 
         if existing is None:
+            asset_id = await resolve_asset_id(db, org_id, affected_asset)
             new_finding = Finding(
                 org_id=org_id,
                 scan_job_id=None,
+                asset_id=asset_id,
                 source=source,
                 source_scan_id=source_scan_id,
                 title=title,
