@@ -275,8 +275,9 @@ async def _run_exposure_scan(
     custom_paths: list[str],
     db: AsyncSession,
     org_id: str | None = None,
+    scan_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
-    scan_id = str(_uuid_mod.uuid4())
+    scan_id = scan_id or str(_uuid_mod.uuid4())
     started_at = datetime.now(timezone.utc).isoformat()
     base = target.rstrip("/")
 
@@ -435,8 +436,10 @@ async def run_exposure_scan(
         )
     raw = payload.target.strip()
     normalized = raw if raw.startswith(("http://", "https://")) else f"https://{raw}"
+    scan_id = str(_uuid_mod.uuid4())
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _run_exposure_scan(
+        tee_scan_activity(org_id, "exposure_scanner", normalized, scan_id, _run_exposure_scan(
             target=normalized,
             check_git=payload.check_git,
             check_env=payload.check_env,
@@ -449,7 +452,8 @@ async def run_exposure_scan(
             custom_paths=payload.custom_paths,
             org_id=str(org_id),
             db=db,
-        ),
+            scan_id=scan_id,
+        )),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

@@ -621,8 +621,9 @@ async def run_ffuf_scan(
     db.add(log)
     await db.commit()
 
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _stream_ffuf(scan_id, payload, wordlist, request, org_id, db),
+        tee_scan_activity(org_id, "ffuf", payload.url, scan_id, _stream_ffuf(scan_id, payload, wordlist, request, org_id, db)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

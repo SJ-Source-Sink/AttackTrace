@@ -370,8 +370,9 @@ async def run_attackmapper_scan(
             detail="attackmapper is not installed on this server",
         )
     scan_id = str(uuid.uuid4())
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _stream_attackmapper(scan_id, payload, org_id),
+        tee_scan_activity(org_id, "attackmapper", payload.infrastructure_type, scan_id, _stream_attackmapper(scan_id, payload, org_id)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

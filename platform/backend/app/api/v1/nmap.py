@@ -522,8 +522,9 @@ async def run_nmap_scan(
     db.add(log)
     await db.commit()
 
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _stream_nmap(scan_id, payload, request, org_id, db),
+        tee_scan_activity(org_id, "nmap", payload.target, scan_id, _stream_nmap(scan_id, payload, request, org_id, db)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

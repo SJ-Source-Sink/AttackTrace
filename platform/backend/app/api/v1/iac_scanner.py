@@ -721,8 +721,10 @@ async def scan_iac(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No files provided")
 
     scan_id = str(_uuid_mod.uuid4())
+    target = ", ".join(f.filename for f in files if f.filename) or f"{len(files)} file(s)"
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _scan_generator(files, iac_type, severity_threshold, org_id, scan_id),
+        tee_scan_activity(org_id, "iac_scanner", target, scan_id, _scan_generator(files, iac_type, severity_threshold, org_id, scan_id)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

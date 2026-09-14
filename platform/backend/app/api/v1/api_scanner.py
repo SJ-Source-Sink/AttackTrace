@@ -479,8 +479,9 @@ async def scan_api(
     Runs OWASP API Top 10 checks against the target API base URL.
     Returns an SSE stream of findings.
     """
+    scan_id = str(_uuid_mod.uuid4())
+
     async def _stream() -> AsyncGenerator[str, None]:
-        scan_id = str(_uuid_mod.uuid4())
         started_at = datetime.now(timezone.utc).isoformat()
 
         yield _sse("start", {
@@ -591,8 +592,9 @@ async def scan_api(
             "status": "completed",
         })
 
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _stream(),
+        tee_scan_activity(org_id, "api_scanner", payload.target_url, scan_id, _stream()),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

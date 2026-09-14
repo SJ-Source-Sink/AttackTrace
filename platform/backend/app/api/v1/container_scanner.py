@@ -892,8 +892,8 @@ def _build_summary(findings: list[dict], scan_type: str, target: str) -> dict:
 
 # ── Route dispatcher ──────────────────────────────────────────────────────────
 
-async def _run_container_scan(req: ContainerScanRequest, org_id: str, db: AsyncSession) -> AsyncGenerator[str, None]:
-    scan_id = str(_uuid_mod.uuid4())
+async def _run_container_scan(req: ContainerScanRequest, org_id: str, db: AsyncSession, scan_id: str | None = None) -> AsyncGenerator[str, None]:
+    scan_id = scan_id or str(_uuid_mod.uuid4())
     started_at = datetime.now(timezone.utc).isoformat()
 
     if req.scan_type == "kubernetes_api":
@@ -975,8 +975,11 @@ async def run_scan(
     req: ContainerScanRequest, org_id: OrgID, _: CurrentUser, db: AsyncSession = Depends(get_db)
 ) -> StreamingResponse:
     """Start a container/Kubernetes security scan. Returns Server-Sent Events."""
+    scan_id = str(_uuid_mod.uuid4())
+    target = req.image or req.k8s_api_url or req.registry_url or req.scan_type
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _run_container_scan(req, org_id, db),
+        tee_scan_activity(org_id, "container_scanner", target, scan_id, _run_container_scan(req, org_id, db, scan_id=scan_id)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

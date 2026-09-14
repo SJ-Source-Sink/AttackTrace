@@ -1948,8 +1948,9 @@ async def scan_js(
             detail="target is required",
         )
     scan_id = str(_uuid.uuid4())
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _safe_js_scan(payload, scan_id=scan_id, org_id=str(org_id), db=db),
+        tee_scan_activity(org_id, "js_scanner", payload.target, scan_id, _safe_js_scan(payload, scan_id=scan_id, org_id=str(org_id), db=db)),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

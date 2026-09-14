@@ -1096,8 +1096,9 @@ async def scan_takeover(
 
     scan_id = str(uuid.uuid4())
 
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _stream_takeover_scan(scan_id, req, current_user.email, org_id, db),
+        tee_scan_activity(org_id, "takeover", ", ".join(req.targets), scan_id, _stream_takeover_scan(scan_id, req, current_user.email, org_id, db)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -1392,8 +1392,9 @@ async def probe_waf_bypass(
     db.add(log)
     await db.commit()
 
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _stream_bypass(scan_id, payload, org_id, db),
+        tee_scan_activity(org_id, "firewall_waf_bypass", payload.target, scan_id, _stream_bypass(scan_id, payload, org_id, db)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -2023,8 +2024,9 @@ async def port_firewall_map(
     db.add(log)
     await db.commit()
 
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _stream_port_map(scan_id, payload, org_id, db),
+        tee_scan_activity(org_id, "firewall_port_map", payload.target, scan_id, _stream_port_map(scan_id, payload, org_id, db)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -2912,8 +2914,9 @@ async def probe_rate_limit(
     db.add(log)
     await db.commit()
 
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _stream_rate_limit(scan_id, payload, org_id, db),
+        tee_scan_activity(org_id, "firewall_rate_limit", payload.target, scan_id, _stream_rate_limit(scan_id, payload, org_id, db)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -3177,8 +3180,9 @@ async def probe_smuggling(
     db.add(log)
     await db.commit()
 
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _stream_smuggling(scan_id, payload, org_id, db),
+        tee_scan_activity(org_id, "firewall_smuggling", payload.target, scan_id, _stream_smuggling(scan_id, payload, org_id, db)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -4318,10 +4322,11 @@ async def _run_physical_scan(
     include_cve_probes: bool,
     org_id: uuid.UUID,
     db: AsyncSession,
+    scan_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Master scan orchestrator — runs all phases and streams SSE events."""
 
-    scan_id = str(uuid.uuid4())
+    scan_id = scan_id or str(uuid.uuid4())
     started_at = datetime.now(timezone.utc).isoformat()
 
     # Define port sets by scan mode
@@ -4597,8 +4602,10 @@ async def physical_firewall_scan(
     org_id: uuid.UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
+    scan_id = str(uuid.uuid4())
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _run_physical_scan(
+        tee_scan_activity(org_id, "firewall_physical", payload.target, scan_id, _run_physical_scan(
             payload.target,
             payload.scan_mode,
             payload.include_snmp,
@@ -4606,7 +4613,8 @@ async def physical_firewall_scan(
             payload.include_cve_probes,
             org_id,
             db,
-        ),
+            scan_id=scan_id,
+        )),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

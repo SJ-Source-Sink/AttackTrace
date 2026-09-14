@@ -1221,8 +1221,9 @@ async def _run_ai_scan(
     llm_grader_key: dict | None,
     org_id: str | None = None,
     db: AsyncSession | None = None,
+    scan_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
-    scan_id = str(_uuid_mod.uuid4())
+    scan_id = scan_id or str(_uuid_mod.uuid4())
     started_at = datetime.now(timezone.utc).isoformat()
     target = target_url.rstrip("/")
     yield _sse("start", {"target": target, "probes": len(AI_ENDPOINTS), "scan_id": scan_id})
@@ -1673,8 +1674,10 @@ async def scan_ai_endpoints(
         grader_config = {**ai_config, "provider": "anthropic", "api_key": override_key}
     else:
         grader_config = None
+    scan_id = str(_uuid_mod.uuid4())
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _run_ai_scan(
+        tee_scan_activity(org_id, "ai_scanner", payload.resolved_target, scan_id, _run_ai_scan(
             payload.resolved_target,
             payload.test_plugins,
             payload.timeout,
@@ -1685,7 +1688,8 @@ async def scan_ai_endpoints(
             llm_grader_key=grader_config,
             org_id=str(org_id),
             db=db,
-        ),
+            scan_id=scan_id,
+        )),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

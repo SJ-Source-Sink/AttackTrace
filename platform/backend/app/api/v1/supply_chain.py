@@ -923,8 +923,10 @@ async def scan_supply_chain(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No files provided")
 
     scan_id = str(_uuid_mod.uuid4())
+    target = ", ".join(f.filename for f in files if f.filename) or f"{len(files)} file(s)"
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _scan_generator(files, str(org_id), scan_id, db),
+        tee_scan_activity(org_id, "supply_chain", target, scan_id, _scan_generator(files, str(org_id), scan_id, db)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -974,8 +974,9 @@ async def run_secret_scan(
 
     scan_id = str(_uuid_mod.uuid4())
 
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _stream_secret_scan(scan_id, str(org_id), payload, request, db),
+        tee_scan_activity(org_id, "secrets", payload.target, scan_id, _stream_secret_scan(scan_id, str(org_id), payload, request, db)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

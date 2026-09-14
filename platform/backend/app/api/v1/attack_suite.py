@@ -6141,8 +6141,9 @@ async def run_attack_suite(
     from app.services.ai_service import get_org_ai_config
     ai_config = await get_org_ai_config(org_id, db)
     scan_id = str(uuid.uuid4())
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _stream_attack_suite(scan_id, payload, org_id, db=db, ai_config=ai_config),
+        tee_scan_activity(org_id, "attack_suite", payload.target, scan_id, _stream_attack_suite(scan_id, payload, org_id, db=db, ai_config=ai_config)),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
                  "X-Accel-Buffering": "no"},

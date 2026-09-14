@@ -1029,8 +1029,9 @@ async def scan_mcp_server(
             detail="target or target_url is required",
         )
     scan_id = str(_uuid.uuid4())
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _run_mcp_scan(
+        tee_scan_activity(org_id, "mcp_scanner", payload.resolved_target, scan_id, _run_mcp_scan(
             payload.resolved_target,
             payload.timeout,
             payload.check_sse,
@@ -1038,7 +1039,7 @@ async def scan_mcp_server(
             db,
             scan_id=scan_id,
             org_id=str(org_id),
-        ),
+        )),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

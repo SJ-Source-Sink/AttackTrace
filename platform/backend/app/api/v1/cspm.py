@@ -1336,8 +1336,9 @@ async def start_scan(
 
     scan_id = str(_uuid_mod.uuid4())
 
+    from app.services.scan_activity import tee_scan_activity
     return StreamingResponse(
-        _cspm_stream(scan_id, req, str(org_id), db),
+        tee_scan_activity(org_id, "cspm", req.provider, scan_id, _cspm_stream(scan_id, req, str(org_id), db)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
