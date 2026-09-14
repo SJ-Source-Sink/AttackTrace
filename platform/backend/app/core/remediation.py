@@ -3,7 +3,8 @@ Shared remediation-text lookup for scanners that don't already have their own
 (cspm.py, takeover.py, container_scanner.py, firewall.py, mcp_scanner.py, and
 supply_chain.py all have good per-check remediation dicts already — call those
 directly rather than this module). This exists for secrets.py, exposure_scanner.py,
-and email_security.py, which had none.
+email_security.py, and the core orchestrated scan pipeline (scan_worker.py),
+none of which had any.
 
 Lookup order in get_remediation(): exact category key, then a substring match
 against _KEYWORD_REMEDIATION (for scanners whose finding titles are dynamic
@@ -63,6 +64,23 @@ _KEYWORD_REMEDIATION: list[tuple[str, str]] = [
     ("does not advertise STARTTLS", "Enable STARTTLS on the mail server so mail in transit is encrypted rather than sent in plaintext."),
     ("Lookalike domain registered", "Consider registering common lookalike/typosquat variants defensively, and monitor them for phishing use against your users."),
     ("Domain found in breach", "Notify affected users if credentials were exposed, force a password reset for accounts using this domain, and review the breach for what data was exposed."),
+
+    # Core scan pipeline (scan_worker.py) — dynamic per-host/per-check titles,
+    # same reason as email_security.py above: no fixed check-id to key off of.
+    ("Missing HSTS header", "Add the Strict-Transport-Security response header (e.g. `max-age=31536000; includeSubDomains; preload`) so browsers refuse to downgrade this site to plain HTTP even if a user types or follows an http:// link."),
+    ("Missing security headers", "Add the missing headers listed in this finding's evidence: Strict-Transport-Security (enforce HTTPS), Content-Security-Policy (restrict script/resource origins), X-Content-Type-Options: nosniff, X-Frame-Options (or frame-ancestors in CSP) to prevent clickjacking, Referrer-Policy, and Permissions-Policy to disable unneeded browser features."),
+    ("FTP exposed", "FTP transmits credentials and data in plaintext. Disable it if unused, or migrate to SFTP/FTPS, and restrict access to specific source IPs at the firewall in the meantime."),
+    ("SMTP exposed", "Confirm this SMTP service requires authentication and doesn't allow open relay (test with a relay-check tool); restrict access to known mail infrastructure IPs if it isn't meant to be publicly reachable."),
+    ("Webmin exposed", "Webmin has a history of critical CVEs (including unauthenticated RCE) and should not be internet-facing — restrict access to a VPN/bastion or an IP allowlist, and confirm it's patched to the latest version."),
+    ("GitHub organization found", "Review every public repository under this GitHub organization for committed secrets, internal documentation, or infrastructure details, and confirm each repo is intentionally public."),
+    ("employee emails from GitHub", "These addresses were harvested from public commit metadata. Consider a no-reply/generic commit email policy for the organization, and rotate any credentials that may have been committed by the same authors."),
+    ("email address(es) for", "Discovered email addresses expand the phishing/credential-stuffing attack surface. No immediate action is required if these are already-expected public contacts, but ensure they aren't tied to privileged accounts without MFA."),
+    ("employee name", "Publicly discoverable employee names/roles aid targeted phishing and pretexting. Ensure staff handling sensitive functions (finance, IT admin) are aware and MFA is enforced org-wide."),
+    ("Email pattern detected", "A predictable {first}{last}@domain.com pattern lets an attacker enumerate likely-valid addresses for phishing. Not fixable outright, but pair with strong MFA and phishing awareness training."),
+    ("GCP bucket discovered", "Verify this bucket's IAM policy does not grant allUsers/allAuthenticatedUsers read or write access, and confirm nothing sensitive is stored in a publicly-listable bucket."),
+    ("Large subdomain footprint", "A large subdomain footprint increases the attack surface and the chance of a forgotten, unpatched, or misconfigured host. Inventory all subdomains against known-owned services and decommission or consolidate any that are no longer needed."),
+    ("Development/staging environments exposed", "Restrict access to development/staging hosts to a VPN, corporate IP allowlist, or authentication gateway — they typically run with weaker security controls (debug mode, verbose errors, test data or credentials) than production and should never be reachable directly from the internet."),
+    ("High number of open ports", "Audit every listening service against what's actually required; close or firewall off anything not intentionally exposed. The original scan did not retain a per-port breakdown — re-run the Nmap Scanner against this target for a current, detailed port/service list to act on."),
 ]
 
 _GENERIC_FALLBACK = "Review this finding against your organization's security baseline and remediate the underlying misconfiguration or exposure."

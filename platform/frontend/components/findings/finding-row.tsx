@@ -9,6 +9,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { StatusWorkflow } from "@/components/findings/status-workflow";
+import { EvidenceBlock } from "@/components/findings/evidence-block";
 import { SeverityBadge } from "@/components/findings/severity-badge";
 import { ConfidenceBadge } from "@/components/findings/confidence-badge";
 import { KevBadge } from "@/components/findings/kev-badge";
@@ -40,58 +41,6 @@ const SEV_ACCENT: Record<string, string> = {
 };
 
 // Evidence can be a string, a dict {file,line,snippet}, or an array of evidence objects
-function EvidenceBlock({ evidence }: { evidence: unknown }) {
-  if (!evidence) return null;
-
-  // Array of legacy FindingEvidence objects from AttackTrace
-  if (Array.isArray(evidence)) {
-    return (
-      <div className="space-y-2">
-        {(evidence as Array<{ title?: string; content?: string; url?: string }>).map((e, i) => (
-          <div key={i} className="bg-zinc-950 rounded-md border border-zinc-800 overflow-hidden">
-            {e.title && (
-              <p className="text-xs text-zinc-500 px-3 pt-2 pb-1 border-b border-zinc-800 font-medium">{e.title}</p>
-            )}
-            {e.url && (
-              <a href={e.url} target="_blank" rel="noopener noreferrer"
-                className="text-xs text-blue-400 hover:underline px-3 py-1 flex items-center gap-1">
-                {e.url} <ExternalLink className="h-2.5 w-2.5" />
-              </a>
-            )}
-            {e.content && (
-              <pre className="p-3 text-xs text-zinc-300 font-mono overflow-x-auto whitespace-pre-wrap">{e.content}</pre>
-            )}
-          </div>
-        ))}
-      </div>
-    );
-  }
-
-  // MSRA-style: {file, line, snippet}
-  if (typeof evidence === "object") {
-    const ev = evidence as { file?: string; line?: number; snippet?: string };
-    return (
-      <div className="bg-zinc-950 rounded-md border border-zinc-800 overflow-hidden">
-        {ev.file && (
-          <p className="text-xs text-zinc-500 font-mono px-3 pt-2 pb-1 border-b border-zinc-800 truncate">
-            {ev.file}
-            {ev.line != null && <span className="text-zinc-600">:{ev.line}</span>}
-          </p>
-        )}
-        <pre className="p-3 text-xs text-zinc-300 font-mono overflow-x-auto whitespace-pre-wrap">
-          {ev.snippet ?? ""}
-        </pre>
-      </div>
-    );
-  }
-
-  // Plain string
-  return (
-    <pre className="bg-zinc-950 rounded-md p-3 text-xs text-zinc-300 font-mono overflow-x-auto border border-zinc-800 whitespace-pre-wrap">
-      {String(evidence)}
-    </pre>
-  );
-}
 
 interface FindingRowProps {
   finding: Finding;

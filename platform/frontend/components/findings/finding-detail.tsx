@@ -21,12 +21,6 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
-  Accordion,
-  AccordionContent,
-  AccordionItem,
-  AccordionTrigger,
-} from "@/components/ui/accordion";
-import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -43,6 +37,7 @@ import {
 } from "@/components/ui/dialog";
 import { SeverityBadge } from "@/components/findings/severity-badge";
 import { StatusWorkflow } from "@/components/findings/status-workflow";
+import { EvidenceBlock } from "@/components/findings/evidence-block";
 import { FindingComments } from "@/components/findings/finding-comments";
 import { severityBgColor, formatDate, capitalize } from "@/lib/utils";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -302,45 +297,18 @@ export function FindingDetail({ finding, onClose }: FindingDetailProps) {
             </div>
           )}
 
-          {/* Evidence */}
-          {finding.evidence.length > 0 && (
+          {/* Evidence — finding.evidence is a dict at the API level (see
+              backend FindingResponse.evidence: Optional[dict]), not an
+              array; EvidenceBlock handles every shape actually produced. */}
+          {finding.evidence && (
             <div>
               <h3 className="flex items-center gap-2 text-sm font-semibold text-zinc-300 mb-3">
                 <FileText className="h-4 w-4 text-zinc-400" />
                 Evidence
               </h3>
-              <Accordion type="multiple" className="space-y-1">
-                {finding.evidence.map((ev, idx) => (
-                  <AccordionItem
-                    key={idx}
-                    value={`evidence-${idx}`}
-                    className="border border-zinc-800 rounded-lg overflow-hidden"
-                  >
-                    <AccordionTrigger className="px-4 py-3 hover:no-underline hover:bg-zinc-800/40">
-                      <span className="text-sm font-medium text-zinc-300">{ev.title}</span>
-                    </AccordionTrigger>
-                    <AccordionContent className="px-4 pb-4">
-                      {ev.url && (
-                        <a
-                          href={ev.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-xs text-blue-400 hover:underline mb-2"
-                        >
-                          {ev.url}
-                          <ExternalLink className="h-3 w-3" />
-                        </a>
-                      )}
-                      <pre className="text-xs text-zinc-400 font-mono bg-zinc-950 p-3 rounded-md overflow-x-auto whitespace-pre-wrap">
-                        {ev.content}
-                      </pre>
-                    </AccordionContent>
-                  </AccordionItem>
-                ))}
-              </Accordion>
+              <EvidenceBlock evidence={finding.evidence} />
             </div>
           )}
-
           {/* References */}
           {finding.references.length > 0 && (
             <div>

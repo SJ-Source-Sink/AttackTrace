@@ -346,7 +346,9 @@ export interface Finding {
   cve_id?: string;
   cvss_score?: number;
   cwe_id?: string;
-  evidence: FindingEvidence[];
+  // A dict at the API level (backend FindingResponse.evidence: Optional[dict]),
+  // shape varies by scanner — rendered by components/findings/evidence-block.tsx.
+  evidence: Record<string, unknown> | null;
   ai_triage?: FindingAITriage;
   remediation_steps: string[];
   references: string[];
