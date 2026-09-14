@@ -297,7 +297,11 @@ export type FindingCategory =
   | "open_port"
   | "cloud_misconfiguration"
   | "subdomain_takeover"
-  | "exposed_secret";
+  | "exposed_secret"
+  // Standalone Secrets Scanner tool (app/api/v1/secrets.py) uses this
+  // category instead of "exposed_secret" — kept distinct from it in the
+  // data, so both values need handling wherever "exposed_secret" is checked.
+  | "secrets";
 
 export interface FindingEvidence {
   type: "screenshot" | "request_response" | "code_snippet" | "log" | "raw";
@@ -650,7 +654,13 @@ export interface ScheduledScanListResponse {
 // ============================================================
 
 export type NotificationChannelType = "slack" | "jira" | "webhook" | "teams";
-export type NotificationEvent = "scan.completed" | "finding.critical" | "sla.breached";
+export type NotificationEvent =
+  | "scan.completed"
+  | "finding.critical"
+  | "sla.breached"
+  | "asset.discovered"
+  | "port.opened"
+  | "cert.expiring";
 
 export interface NotificationChannel {
   id: string;

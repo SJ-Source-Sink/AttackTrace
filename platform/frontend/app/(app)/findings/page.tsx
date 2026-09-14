@@ -2211,7 +2211,11 @@ export default function FindingsPage() {
         suppressed: false,
         kev_only: kevOnly || undefined,
         confidence: confidenceFilter || undefined,
-        category: secretsOnly ? "exposed_secret" : undefined,
+        // Backend matches this with `Finding.category.ilike(f"%{category}%")`, so
+        // "secret" (no trailing "s") substring-matches both the core-pipeline
+        // category ("exposed_secret") and the standalone Secrets Scanner's
+        // category ("secrets") without needing an exact-match/OR filter.
+        category: secretsOnly ? "secret" : undefined,
         overdue: overdueOnly || undefined,
         page,
         per_page: PER_PAGE,

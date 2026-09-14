@@ -23,6 +23,7 @@ celery_app = Celery(
         "app.workers.mobile_worker",
         "app.workers.maintenance_worker",
         "app.workers.easm_worker",
+        "app.workers.correlation_worker",
     ],
 )
 
@@ -48,6 +49,8 @@ celery_app.conf.update(
         "app.workers.mobile_worker.run_mobile_scan": {"queue": "scans"},
         "app.workers.maintenance_worker.expire_stale_suppressions": {"queue": "default"},
         "app.workers.easm_worker.diff_asset_surface": {"queue": "default"},
+        "app.workers.correlation_worker.correlate_after_scan": {"queue": "default"},
+        "app.workers.correlation_worker.correlate_all_orgs": {"queue": "default"},
     },
     task_default_queue="default",
     broker_connection_retry_on_startup=True,
@@ -83,6 +86,14 @@ celery_app.conf.update(
         },
         "diff-asset-surface-every-6h": {
             "task": "app.workers.easm_worker.diff_asset_surface",
+            "schedule": 21600.0,  # every 6 hours
+        },
+        "correlate-all-orgs-every-6h": {
+            # Catches correlations across findings from different scans/tools
+            # run at different times, not just within one scan's own batch
+            # (that case is covered by the post-scan correlate_after_scan
+            # trigger in scan_worker.py instead).
+            "task": "app.workers.correlation_worker.correlate_all_orgs",
             "schedule": 21600.0,  # every 6 hours
         },
     },

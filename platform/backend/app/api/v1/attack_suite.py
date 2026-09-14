@@ -37,7 +37,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_current_user, get_current_org_id, require_tool
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.core.remediation import get_remediation
 from app.models.db.user import User
+from app.services.finding_ingest import ingest_findings
 from app.services.waf_service import detect_waf, get_waf_bypass_payloads
 from app.api.v1.attack_patterns import (
     CORS_ATTACK_ORIGINS, CORS_SENSITIVE_PATHS, CORS_WILDCARD_API_PATHS,
@@ -5651,9 +5653,54 @@ async def _module_api_versioning(target: str, client: httpx.AsyncClient,
             await asyncio.sleep(0)
 
 
+def _adapt_attack_suite_findings(findings: list[dict]) -> list[dict]:
+    """Normalize classic Attack Suite findings (from `_finding()`) for
+    finding_ingest.ingest_findings.
+
+    Each finding already carries a specific, per-check remediation string
+    written inline at the point of detection (e.g. "HTML-encode all
+    user-supplied input..." for reflected XSS) — that's real, non-generic
+    guidance and takes priority. `get_remediation()` is only a defensive
+    fallback for the rare case a finding somehow has no remediation text
+    (e.g. a future module that forgets to pass one).
+
+    `is_vulnerable=False` entries (informational probes like
+    "header_based_versioning") are still forwarded — ingest_findings itself
+    drops anything with severity="info", which covers nearly all of them.
+    """
+    adapted = []
+    for f in findings:
+        module = f.get("module", "attack_suite")
+        title = f.get("title", "Untitled finding")
+        remediation = f.get("remediation") or get_remediation(category=f"attack-suite-{module}", title=title)
+        description = f.get("description", "")
+        ai_note = f.get("ai_analysis")
+        if ai_note:
+            description = f"{description}\n\nAI deep-analysis: {ai_note}"
+        adapted.append({
+            "title": title,
+            "description": description,
+            "severity": f.get("severity", "info"),
+            "category": f"attack-suite-{module}",
+            "affected_asset": f.get("url", ""),
+            "evidence": {
+                "raw": f.get("evidence", ""),
+                "test_name": f.get("test_name"),
+                "module": module,
+                "is_vulnerable": f.get("is_vulnerable", False),
+                "ai_analysis": ai_note,
+            },
+            "remediation": remediation,
+            "confidence": f.get("confidence", "medium"),
+        })
+    return adapted
+
+
 # ── Main Stream ───────────────────────────────────────────────────────────────
 
-async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, org_id: UUID, ai_config: dict | None = None) -> AsyncGenerator[str, None]:
+async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, org_id: UUID,
+                                db: AsyncSession | None = None,
+                                ai_config: dict | None = None) -> AsyncGenerator[str, None]:
     start_time = time.monotonic()
     findings: list[dict] = []
     counts: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
@@ -6016,6 +6063,18 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, org_id: UU
         "findings": findings, "counts": counts, "duration_seconds": duration,
     })
 
+    # Land results in the shared Finding table so they show up in the main
+    # Findings list, Dashboard risk score, and reports — this scanner used to
+    # only ever live in the in-memory _scan_history dict.
+    if db is not None and findings:
+        try:
+            adapted = _adapt_attack_suite_findings(findings)
+            await ingest_findings(db, org_id, source="attack_suite", source_scan_id=scan_id, findings=adapted)
+            await db.commit()
+        except Exception as e:
+            await db.rollback()
+            yield _sse("progress", {"message": f"Warning: failed to persist findings to database: {e}", "module": "ingest"})
+
     yield _sse("complete", {
         "scan_id": scan_id, "total_findings": len(findings),
         "counts": counts, "duration_seconds": duration,
@@ -6081,7 +6140,7 @@ async def run_attack_suite(
     ai_config = await get_org_ai_config(org_id, db)
     scan_id = str(uuid.uuid4())
     return StreamingResponse(
-        _stream_attack_suite(scan_id, payload, org_id, ai_config=ai_config),
+        _stream_attack_suite(scan_id, payload, org_id, db=db, ai_config=ai_config),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
                  "X-Accel-Buffering": "no"},

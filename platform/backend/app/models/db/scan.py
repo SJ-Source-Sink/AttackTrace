@@ -53,6 +53,10 @@ class ScanJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         # Composite index for status-filtered org scan list queries
         # (created by enterprise_hardening_001 migration)
         Index("idx_scan_org_status_created", "org_id", "status", "created_at"),
+        # Index for monthly scan-quota counts (org_id + created_at range,
+        # no status filter) — see app/services/scan_service.py::enforce_scan_quota
+        # and migration scan_jobs_org_created_001.
+        Index("idx_scan_jobs_org_created", "org_id", "created_at"),
     )
 
     org_id: Mapped[UUID] = mapped_column(

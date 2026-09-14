@@ -27,7 +27,9 @@ from app.api.v1.network_graph import router as network_graph_router
 from app.api.v1.schedules import router as schedules_router
 from app.api.v1.notifications import router as notifications_router
 from app.api.v1.cloud import router as cloud_router
-from app.api.v1.burp_analyzer import router as burp_analyzer_router
+# Note: burp_analyzer.py is imported directly (functions only) by attack_suite.py —
+# its own router is intentionally not mounted here; it declares an APIRouter but
+# has zero @router-decorated routes (dead refactor artifact).
 
 _log = logging.getLogger(__name__)
 
@@ -152,7 +154,6 @@ api_router.include_router(network_graph_router)
 api_router.include_router(schedules_router)
 api_router.include_router(notifications_router)
 api_router.include_router(cloud_router)
-api_router.include_router(burp_analyzer_router)
 
 if attackmapper_router:
     api_router.include_router(attackmapper_router)

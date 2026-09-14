@@ -4,7 +4,7 @@ import React, { useState, useCallback, useRef, useEffect } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   Zap, Play, Square, AlertCircle, CheckCircle2, ChevronDown,
-  ChevronRight, ExternalLink, History, Trash2, Settings2, Plus, X,
+  ChevronRight, ExternalLink, History, Trash2, Settings2, Plus, X, RotateCcw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -61,9 +61,13 @@ interface WordlistOption {
 interface ScanHistoryEntry {
   id: string;
   url: string;
-  results: FfufResult[];
+  wordlist?: string;
+  command?: string;
+  status?: string;
+  results?: FfufResult[];
   total: number;
   started_at: string;
+  completed_at?: string;
 }
 
 function ResultRow({ result }: { result: FfufResult }) {
@@ -125,17 +129,57 @@ export default function FfufPage() {
   const [statusMsg, setStatusMsg] = useState("");
   const [progressLog, setProgressLog] = useState<string[]>([]);
   const [runningWordlist, setRunningWordlist] = useState("");
-  const [scanHistory, setScanHistory] = useState<ScanHistoryEntry[]>(() => {
-    try {
-      const saved = typeof window !== "undefined" ? localStorage.getItem("ffuf_history") : null;
-      return saved ? JSON.parse(saved) : [];
-    } catch { return []; }
-  });
+  const [scanHistory, setScanHistory] = useState<ScanHistoryEntry[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [selectedHistoryScan, setSelectedHistoryScan] = useState<ScanHistoryEntry | null>(null);
 
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const res = await fetchWithAuth(`${API_BASE}/ffuf/history`);
+      if (res.ok) {
+        const data = await res.json();
+        setScanHistory(data.items ?? []);
+      }
+    } catch {
+      // silently ignore — history is best-effort
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    try { localStorage.setItem("ffuf_history", JSON.stringify(scanHistory.slice(0, 20))); } catch {}
-  }, [scanHistory]);
+    loadHistory();
+  }, [loadHistory]);
+
+  const selectHistoryEntry = useCallback(async (entry: ScanHistoryEntry) => {
+    if (selectedHistoryScan?.id === entry.id) {
+      setSelectedHistoryScan(null);
+      return;
+    }
+    try {
+      const res = await fetchWithAuth(`${API_BASE}/ffuf/history/${entry.id}`);
+      if (res.ok) {
+        const full = await res.json();
+        setSelectedHistoryScan(full);
+      }
+    } catch {
+      toast.error("Failed to load scan");
+    }
+  }, [selectedHistoryScan]);
+
+  const deleteHistoryEntry = useCallback(async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const res = await fetchWithAuth(`${API_BASE}/ffuf/history/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        setScanHistory((prev) => prev.filter((h) => h.id !== id));
+        if (selectedHistoryScan?.id === id) setSelectedHistoryScan(null);
+      }
+    } catch {
+      toast.error("Failed to delete scan");
+    }
+  }, [selectedHistoryScan]);
 
   const esRef = useRef<EventSource | null>(null);
   const currentScanIdRef = useRef<string | null>(null);
@@ -293,10 +337,8 @@ export default function FfufPage() {
             } else if (event === "complete") {
               setStatusMsg(`Done — ${payload.total} results found.`);
               setRunning(false);
-              setScanHistory((prev) => [
-                { id: scanId, url: url.trim(), results: localResults, total: localResults.length, started_at: new Date().toISOString() },
-                ...prev.slice(0, 19),
-              ]);
+              // Backend persists the completed scan to disk — just refresh the list.
+              loadHistory();
             } else if (event === "error") {
               toast.error("Scan error", { description: payload.message });
               setStatusMsg(`Error: ${payload.message}`);
@@ -322,9 +364,9 @@ export default function FfufPage() {
       setStatusMsg(`Error: ${msg}`);
       setRunning(false);
     }
-  }, [url, method, wordlist, wordlistMode, customWordlist, threads, timeout, followRedirects, recursion, recursionDepth, extensions, matchCodes, filterCodes, filterSize, postData, extraHeaders, running]);
+  }, [url, method, wordlist, wordlistMode, customWordlist, threads, timeout, followRedirects, recursion, recursionDepth, extensions, matchCodes, filterCodes, filterSize, postData, extraHeaders, running, loadHistory]);
 
-  const displayResults = selectedHistoryScan ? selectedHistoryScan.results : results;
+  const displayResults = selectedHistoryScan ? (selectedHistoryScan.results ?? []) : results;
 
   return (
     <div className="space-y-6">
@@ -621,41 +663,55 @@ export default function FfufPage() {
           </Card>
 
           {/* Scan History */}
-          {scanHistory.length > 0 && (
-            <Card>
-              <CardHeader className="pb-3">
-                <div className="flex items-center justify-between">
-                  <CardTitle className="text-sm flex items-center gap-2">
-                    <History className="h-4 w-4 text-zinc-500" />
-                    History
-                  </CardTitle>
-                  <button
-                    className="text-xs text-zinc-500 hover:text-red-400 transition-colors"
-                    onClick={() => { setScanHistory([]); setSelectedHistoryScan(null); localStorage.removeItem("ffuf_history"); }}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-1 p-3">
-                {scanHistory.map((s) => (
-                  <button
-                    key={s.id}
-                    className={cn(
-                      "w-full text-left rounded px-2 py-1.5 transition-colors text-xs",
-                      selectedHistoryScan?.id === s.id
-                        ? "bg-blue-600/10 text-blue-300 border border-blue-600/20"
-                        : "hover:bg-zinc-800 text-zinc-400"
-                    )}
-                    onClick={() => setSelectedHistoryScan(selectedHistoryScan?.id === s.id ? null : s)}
-                  >
-                    <div className="font-mono truncate">{s.url}</div>
-                    <div className="text-zinc-600 mt-0.5">{s.total} results</div>
-                  </button>
-                ))}
-              </CardContent>
-            </Card>
-          )}
+          <Card>
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <History className="h-4 w-4 text-zinc-500" />
+                  History
+                </CardTitle>
+                <button
+                  className="text-zinc-500 hover:text-zinc-300 transition-colors"
+                  onClick={loadHistory}
+                  disabled={historyLoading}
+                  title="Refresh"
+                >
+                  <RotateCcw className={cn("h-3.5 w-3.5", historyLoading && "animate-spin")} />
+                </button>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-1 p-3">
+              {historyLoading ? (
+                <p className="text-xs text-zinc-600 py-2 text-center">Loading...</p>
+              ) : scanHistory.length === 0 ? (
+                <p className="text-xs text-zinc-600 py-2 text-center">No scans yet</p>
+              ) : (
+                scanHistory.map((s) => (
+                  <div key={s.id} className="relative group">
+                    <button
+                      className={cn(
+                        "w-full text-left rounded px-2 py-1.5 pr-7 transition-colors text-xs",
+                        selectedHistoryScan?.id === s.id
+                          ? "bg-blue-600/10 text-blue-300 border border-blue-600/20"
+                          : "hover:bg-zinc-800 text-zinc-400"
+                      )}
+                      onClick={() => selectHistoryEntry(s)}
+                    >
+                      <div className="font-mono truncate">{s.url}</div>
+                      <div className="text-zinc-600 mt-0.5">{s.total} results</div>
+                    </button>
+                    <button
+                      onClick={(e) => deleteHistoryEntry(s.id, e)}
+                      className="absolute top-1.5 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded text-zinc-600 hover:text-red-400"
+                      title="Delete scan"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
         </div>
 
         {/* Results panel */}

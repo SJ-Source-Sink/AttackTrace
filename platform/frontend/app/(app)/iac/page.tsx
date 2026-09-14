@@ -219,7 +219,7 @@ function FileResultCard({ result }: { result: FileResult }) {
 
 // ── History Tab ────────────────────────────────────────────────────────────────
 
-function HistoryTab({ onRescan }: { onRescan: () => void }) {
+function HistoryTab({ onRestore }: { onRestore: (iacType: string) => void }) {
   const [scans, setScans] = useState<HistoryScan[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<FullHistoryScan | null>(null);
@@ -266,6 +266,17 @@ function HistoryTab({ onRescan }: { onRescan: () => void }) {
         <div className="flex items-center gap-3">
           <Button variant="ghost" size="sm" onClick={() => setSelected(null)} className="gap-1.5 text-zinc-400">
             <ArrowLeft className="h-4 w-4" /> Back to history
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="gap-1.5 ml-auto"
+            onClick={() => {
+              onRestore(selected.iac_type);
+              toast.info("IaC type restored — re-upload the files to rescan");
+            }}
+          >
+            <RotateCcw className="h-3.5 w-3.5" /> Restore to Scanner
           </Button>
         </div>
 
@@ -571,7 +582,13 @@ export default function IacScannerPage() {
       </div>
 
       {activeTab === "history" ? (
-        <HistoryTab onRescan={() => setActiveTab("scan")} />
+        <HistoryTab
+          onRestore={(type) => {
+            const validTypes: IacType[] = ["auto", "terraform", "kubernetes", "dockerfile", "cloudformation"];
+            if (validTypes.includes(type as IacType)) setIacType(type as IacType);
+            setActiveTab("scan");
+          }}
+        />
       ) : (
         <div className="space-y-6">
           {/* Config panel */}

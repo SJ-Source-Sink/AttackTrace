@@ -12,12 +12,13 @@ from typing import AsyncGenerator, Optional
 from uuid import UUID
 
 import redis.asyncio as aioredis
-from fastapi import Request
+from fastapi import HTTPException, Request, status
 from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models.db.audit import AuditLog
+from app.models.db.org import Organization
 from app.models.db.scan import ScanJob, ScanStatus, ScanIntensity
 from app.models.schemas.scan import ScanCreate, ScanResponse
 
@@ -50,6 +51,57 @@ def _get_redis() -> aioredis.Redis:
     return _redis
 
 
+async def get_monthly_scan_usage(db: AsyncSession, org_id: UUID) -> tuple[int, int]:
+    """
+    Return (scans_created_this_calendar_month, max_scans_per_month) for an org.
+
+    Calendar-month (not rolling 30-day) semantics: simpler to reason about
+    and matches typical plan/billing-cycle boundaries.
+    """
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    org = await db.get(Organization, org_id)
+    limit = org.max_scans_per_month if org is not None else 0
+
+    count_result = await db.execute(
+        select(func.count())
+        .select_from(ScanJob)
+        .where(ScanJob.org_id == org_id, ScanJob.created_at >= month_start)
+    )
+    used = count_result.scalar_one()
+    return used, limit
+
+
+async def enforce_scan_quota(db: AsyncSession, org_id: UUID) -> None:
+    """
+    Reject scan creation once an org has hit its Organization.max_scans_per_month
+    for the current calendar month, counted from ScanJob rows (the canonical
+    "a scan happened" record for the core pipeline).
+
+    Raises HTTPException(429) if at/over quota. No-ops if the org can't be
+    resolved (auth dependencies already guarantee a valid org in practice).
+    """
+    used, limit = await get_monthly_scan_usage(db, org_id)
+    if used >= limit:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": {
+                    "code": "SCAN_QUOTA_EXCEEDED",
+                    "message": (
+                        f"Monthly scan quota ({limit}) exceeded for this plan. "
+                        f"{used} of {limit} scans already used this calendar month; "
+                        f"0 remaining. Upgrade your plan or wait for the next billing cycle."
+                    ),
+                    "used": used,
+                    "limit": limit,
+                    "remaining": 0,
+                }
+            },
+        )
+
+
 async def create_scan(
     db: AsyncSession,
     org_id: UUID,
@@ -58,6 +110,8 @@ async def create_scan(
     ip_address: Optional[str] = None,
 ) -> ScanJob:
     """Create a ScanJob record and enqueue a Celery task."""
+    await enforce_scan_quota(db, org_id)
+
     workspace_id = UUID(payload.workspace_id) if payload.workspace_id else None
 
     job = ScanJob(

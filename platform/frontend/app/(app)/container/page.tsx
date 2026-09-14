@@ -4,7 +4,7 @@ import React, { useState, useRef, useCallback, useEffect } from "react";
 import {
   Container, Play, Square, CheckCircle2, AlertTriangle, Shield,
   ChevronDown, ChevronUp, History, Trash2, ArrowLeft, Clock,
-  Loader2, Server, Globe, Lock, RefreshCw, ExternalLink,
+  Loader2, Server, Globe, Lock, RefreshCw, ExternalLink, RotateCcw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -139,6 +139,13 @@ export default function ContainerScannerPage() {
     await fetchWithAuth(`${API_BASE}/container/history/${id}`, { method: "DELETE" });
     setHistory(prev => prev.filter(h => h.id !== id));
     if (historyDetail?.id === id) setHistoryDetail(null);
+  };
+
+  const restoreFromHistory = (h: ScanRecord) => {
+    setTarget(h.target);
+    setScanType(h.scan_type || "kubernetes");
+    setTab("scanner");
+    toast.success(`Restored: ${h.target}`);
   };
 
   const sevCounts = findings.reduce((acc, f) => { acc[f.severity] = (acc[f.severity] || 0) + 1; return acc; }, {} as Record<string, number>);
@@ -280,6 +287,14 @@ export default function ContainerScannerPage() {
                     <ArrowLeft className="h-4 w-4 mr-1" /> Back
                   </Button>
                   <h2 className="text-lg font-semibold text-zinc-200">{historyDetail.target}</h2>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="ml-auto gap-1.5 border-zinc-700 text-cyan-400 hover:text-cyan-300"
+                    onClick={() => restoreFromHistory(historyDetail)}
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" /> Restore to Scanner
+                  </Button>
                 </div>
                 <div className="grid grid-cols-5 gap-3">
                   {(["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] as Severity[]).map(sev => (

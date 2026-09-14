@@ -162,6 +162,14 @@ class Finding(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # triage call as ai_reasoning/ai_severity (see ai_service.py::triage_finding)
     ai_business_impact: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Cross-scanner correlation engine (app/services/correlation_engine.py):
+    # populated only on synthetic "compound finding" rows (source=
+    # "correlation_engine") — the UUIDs of the real underlying findings this
+    # one was derived from, so a correlated finding is always traceable back
+    # to real evidence rather than being an opaque new assertion (matches the
+    # false-positive-gate doctrine already used by grade_confidence).
+    correlated_finding_ids: Mapped[Optional[list[str]]] = mapped_column(ARRAY(String), nullable=True)
+
     # Assignment
     assigned_to: Mapped[Optional[UUID]] = mapped_column(
         PGUUID(as_uuid=True),

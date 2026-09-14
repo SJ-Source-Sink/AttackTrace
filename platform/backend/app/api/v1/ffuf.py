@@ -20,6 +20,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings as _get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user, require_tool
 from app.models.db.asset import AssetType
@@ -30,6 +31,86 @@ from app.services.asset_upsert import upsert_asset_async
 router = APIRouter(prefix="/ffuf", tags=["ffuf"])
 
 _scan_history: dict[str, dict] = {}
+
+# ── Filesystem history (org-scoped) — same pattern as secrets.py/cspm.py ─────
+
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def _validate_uuid(value: str, label: str) -> str:
+    if not _UUID_RE.match(value):
+        raise HTTPException(status_code=400, detail=f"Invalid {label}: must be a UUID")
+    return value
+
+
+def _history_dir(org_id: str) -> Path:
+    d = Path(_get_settings().ATTACKTRACE_WORKSPACE_DIR) / "ffuf" / org_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _safe_history_path(org_id: str, scan_id: str) -> Path:
+    """Build and confine the history file path to the org's history directory."""
+    _validate_uuid(scan_id, "scan_id")
+    base = _history_dir(org_id)
+    candidate = (base / f"{scan_id}.json").resolve()
+    if not candidate.is_relative_to(base.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid scan_id")
+    return candidate
+
+
+def _save_scan_result(org_id: str, record: dict) -> None:
+    """Persist a completed scan record as JSON."""
+    try:
+        path = _history_dir(org_id) / f"{record['id']}.json"
+        path.write_text(json.dumps(record, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def _load_history(org_id: str, limit: int = 50) -> list[dict]:
+    """Load scan history for an org, newest first."""
+    try:
+        files = sorted(
+            _history_dir(org_id).glob("*.json"),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )[:limit]
+        records = []
+        for f in files:
+            try:
+                records.append(json.loads(f.read_text()))
+            except Exception:
+                pass
+        return records
+    except Exception:
+        return []
+
+
+def _load_scan(org_id: str, scan_id: str) -> dict | None:
+    """Load a single scan record by ID."""
+    try:
+        path = _safe_history_path(org_id, scan_id)
+        if path.exists():
+            return json.loads(path.read_text())
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    return None
+
+
+def _delete_scan(org_id: str, scan_id: str) -> bool:
+    try:
+        path = _safe_history_path(org_id, scan_id)
+        if path.exists():
+            path.unlink()
+            return True
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    return False
 
 # ---------------------------------------------------------------------------
 # Bundled wordlists (committed to the repo — always available)
@@ -423,6 +504,11 @@ async def _stream_ffuf(
             "exit_code": proc.returncode,
         })
 
+        # Persist the completed scan to disk — the in-memory dict above is
+        # only good for the process lifetime; without this, history was lost
+        # on every backend restart.
+        _save_scan_result(str(org_id), _scan_history[scan_id])
+
         # Persist live discovered paths onto the parent host's Asset record —
         # this was never written anywhere before (ffuf results were SSE-only
         # + an in-memory dict lost on restart).
@@ -451,6 +537,7 @@ async def _stream_ffuf(
 
     except Exception as exc:
         _scan_history[scan_id].update({"status": "failed", "error": str(exc)})
+        _save_scan_result(str(org_id), _scan_history[scan_id])
         yield _sse("error", {"message": str(exc)})
     finally:
         try:
@@ -567,3 +654,51 @@ async def get_ffuf_scan(
     if not scan or scan.get("org_id") != str(org_id):
         raise HTTPException(status_code=404, detail="Scan not found")
     return scan
+
+
+# ── Filesystem-backed history endpoints (survive backend restarts) ───────────
+
+@router.get("/history", summary="List ffuf scan history (disk-persisted)")
+async def list_history(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: uuid.UUID = Depends(get_current_org_id),
+) -> dict:
+    records = _load_history(str(org_id))
+    # Lightweight summaries — omit full results list
+    summaries = []
+    for r in records:
+        summaries.append({
+            "id": r.get("id"),
+            "url": r.get("url"),
+            "wordlist": r.get("wordlist"),
+            "command": r.get("command"),
+            "status": r.get("status"),
+            "started_at": r.get("started_at"),
+            "completed_at": r.get("completed_at"),
+            "total": r.get("total", 0),
+        })
+    return {"items": summaries, "total": len(summaries)}
+
+
+@router.get("/history/{scan_id}", summary="Get a single ffuf scan result (disk-persisted)")
+async def get_history_item(
+    scan_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: uuid.UUID = Depends(get_current_org_id),
+) -> dict:
+    record = _load_scan(str(org_id), scan_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return record
+
+
+@router.delete("/history/{scan_id}", summary="Delete a ffuf scan result")
+async def delete_history_item(
+    scan_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: uuid.UUID = Depends(get_current_org_id),
+) -> dict:
+    deleted = _delete_scan(str(org_id), scan_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return {"ok": True, "scan_id": scan_id}

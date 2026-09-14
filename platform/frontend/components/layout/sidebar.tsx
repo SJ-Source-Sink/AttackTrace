@@ -45,6 +45,7 @@ import {
   ServerCrash,
   ScanLine,
   Activity,
+  GitBranch,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -238,6 +239,11 @@ const securityScannerItems: NavItem[] = [
     label: "API Security",
     href: "/api-scanner",
     icon: Wifi,
+  },
+  {
+    label: "CI/CD Gateway",
+    href: "/cicd",
+    icon: GitBranch,
   },
 ];
 

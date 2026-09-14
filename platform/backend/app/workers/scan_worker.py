@@ -1242,6 +1242,15 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
             # this scan's targets — the follow-up step after passive triage.
             run_ai_agent_after_scan.delay(scan_job_id)
 
+            # Trigger cross-scanner correlation — looks for compound risk
+            # patterns (e.g. takeover + exposed service on the same asset)
+            # across this org's findings, not just this one scan's batch.
+            try:
+                from app.workers.correlation_worker import correlate_after_scan
+                correlate_after_scan.delay(scan_job_id)
+            except Exception as e:
+                logger.warning(f"Failed to dispatch correlate_after_scan: {e}")
+
             # Notifications: scan.completed channels (Slack, Jira, Teams, webhooks)
             try:
                 asyncio.run(_async_notify_completion(

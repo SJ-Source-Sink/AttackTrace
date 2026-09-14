@@ -4,7 +4,7 @@ import React, { useState, useRef, useCallback, useEffect } from "react";
 import {
   Wifi, Play, Square, CheckCircle2, AlertTriangle, Shield,
   ChevronDown, ChevronUp, History, Trash2, ArrowLeft, Clock,
-  Loader2, Lock, Globe, RefreshCw, ExternalLink, Key,
+  Loader2, Lock, Globe, RefreshCw, ExternalLink, Key, RotateCcw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -165,6 +165,12 @@ export default function ApiScannerPage() {
     if (historyDetail?.id === id) setHistoryDetail(null);
   };
 
+  const restoreFromHistory = (h: ScanRecord) => {
+    setTargetUrl(h.target_url);
+    setTab("scanner");
+    toast.success(`Restored: ${h.target_url}`);
+  };
+
   const sevCounts = findings.reduce((acc, f) => { acc[f.severity] = (acc[f.severity] || 0) + 1; return acc; }, {} as Record<string, number>);
 
   return (
@@ -323,6 +329,14 @@ export default function ApiScannerPage() {
                     <ArrowLeft className="h-4 w-4 mr-1" /> Back
                   </Button>
                   <h2 className="text-lg font-semibold text-zinc-200 font-mono">{historyDetail.target_url}</h2>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="ml-auto gap-1.5 border-zinc-700 text-violet-400 hover:text-violet-300"
+                    onClick={() => restoreFromHistory(historyDetail)}
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" /> Restore to Scanner
+                  </Button>
                 </div>
                 <div className="grid grid-cols-5 gap-3">
                   {(["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] as Severity[]).map(sev => (

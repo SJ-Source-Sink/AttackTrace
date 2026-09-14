@@ -34,10 +34,14 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings as _get_settings
+from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
+from app.core.remediation import get_remediation
 from app.models.db.user import User
+from app.services.finding_ingest import ingest_findings
 
 router = APIRouter(prefix="/js-scanner", tags=["JS Scanner"])
 
@@ -1344,6 +1348,163 @@ def _analyze_js_content(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Finding-table ingestion adapter (app.services.finding_ingest)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# `type` -> Finding.category. Groups the ~90 distinct pattern names produced by
+# this scanner into a stable, filterable category per detection class.
+_JS_TYPE_CATEGORY: dict[str, str] = {
+    "secret": "secrets",
+    "dom_xss": "dom-xss",
+    "dom_source": "dom-xss",
+    "confirmed_xss": "dom-xss",
+    "prototype_pollution": "prototype-pollution",
+    "postmessage": "postmessage-security",
+    "websocket": "websocket-security",
+    "service_worker": "service-worker-security",
+    "env_leak": "env-var-leak",
+    "source_map": "source-map-exposure",
+    "graphql": "graphql-introspection",
+    "security_header": "missing-security-headers",
+    "sri_missing": "subresource-integrity",
+    "open_redirect": "open-redirect",
+    "jsonp": "jsonp",
+    "insecure_random": "insecure-randomness",
+    "hardcoded_auth": "hardcoded-credentials",
+    "library_vuln": "vulnerable-library",
+}
+
+# Confidence reflects *how* each pattern was confirmed (the false-positive-gate
+# doctrine — see app.core.finding_confidence), not how dangerous it looks:
+#   certain — a live value/behavior was directly observed (a downloaded .map
+#             file, a real introspection response, a literal header value).
+#   high    — a fixed, hard-to-confuse format/marker matched (vendor key
+#             prefix, PEM header, wildcard '*' origin literal).
+#   medium  — a real code-level indicator with some false-positive risk
+#             (entropy-filtered generic secret, a dangerous sink present
+#             without proof of a reachable taint source).
+#   low     — a broad heuristic or a "missing X" bare-signal check with a
+#             materially higher false-positive rate.
+_JS_CONFIDENCE_BY_NAME: dict[str, str] = {
+    # ── Secrets (JS_SECRET_PATTERNS) ──────────────────────────────────────────
+    "AWS Access Key": "high", "AWS Secret Key": "medium",
+    "GCP API Key": "high", "GCP Service Account Key": "high",
+    "Firebase Server Key": "high", "Firebase DB URL": "low", "Firebase Config": "medium",
+    "Stripe Live Secret Key": "high", "Stripe Restricted Key": "high", "Stripe Test Key": "medium",
+    "Square Access Token": "high", "Square OAuth Secret": "high",
+    "Slack Bot Token": "high", "Slack User Token": "high", "Slack Legacy Token": "high", "Slack Webhook": "high",
+    "Discord Bot Token": "high", "Discord Webhook": "high",
+    "Twilio Account SID": "low", "Twilio Auth Token": "medium",
+    "SendGrid API Key": "high", "Mailgun API Key": "medium", "Mailchimp API Key": "medium",
+    "GitHub Classic PAT": "high", "GitHub Fine-grained PAT": "high",
+    "GitHub OAuth Token": "high", "GitHub App Token": "high", "npm Token": "high",
+    "Sentry DSN": "medium", "Sentry DSN (legacy)": "high",
+    "Datadog API Key": "medium", "PagerDuty API Key": "medium",
+    "Mapbox Public Token": "low", "Mapbox Secret Token": "high", "Cloudinary URL": "high",
+    "Shopify Access Token": "high", "Shopify Private App": "high",
+    "JWT Token": "medium", "Bearer Token": "medium", "Okta API Token": "medium",
+    "Private Key": "certain", "Hardcoded Password": "medium",
+    "Generic API Key": "medium", "Generic Secret": "medium",
+    "MongoDB URI": "high", "DB Connection String": "high",
+    "Internal IP Address": "low", "Internal URL": "low",
+    "TODO with Credentials": "low", "Commented Credentials": "low",
+    "OpenAI API Key": "high", "OpenAI Project API Key": "high", "Anthropic API Key": "high",
+    "HuggingFace Token": "high", "Cohere API Key": "medium",
+    "Azure Storage Account Key": "high", "Linear API Key": "high", "Notion API Token": "high",
+    "Algolia API Key": "medium", "Vercel Token": "medium",
+    # ── DOM XSS sinks (DOM_XSS_SINKS) ─────────────────────────────────────────
+    "innerHTML Assignment": "medium", "outerHTML Assignment": "medium",
+    "insertAdjacentHTML": "medium", "document.write": "medium",
+    "eval()": "medium", "Function() constructor": "medium",
+    "setTimeout with string": "medium", "setInterval with string": "medium",
+    "jQuery .html()": "medium", "jQuery .append()": "low", "jQuery.parseHTML()": "medium",
+    "location.href assignment": "low", "location.replace()": "low", "location.assign()": "low",
+    "document.location assign": "low",
+    "React dangerouslySetInnerHTML": "medium", "Angular innerHTML binding": "medium",
+    "Angular bypassSecurityTrust": "high", "Vue v-html directive": "medium",
+    "Angular $sce.trustAsHtml": "high", "Dynamic script element": "low", ".src assignment": "low",
+    # ── DOM XSS sources (DOM_XSS_SOURCES) ─────────────────────────────────────
+    "localStorage of sensitive token": "medium",
+    # ── Prototype pollution ───────────────────────────────────────────────────
+    "Direct __proto__ Assignment": "medium", "constructor.prototype Access": "low",
+    "Unsafe Deep Merge": "medium", "Unsafe Object.assign": "medium",
+    "Lodash defaultsDeep": "medium", "JSON.parse to __proto__": "medium",
+    "Bracket Access with Variable": "low",
+    # ── PostMessage ────────────────────────────────────────────────────────────
+    "postMessage Wildcard Origin": "high", "iframe postMessage Wildcard": "high",
+    "Dangerous postMessage Handler": "high",
+    # ── WebSocket / service worker ────────────────────────────────────────────
+    "WebSocket without Auth Param": "low", "WebSocket Message to Sink": "medium",
+    "SW importScripts from CDN": "low", "SW Wildcard Scope": "low",
+    "SW Dangerous Message Handler": "medium",
+    # ── Open redirect / JSONP / insecure randomness / hardcoded auth headers ──
+    "Open Redirect via URL Parameter": "medium", "Unvalidated Redirect Assignment": "low",
+    "JSONP Callback Parameter": "low", "Dynamic JSONP Window Callback": "low",
+    "Math.random() for Security Token": "medium", "Security Value Seeded with Math.random": "medium",
+    "Hardcoded Authorization Header": "high", "Hardcoded API Key in Request Header": "high",
+    # ── Env leaks ──────────────────────────────────────────────────────────────
+    "React Env Var Leak": "medium", "Next.js Env Var Leak": "medium", "Vite Env Var Leak": "medium",
+    "process.env Leak": "low", "process.env Spread": "medium", "Internal Hostname": "low",
+    "Debug Mode Enabled": "low", "Dev Server URL": "low", "Absolute Path Leak": "low",
+    "Console.log of Secret": "medium",
+    # ── Response-header / SRI / source-map / GraphQL checks ───────────────────
+    "CORS: Wildcard Origin + Allow-Credentials": "certain", "CORS: Wildcard Allow-Origin": "certain",
+    "Missing Content-Security-Policy": "low",
+    "CSP: unsafe-inline + unsafe-eval Directives": "certain", "CSP: unsafe-inline Directive": "certain",
+    "Missing HSTS Header": "low", "Missing Clickjacking Protection": "low",
+    "Missing X-Content-Type-Options": "low", "Missing Referrer-Policy": "low",
+    "Server Version Disclosure": "certain", "X-Powered-By Disclosure": "certain",
+    "External Script Without Subresource Integrity": "high",
+    "JavaScript Source Map Exposed": "certain",
+    "GraphQL Introspection Enabled": "certain",
+}
+
+
+def _js_confidence(f: dict) -> str:
+    """Grade confidence for a js_scanner.py finding. Dynamic-title types
+    (confirmed_xss's taint-traced source->sink correlation, library_vuln's
+    version-fingerprint match) are graded by type; everything else is a fixed
+    pattern name looked up directly."""
+    ftype = f.get("type", "")
+    if ftype == "confirmed_xss":
+        return "high"  # two-signal: a tainted source AND a matching sink
+    if ftype == "library_vuln":
+        return "high"  # literal version fingerprint below a known-vuln threshold
+    return _JS_CONFIDENCE_BY_NAME.get(f.get("name", ""), "medium")
+
+
+def _adapt_js_findings(findings: list[dict]) -> list[dict]:
+    """Normalize js_scanner.py findings for finding_ingest.ingest_findings.
+
+    Prefers the finding's own inline remediation text (every current
+    detection path writes one under "remediation"; historical scan records
+    predating a field rename wrote it under "recommendation") and only falls
+    back to the shared app.core.remediation lookup if neither is present.
+    """
+    adapted = []
+    for f in findings:
+        name = f.get("name") or "JS finding"
+        remediation = f.get("remediation") or f.get("recommendation") or get_remediation(category=name, title=name)
+        adapted.append({
+            "title": name,
+            "description": f.get("context", ""),
+            "severity": f.get("severity", "medium"),
+            "category": _JS_TYPE_CATEGORY.get(f.get("type", ""), "js-analysis"),
+            "affected_asset": f.get("file_url", ""),
+            "evidence": {
+                "match": f.get("match"),
+                "line_number": f.get("line_number"),
+                "context": f.get("context"),
+                "file_url": f.get("file_url"),
+                "suppressed_note": f.get("suppressed_note"),
+            },
+            "remediation": str(remediation),
+            "confidence": _js_confidence(f),
+        })
+    return adapted
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Main scan generator
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -1351,6 +1512,7 @@ async def _run_js_scan(
     request: JSScanRequest,
     scan_id: str,
     org_id: str,
+    db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
     started_at = datetime.now(timezone.utc).isoformat()
     loop = asyncio.get_running_loop()
@@ -1741,16 +1903,24 @@ async def _run_js_scan(
         }
         _save_scan_result(org_id, record)
 
+        try:
+            adapted = _adapt_js_findings(all_findings)
+            await ingest_findings(db, org_id, source="js_scanner", source_scan_id=scan_id, findings=adapted)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+
 
 async def _safe_js_scan(
     request: JSScanRequest,
     scan_id: str,
     org_id: str,
+    db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
     """Wrapper that surfaces unhandled exceptions as SSE error events."""
     import traceback
     try:
-        async for chunk in _run_js_scan(request, scan_id, org_id):
+        async for chunk in _run_js_scan(request, scan_id, org_id, db):
             yield chunk
     except Exception as exc:
         yield _sse("error", {
@@ -1768,6 +1938,7 @@ async def scan_js(
     payload: JSScanRequest,
     current_user: Annotated[User, Depends(get_current_user)],
     org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     if not payload.target.strip():
         raise HTTPException(
@@ -1776,7 +1947,7 @@ async def scan_js(
         )
     scan_id = str(_uuid.uuid4())
     return StreamingResponse(
-        _safe_js_scan(payload, scan_id=scan_id, org_id=str(org_id)),
+        _safe_js_scan(payload, scan_id=scan_id, org_id=str(org_id), db=db),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

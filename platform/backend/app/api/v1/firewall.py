@@ -10,6 +10,7 @@ import hmac
 import io
 import ipaddress
 import json
+import logging
 import os
 import re
 import shutil
@@ -20,6 +21,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, AsyncGenerator
 
 import httpx
@@ -28,17 +30,111 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings as _get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user, require_tool
+from app.core.remediation import get_remediation
 from app.models.db.audit import AuditLog
 from app.models.db.user import User
 from app.services.enrichment_service import batch_enrich_cves
 from app.services.finding_ingest import ingest_findings
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/firewall", tags=["Firewall"])
 
 # In-memory scan history (all scan types share this dict)
 _scan_history: dict[str, dict] = {}
+
+
+# ── Filesystem history (org-scoped) ────────────────────────────────────────────
+# Shared across all non-physical firewall sub-scanners (waf_bypass, port_map,
+# rules_analyze, rate_limit, smuggling) via a `scan_type` discriminator in each
+# record — mirrors the pattern in secrets.py/cspm.py. The physical NGFW scanner
+# intentionally does not use this; it's already correctly wired elsewhere.
+
+_HISTORY_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def _validate_scan_uuid(value: str, label: str = "scan_id") -> str:
+    if not _HISTORY_UUID_RE.match(value):
+        raise HTTPException(status_code=400, detail=f"Invalid {label}: must be a UUID")
+    return value
+
+
+def _history_dir(org_id: str) -> Path:
+    d = Path(_get_settings().ATTACKTRACE_WORKSPACE_DIR) / "firewall_scanner" / str(org_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _safe_history_path(org_id: str, scan_id: str) -> Path:
+    """Build and confine the history file path to the org's history directory."""
+    _validate_scan_uuid(scan_id)
+    base = _history_dir(org_id)
+    candidate = (base / f"{scan_id}.json").resolve()
+    if not candidate.is_relative_to(base.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid scan_id")
+    return candidate
+
+
+def _save_scan_result(org_id: str, record: dict) -> None:
+    """Persist a completed non-physical firewall sub-scan record as JSON."""
+    try:
+        path = _history_dir(str(org_id)) / f"{record['id']}.json"
+        path.write_text(json.dumps(record, ensure_ascii=False, default=str))
+    except Exception:
+        logger.warning(f"firewall: failed to persist scan history for {record.get('id')}", exc_info=True)
+
+
+def _load_history(org_id: str, limit: int = 50, scan_type: str | None = None) -> list[dict]:
+    """Load scan history for an org, newest first, optionally filtered by scan_type."""
+    try:
+        files = sorted(
+            _history_dir(org_id).glob("*.json"),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+        records = []
+        for f in files:
+            try:
+                record = json.loads(f.read_text())
+            except Exception:
+                continue
+            if scan_type and record.get("scan_type") != scan_type:
+                continue
+            records.append(record)
+            if len(records) >= limit:
+                break
+        return records
+    except Exception:
+        return []
+
+
+def _load_scan(org_id: str, scan_id: str) -> dict | None:
+    """Load a single non-physical firewall scan record by ID."""
+    try:
+        path = _safe_history_path(org_id, scan_id)
+        if path.exists():
+            return json.loads(path.read_text())
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    return None
+
+
+def _delete_scan(org_id: str, scan_id: str) -> bool:
+    try:
+        path = _safe_history_path(org_id, scan_id)
+        if path.exists():
+            path.unlink()
+            return True
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    return False
 
 
 # ── SSE helper ────────────────────────────────────────────────────────────────
@@ -1003,10 +1099,69 @@ REMEDIATION_RULES: list[dict] = [
 ]
 
 
+def _build_waf_bypass_findings(
+    target: str, path: str, results: list[dict], bypass_rate_by_category: dict[str, float],
+) -> list[dict]:
+    """Adapt confirmed WAF-bypass categories into Finding-table records.
+
+    Grouped per bypass-technique category (not one per probe) to avoid
+    findings-list spam — a finding is only created when a category's bypass
+    rate meets or exceeds the same threshold used by the bypass scorecard
+    report (REMEDIATION_RULES), so this stays consistent with what the UI
+    already calls out as actionable.
+    """
+    rule_by_category = {r["category"]: r for r in REMEDIATION_RULES}
+    findings: list[dict] = []
+
+    for cat, rate in bypass_rate_by_category.items():
+        rule = rule_by_category.get(cat)
+        threshold = rule["threshold"] if rule else 0.3
+        if rate < threshold:
+            continue
+
+        cat_results = [r for r in results if r.get("category") == cat]
+        bypassed = [r for r in cat_results if r.get("result") == "BYPASS"]
+        if not bypassed:
+            continue
+
+        techniques = sorted({r["technique"] for r in bypassed})
+        priority = rule["priority"] if rule else "high"
+        severity = priority if priority in ("critical", "high", "medium", "low") else "high"
+
+        title = f"WAF Bypass Confirmed — {cat} techniques"
+        category = f"waf-bypass-{cat}"
+        findings.append({
+            "title": title,
+            "description": (
+                f"{len(bypassed)} of {len(cat_results)} '{cat}' bypass probes against "
+                f"{target}{path} returned a response indistinguishable from an unblocked "
+                f"request (bypass rate {rate:.0%}), indicating the WAF/edge protection "
+                f"does not reliably block this technique class. Confirmed techniques: "
+                f"{', '.join(techniques)}."
+            ),
+            "severity": severity,
+            "category": category,
+            "affected_asset": f"{target}{path}",
+            "evidence": {
+                "bypass_category": cat,
+                "bypass_rate": round(rate, 3),
+                "bypassed_count": len(bypassed),
+                "total_probes": len(cat_results),
+                "techniques": techniques,
+                "sample_probes": bypassed[:5],
+            },
+            "remediation": get_remediation(category=category, title=title),
+            "confidence": "high" if rate >= 0.5 else "medium",
+        })
+
+    return findings
+
+
 async def _stream_bypass(
     scan_id: str,
     req: WafBypassRequest,
     org_id: uuid.UUID,
+    db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
     started_at = datetime.now(timezone.utc).isoformat()
 
@@ -1169,6 +1324,37 @@ async def _stream_bypass(
         "bypass_rate_by_category": bypass_rate_by_category,
     })
 
+    try:
+        adapted = _build_waf_bypass_findings(req.target, req.path, results, bypass_rate_by_category)
+        ingest_result = await ingest_findings(db, org_id, source="firewall_waf_bypass", source_scan_id=scan_id, findings=adapted)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.warning(f"firewall waf_bypass: ingest_findings failed for scan {scan_id}", exc_info=True)
+        ingest_result = None
+
+    _save_scan_result(str(org_id), {
+        "id": scan_id,
+        "scan_type": "waf_bypass",
+        "target": req.target,
+        "path": req.path,
+        "param": req.param,
+        "status": "completed",
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "stats": {
+            "bypassed": bypass_count,
+            "blocked": blocked_count,
+            "uncertain": uncertain_count,
+            "total": len(results),
+        },
+        "result": {
+            "probes": results,
+            "bypass_rate_by_category": bypass_rate_by_category,
+        },
+        "findings_ingested": ingest_result,
+    })
+
     yield _sse("complete", {
         "scan_id": scan_id,
         "target": req.target,
@@ -1205,7 +1391,7 @@ async def probe_waf_bypass(
     await db.commit()
 
     return StreamingResponse(
-        _stream_bypass(scan_id, payload, org_id),
+        _stream_bypass(scan_id, payload, org_id, db),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1562,10 +1748,110 @@ async def _nmap_prefix() -> list[str]:
     return []
 
 
+def _build_port_map_findings(target: str, modes_run: list[dict]) -> list[dict]:
+    """Adapt port-mapper results into Finding-table records.
+
+    Three shapes, all genuinely security-relevant:
+      1. An open port with a known CVE correlation (PORT_CVE_MAP, already
+         attached to each port as `cve_advisories` by `_interpret_hosts`).
+      2. `source_port` mode showing a port opened only when the scanner's
+         source port was 53 (DNS) — a source-port-trust ACL bypass.
+      3. `fin_null_xmas`/`fragmented` modes showing a port reachable despite
+         non-standard TCP flags/fragmentation — a stateless-firewall evasion.
+    Findings are deduped per (host, port, cve) or (host, port, mode) by the
+    shared ingest_findings dedup_hash, so re-scans update rather than spam.
+    """
+    findings: list[dict] = []
+    seen_cve_keys: set[tuple] = set()
+
+    for mode_summary in modes_run:
+        mode = mode_summary.get("mode")
+        for host in mode_summary.get("hosts", []):
+            hostname = host.get("host") or target
+            for port in host.get("ports", []):
+                state = port.get("state", "")
+                port_num = port.get("port")
+                proto = port.get("protocol", "tcp")
+
+                if state in ("open", "open|filtered"):
+                    for adv in port.get("cve_advisories") or []:
+                        cve_id = adv.get("cve")
+                        key = (hostname, port_num, cve_id)
+                        if not cve_id or key in seen_cve_keys:
+                            continue
+                        seen_cve_keys.add(key)
+                        cvss = adv.get("cvss") or 0
+                        severity = "critical" if cvss >= 9 else "high" if cvss >= 7 else "medium" if cvss >= 4 else "low"
+                        title = f"{cve_id} — {adv.get('desc', 'Known vulnerability')} (port {port_num}/{proto} on {hostname})"
+                        findings.append({
+                            "title": title,
+                            "description": (
+                                f"Port {port_num}/{proto} ({port.get('service') or 'unknown service'}) "
+                                f"is {state} on {hostname}, which matches a known CVE for services "
+                                f"commonly running on this port: {adv.get('desc', '')}."
+                            ),
+                            "severity": severity,
+                            "category": "firewall-port-cve",
+                            "affected_asset": hostname,
+                            "evidence": {
+                                "port": port_num, "protocol": proto, "state": state,
+                                "service": port.get("service"), "version": port.get("version"),
+                                "firewall_interpretation": port.get("firewall_interpretation"),
+                                "scan_mode": mode,
+                            },
+                            "remediation": get_remediation(category="firewall-port-cve", title=title),
+                            "cve": [cve_id],
+                            "cvss_score": cvss,
+                            "confidence": "medium",
+                        })
+
+                if mode == "source_port" and state == "open":
+                    title = f"Firewall ACL Bypass via Trusted Source Port 53 on {hostname}:{port_num}"
+                    findings.append({
+                        "title": title,
+                        "description": (
+                            f"Port {port_num}/{proto} on {hostname} only became reachable when the "
+                            f"probe used source port 53 (DNS), indicating the firewall/ACL grants "
+                            f"implicit trust based on the claimed source port rather than "
+                            f"authenticating the traffic — trivially spoofable by an attacker."
+                        ),
+                        "severity": "high",
+                        "category": "firewall-acl-bypass",
+                        "affected_asset": hostname,
+                        "evidence": {"port": port_num, "protocol": proto, "scan_mode": mode,
+                                     "firewall_interpretation": port.get("firewall_interpretation")},
+                        "remediation": get_remediation(category="firewall-acl-bypass", title=title),
+                        "confidence": "high",
+                    })
+
+                if mode in ("fin_null_xmas", "fragmented") and state in ("open", "open|filtered"):
+                    technique = "FIN/NULL/XMAS flag manipulation" if mode == "fin_null_xmas" else "packet fragmentation"
+                    title = f"Stateless Firewall Evasion via {technique} on {hostname}:{port_num}"
+                    findings.append({
+                        "title": title,
+                        "description": (
+                            f"Port {port_num}/{proto} on {hostname} responded as {state} to a probe using "
+                            f"{technique}, indicating the firewall does not fully inspect/reassemble this "
+                            f"traffic shape before making an allow/deny decision — a known evasion technique "
+                            f"against stateless packet filters."
+                        ),
+                        "severity": "medium",
+                        "category": "firewall-evasion",
+                        "affected_asset": hostname,
+                        "evidence": {"port": port_num, "protocol": proto, "scan_mode": mode, "state": state,
+                                     "firewall_interpretation": port.get("firewall_interpretation")},
+                        "remediation": get_remediation(category="firewall-evasion", title=title),
+                        "confidence": "medium",
+                    })
+
+    return findings
+
+
 async def _stream_port_map(
     scan_id: str,
     req: PortFirewallRequest,
     org_id: uuid.UUID,
+    db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
     nmap_bin = shutil.which("nmap") or "nmap"
     sudo_prefix = await _nmap_prefix()
@@ -1675,6 +1961,28 @@ async def _stream_port_map(
         "all_hosts": all_hosts,
     })
 
+    try:
+        adapted = _build_port_map_findings(req.target, modes_run)
+        ingest_result = await ingest_findings(db, org_id, source="firewall_port_map", source_scan_id=scan_id, findings=adapted)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.warning(f"firewall port_map: ingest_findings failed for scan {scan_id}", exc_info=True)
+        ingest_result = None
+
+    _save_scan_result(str(org_id), {
+        "id": scan_id,
+        "scan_type": "port_map",
+        "target": req.target,
+        "mode": req.mode,
+        "status": "completed",
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "stats": {"hosts": len(all_hosts), "modes_run": len(modes_run)},
+        "result": {"modes_run": modes_run, "all_hosts": all_hosts},
+        "findings_ingested": ingest_result,
+    })
+
     yield _sse("complete", {
         "scan_id": scan_id,
         "target": req.target,
@@ -1713,7 +2021,7 @@ async def port_firewall_map(
     await db.commit()
 
     return StreamingResponse(
-        _stream_port_map(scan_id, payload, org_id),
+        _stream_port_map(scan_id, payload, org_id, db),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -2184,6 +2492,43 @@ def _analyze_anomalies(rules: list[dict]) -> list[dict]:
     return anomalies
 
 
+_ANOMALY_TYPE_LABELS: dict[str, str] = {
+    "redundant": "Redundant Duplicate Rule",
+    "any_any": "Unrestricted Any-Any Permit Rule",
+    "overly_broad": "Sensitive Port Exposed to Any Source",
+    "shadow": "Shadowed Rule (Never Takes Effect)",
+    "cidr_subsumption": "Unreachable Deny Rule (CIDR Subsumption)",
+    "conflict": "Conflicting Permit/Deny Rules",
+    "missing_default_deny": "Missing Default-Deny Rule",
+}
+
+
+def _build_rule_anomaly_findings(filename: str, fmt: str, anomalies: list[dict]) -> list[dict]:
+    """Adapt firewall rule-file anomalies into Finding-table records."""
+    findings: list[dict] = []
+    for a in anomalies:
+        a_type = a.get("type", "unknown")
+        label = _ANOMALY_TYPE_LABELS.get(a_type, a_type.replace("_", " ").title())
+        title = f"Firewall Rule Anomaly: {label} (line {a.get('rule_line')})"
+        category = f"firewall-rule-{a_type}"
+        findings.append({
+            "title": title,
+            "description": a.get("description", ""),
+            "severity": a.get("severity", "medium"),
+            "category": category,
+            "affected_asset": filename,
+            "evidence": {
+                "rule_text": a.get("rule_text"),
+                "rule_line": a.get("rule_line"),
+                "compliance": a.get("compliance", []),
+                "format": fmt,
+            },
+            "remediation": get_remediation(category=category, title=title),
+            "confidence": "high",
+        })
+    return findings
+
+
 @router.post("/rules/analyze", summary="Analyze firewall rule file for anomalies")
 async def analyze_firewall_rules(
     request: Request,
@@ -2260,6 +2605,27 @@ async def analyze_firewall_rules(
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
+    try:
+        adapted = _build_rule_anomaly_findings(filename, fmt, anomalies)
+        ingest_result = await ingest_findings(db, org_id, source="firewall_rules_analyze", source_scan_id=scan_id, findings=adapted)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.warning(f"firewall rules_analyze: ingest_findings failed for scan {scan_id}", exc_info=True)
+        ingest_result = None
+
+    _save_scan_result(str(org_id), {
+        "id": scan_id,
+        "scan_type": "rules_analyze",
+        "target": filename,
+        "status": "completed",
+        "started_at": result["timestamp"],
+        "completed_at": result["timestamp"],
+        "stats": {"total_rules": len(rules), "anomaly_count": len(anomalies)},
+        "result": result,
+        "findings_ingested": ingest_result,
+    })
+
     _scan_history[scan_id] = {
         "id": scan_id,
         "type": "rules_analyze",
@@ -2276,10 +2642,55 @@ async def analyze_firewall_rules(
 
 # ── Module 5: Rate Limit Probe ────────────────────────────────────────────────
 
+def _build_rate_limit_findings(target: str, path: str, max_rps: int, profile: dict) -> list[dict]:
+    """Adapt the rate-limit probe's profile into Finding-table records."""
+    findings: list[dict] = []
+    asset = target.rstrip("/") + path
+
+    if profile.get("bypass_vectors"):
+        title = f"Rate Limit Bypass via Header Spoofing on {asset}"
+        findings.append({
+            "title": title,
+            "description": (
+                f"After the endpoint began throttling requests (threshold ~{profile.get('threshold_rps')} "
+                f"req/burst), sending a request with a spoofed X-Forwarded-For header bypassed the rate "
+                f"limit and received a normal 200 response — the rate limiter is keyed on a "
+                f"client-controllable header rather than the actual connection source."
+            ),
+            "severity": "high",
+            "category": "firewall-rate-limit-bypass",
+            "affected_asset": asset,
+            "evidence": {"bypass_vectors": profile.get("bypass_vectors"), "threshold_rps": profile.get("threshold_rps"),
+                         "headers_exposed": profile.get("headers_exposed")},
+            "remediation": get_remediation(category="firewall-rate-limit-bypass", title=title),
+            "confidence": "high",
+        })
+
+    if profile.get("threshold_rps") is None:
+        title = f"No Rate Limiting Detected on {asset}"
+        findings.append({
+            "title": title,
+            "description": (
+                f"No throttling (HTTP 429/503) was observed after ramping bursts up to "
+                f"{max_rps} requests against {asset}. Without rate limiting, this endpoint is "
+                f"exposed to unrestricted brute-force, credential-stuffing, or scraping traffic."
+            ),
+            "severity": "medium",
+            "category": "firewall-no-rate-limit",
+            "affected_asset": asset,
+            "evidence": {"max_rps_tested": max_rps, "total_requests_sent": profile.get("total_requests_sent")},
+            "remediation": get_remediation(category="firewall-no-rate-limit", title=title),
+            "confidence": "medium",
+        })
+
+    return findings
+
+
 async def _stream_rate_limit(
     scan_id: str,
     req: RateLimitRequest,
     org_id: uuid.UUID,
+    db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
     started_at = datetime.now(timezone.utc).isoformat()
     target_url = req.target.rstrip("/") + req.path
@@ -2445,6 +2856,28 @@ async def _stream_rate_limit(
         "result": profile,
     })
 
+    try:
+        adapted = _build_rate_limit_findings(req.target, req.path, req.max_rps, profile)
+        ingest_result = await ingest_findings(db, org_id, source="firewall_rate_limit", source_scan_id=scan_id, findings=adapted)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.warning(f"firewall rate_limit: ingest_findings failed for scan {scan_id}", exc_info=True)
+        ingest_result = None
+
+    _save_scan_result(str(org_id), {
+        "id": scan_id,
+        "scan_type": "rate_limit",
+        "target": req.target,
+        "path": req.path,
+        "status": "completed",
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "stats": {"total_requests_sent": total_requests_sent, "threshold_rps": threshold_rps},
+        "result": profile,
+        "findings_ingested": ingest_result,
+    })
+
     yield _sse("complete", {
         "scan_id": scan_id,
         **profile,
@@ -2475,7 +2908,7 @@ async def probe_rate_limit(
     await db.commit()
 
     return StreamingResponse(
-        _stream_rate_limit(scan_id, payload, org_id),
+        _stream_rate_limit(scan_id, payload, org_id, db),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -2487,10 +2920,43 @@ async def probe_rate_limit(
 
 # ── Module 6: HTTP Request Smuggling Probe ────────────────────────────────────
 
+_DESYNC_SEVERITY: dict[str, str] = {"Critical": "critical", "High": "high", "Medium": "medium"}
+_DESYNC_CONFIDENCE: dict[str, str] = {"Critical": "high", "High": "medium", "Medium": "low"}
+
+
+def _build_smuggling_findings(target: str, desync_risk: str, anomalies_detected: int,
+                               probes_run: int, probe_results: list[dict], recommendation: str) -> list[dict]:
+    """Adapt the smuggling probe's desync-risk verdict into a Finding-table
+    record. Only Critical/High/Medium risk (>=1 anomaly) produce a finding —
+    'Low' means no desync indicators were observed."""
+    if desync_risk not in _DESYNC_SEVERITY:
+        return []
+
+    title = f"HTTP Request Smuggling Indicators Detected ({desync_risk} Risk) on {target}"
+    anomalous = [p for p in probe_results if p.get("result") != "NORMAL"]
+    return [{
+        "title": title,
+        "description": (
+            f"{anomalies_detected} of {probes_run} request-smuggling probes against {target} showed "
+            f"a timing or response anomaly versus baseline, indicating possible inconsistent "
+            f"Content-Length/Transfer-Encoding parsing between the frontend proxy and backend "
+            f"(HTTP desync). {recommendation}"
+        ),
+        "severity": _DESYNC_SEVERITY[desync_risk],
+        "category": "firewall-smuggling",
+        "affected_asset": target,
+        "evidence": {"desync_risk": desync_risk, "anomalies_detected": anomalies_detected,
+                     "probes_run": probes_run, "anomalous_probes": anomalous},
+        "remediation": get_remediation(category="firewall-smuggling", title=title),
+        "confidence": _DESYNC_CONFIDENCE[desync_risk],
+    }]
+
+
 async def _stream_smuggling(
     scan_id: str,
     req: SmugglingRequest,
     org_id: uuid.UUID,
+    db: AsyncSession,
 ) -> AsyncGenerator[str, None]:
     started_at = datetime.now(timezone.utc).isoformat()
 
@@ -2659,6 +3125,27 @@ async def _stream_smuggling(
         "result": complete_data,
     })
 
+    try:
+        adapted = _build_smuggling_findings(req.target, desync_risk, anomalies_detected, probes_run, probe_results, recommendation)
+        ingest_result = await ingest_findings(db, org_id, source="firewall_smuggling", source_scan_id=scan_id, findings=adapted)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.warning(f"firewall smuggling: ingest_findings failed for scan {scan_id}", exc_info=True)
+        ingest_result = None
+
+    _save_scan_result(str(org_id), {
+        "id": scan_id,
+        "scan_type": "smuggling",
+        "target": req.target,
+        "status": "completed",
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "stats": {"anomalies_detected": anomalies_detected, "probes_run": probes_run, "desync_risk": desync_risk},
+        "result": {**complete_data, "probe_results": probe_results},
+        "findings_ingested": ingest_result,
+    })
+
     yield _sse("complete", complete_data)
 
 
@@ -2685,7 +3172,7 @@ async def probe_smuggling(
     await db.commit()
 
     return StreamingResponse(
-        _stream_smuggling(scan_id, payload, org_id),
+        _stream_smuggling(scan_id, payload, org_id, db),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -2729,6 +3216,58 @@ async def get_firewall_scans(
         ],
         "total": len(logs),
     })
+
+
+# ── Filesystem scan history (waf_bypass / port_map / rules_analyze /
+# rate_limit / smuggling — full result bodies with a `scan_type` discriminator,
+# complementing the lightweight AuditLog-backed /scans list above) ────────────
+
+@router.get("/history", summary="List non-physical firewall sub-scanner history")
+async def list_firewall_history(
+    limit: int = 50,
+    scan_type: str | None = None,
+    current_user: Annotated[User, Depends(require_tool("firewall"))] = None,
+    org_id: uuid.UUID = Depends(get_current_org_id),
+) -> JSONResponse:
+    records = _load_history(str(org_id), limit=min(limit, 100), scan_type=scan_type)
+    summaries = [
+        {
+            "id": r.get("id"),
+            "scan_type": r.get("scan_type"),
+            "target": r.get("target"),
+            "status": r.get("status"),
+            "started_at": r.get("started_at"),
+            "completed_at": r.get("completed_at"),
+            "stats": r.get("stats", {}),
+            "findings_ingested": r.get("findings_ingested"),
+        }
+        for r in records
+    ]
+    return JSONResponse(content={"items": summaries, "total": len(summaries)})
+
+
+@router.get("/history/{scan_id}", summary="Get a single non-physical firewall sub-scan result")
+async def get_firewall_history_item(
+    scan_id: str,
+    current_user: Annotated[User, Depends(require_tool("firewall"))],
+    org_id: uuid.UUID = Depends(get_current_org_id),
+) -> JSONResponse:
+    record = _load_scan(str(org_id), scan_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return JSONResponse(content=record)
+
+
+@router.delete("/history/{scan_id}", summary="Delete a non-physical firewall sub-scan result")
+async def delete_firewall_history_item(
+    scan_id: str,
+    current_user: Annotated[User, Depends(require_tool("firewall"))],
+    org_id: uuid.UUID = Depends(get_current_org_id),
+) -> JSONResponse:
+    deleted = _delete_scan(str(org_id), scan_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return JSONResponse(content={"ok": True, "scan_id": scan_id})
 
 
 # ══════════════════════════════════════════════════════════════════════════════

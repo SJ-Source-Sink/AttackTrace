@@ -289,6 +289,13 @@ export default function SecretsPage() {
     }
   }, []);
 
+  const restoreFromHistory = useCallback((entry: HistoryEntry) => {
+    setTarget(entry.target);
+    setScanType(entry.scan_type);
+    setActiveTab("scanner");
+    toast.success(`Restored: ${entry.target}`);
+  }, []);
+
   const deleteHistoryEntry = useCallback(async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     try {
@@ -903,23 +910,33 @@ export default function SecretsPage() {
                       {selectedHistoryEntry.duration_seconds}s
                     </p>
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      const blob = new Blob(
-                        [JSON.stringify(selectedHistoryEntry, null, 2)],
-                        { type: "application/json" }
-                      );
-                      const a = document.createElement("a");
-                      a.href = URL.createObjectURL(blob);
-                      a.download = `secrets-${selectedHistoryEntry.target.replace(/[^a-z0-9]/gi, "_")}.json`;
-                      a.click();
-                    }}
-                    className="gap-1.5"
-                  >
-                    <Download className="h-3.5 w-3.5" /> Export
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => restoreFromHistory(selectedHistoryEntry)}
+                      className="gap-1.5"
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" /> Restore to Scanner
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        const blob = new Blob(
+                          [JSON.stringify(selectedHistoryEntry, null, 2)],
+                          { type: "application/json" }
+                        );
+                        const a = document.createElement("a");
+                        a.href = URL.createObjectURL(blob);
+                        a.download = `secrets-${selectedHistoryEntry.target.replace(/[^a-z0-9]/gi, "_")}.json`;
+                        a.click();
+                      }}
+                      className="gap-1.5"
+                    >
+                      <Download className="h-3.5 w-3.5" /> Export
+                    </Button>
+                  </div>
                 </div>
 
                 {/* Stats summary */}

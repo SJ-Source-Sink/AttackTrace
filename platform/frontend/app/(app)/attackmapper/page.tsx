@@ -27,6 +27,8 @@ import {
   Users,
   Search,
   Flag,
+  RotateCcw,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1398,6 +1400,7 @@ export default function AttackMapperPage() {
   const [result, setResult] = useState<ScanResult | null>(null);
   const [activeTab, setActiveTab] = useState<"techniques" | "chain" | "intel" | "correlate" | "apt">("techniques");
   const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [techniqueSearch, setTechniqueSearch] = useState("");
   const [techniquePhaseFilter, setTechniquePhaseFilter] = useState("all");
@@ -1433,14 +1436,54 @@ export default function AttackMapperPage() {
   }, [progressLog]);
 
   async function loadHistory() {
+    setHistoryLoading(true);
     try {
-      const res = await fetchWithAuth(`${API_BASE}/attackmapper/scans`);
+      const res = await fetchWithAuth(`${API_BASE}/attackmapper/history`);
       if (res.ok) {
         const data = await res.json();
         setHistory(data.items ?? []);
       }
     } catch {
       // silently ignore
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  async function loadHistoryEntry(id: string) {
+    try {
+      const res = await fetchWithAuth(`${API_BASE}/attackmapper/history/${id}`);
+      if (res.ok) {
+        const full = await res.json();
+        setResult({
+          scan_id: full.id,
+          infrastructure_type: full.infrastructure_type,
+          infrastructure_label: full.infrastructure_label,
+          technique_count: (full.techniques ?? []).length,
+          chain_steps: (full.attack_chain?.steps ?? []).length,
+          critical_cves: (full.threat_intel?.critical_cves ?? []).length,
+          techniques: full.techniques ?? [],
+          attack_chain: full.attack_chain ?? null,
+          threat_intel: full.threat_intel ?? null,
+        });
+        setInfraType(full.infrastructure_type);
+        setActiveTab("techniques");
+        setShowHistory(false);
+      }
+    } catch {
+      toast.error("Failed to load scan");
+    }
+  }
+
+  async function deleteHistoryEntry(id: string, e: React.MouseEvent) {
+    e.stopPropagation();
+    try {
+      const res = await fetchWithAuth(`${API_BASE}/attackmapper/history/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        setHistory((prev) => prev.filter((h) => h.id !== id));
+      }
+    } catch {
+      toast.error("Failed to delete scan");
     }
   }
 
@@ -1830,59 +1873,86 @@ export default function AttackMapperPage() {
           </div>
 
           {/* History */}
-          {history.length > 0 && (
-            <Card className="border-zinc-800 bg-zinc-900">
-              <button
-                type="button"
-                className="w-full flex items-center justify-between p-4"
-                onClick={() => setShowHistory((s) => !s)}
-              >
-                <span className="flex items-center gap-2 text-sm font-medium text-zinc-300">
-                  <History className="h-4 w-4 text-zinc-500" />
-                  History ({history.length})
-                </span>
-                {showHistory ? (
-                  <ChevronUp className="h-4 w-4 text-zinc-500" />
-                ) : (
-                  <ChevronDown className="h-4 w-4 text-zinc-500" />
-                )}
-              </button>
-              {showHistory && (
-                <div className="border-t border-zinc-800 divide-y divide-zinc-800 max-h-64 overflow-y-auto">
-                  {history.map((h) => (
-                    <div key={h.id} className="p-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm text-zinc-300 font-medium">
-                          {h.infrastructure_label}
-                        </span>
-                        <Badge
-                          variant="outline"
-                          className={cn(
-                            "text-xs",
-                            h.status === "completed"
-                              ? "text-emerald-400 border-emerald-500/20"
-                              : h.status === "failed"
-                              ? "text-red-400 border-red-500/20"
-                              : "text-yellow-400 border-yellow-500/20"
-                          )}
-                        >
-                          {h.status}
-                        </Badge>
-                      </div>
-                      <div className="flex gap-3 mt-1 text-xs text-zinc-500">
-                        <span>{h.technique_count} techniques</span>
-                        <span>{h.chain_steps} steps</span>
-                        <span>{h.critical_cves} CVEs</span>
-                      </div>
-                      <p className="text-xs text-zinc-600 mt-0.5">
-                        {new Date(h.started_at).toLocaleString()}
-                      </p>
-                    </div>
-                  ))}
-                </div>
+          <Card className="border-zinc-800 bg-zinc-900">
+            <button
+              type="button"
+              className="w-full flex items-center justify-between p-4"
+              onClick={() => setShowHistory((s) => !s)}
+            >
+              <span className="flex items-center gap-2 text-sm font-medium text-zinc-300">
+                <History className="h-4 w-4 text-zinc-500" />
+                History ({history.length})
+              </span>
+              {showHistory ? (
+                <ChevronUp className="h-4 w-4 text-zinc-500" />
+              ) : (
+                <ChevronDown className="h-4 w-4 text-zinc-500" />
               )}
-            </Card>
-          )}
+            </button>
+            {showHistory && (
+              <div className="border-t border-zinc-800">
+                <div className="flex items-center justify-end px-3 pt-2">
+                  <button
+                    className="text-zinc-500 hover:text-zinc-300 transition-colors"
+                    onClick={loadHistory}
+                    disabled={historyLoading}
+                    title="Refresh"
+                  >
+                    <RotateCcw className={cn("h-3.5 w-3.5", historyLoading && "animate-spin")} />
+                  </button>
+                </div>
+                <div className="divide-y divide-zinc-800 max-h-64 overflow-y-auto">
+                  {historyLoading ? (
+                    <p className="text-xs text-zinc-600 p-3 text-center">Loading...</p>
+                  ) : history.length === 0 ? (
+                    <p className="text-xs text-zinc-600 p-3 text-center">No scans yet</p>
+                  ) : (
+                    history.map((h) => (
+                      <div
+                        key={h.id}
+                        className="relative group p-3 pr-8 hover:bg-zinc-800/40 cursor-pointer transition-colors"
+                        onClick={() => loadHistoryEntry(h.id)}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-sm text-zinc-300 font-medium">
+                            {h.infrastructure_label}
+                          </span>
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              "text-xs",
+                              h.status === "completed"
+                                ? "text-emerald-400 border-emerald-500/20"
+                                : h.status === "failed"
+                                ? "text-red-400 border-red-500/20"
+                                : "text-yellow-400 border-yellow-500/20"
+                            )}
+                          >
+                            {h.status}
+                          </Badge>
+                        </div>
+                        <div className="flex gap-3 mt-1 text-xs text-zinc-500">
+                          <span>{h.technique_count} techniques</span>
+                          <span>{h.chain_steps} steps</span>
+                          <span>{h.critical_cves} CVEs</span>
+                        </div>
+                        <p className="text-xs text-zinc-600 mt-0.5">
+                          {new Date(h.started_at).toLocaleString()}
+                        </p>
+                        <button
+                          onClick={(e) => deleteHistoryEntry(h.id, e)}
+                          className="absolute top-2.5 right-2 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded text-zinc-600 hover:text-red-400"
+                          title="Delete scan"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+          </Card>
         </div>
 
         {/* ── Right: Results ────────────────────────────────────────────────── */}

@@ -17,6 +17,7 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
 from app.models.db.scan import ScheduledScan, ScanJob, ScanStatus, ScanIntensity
 from app.models.db.user import User
+from app.services.scan_service import enforce_scan_quota
 
 router = APIRouter(prefix="/schedules", tags=["Schedules"])
 
@@ -293,6 +294,8 @@ async def trigger_schedule(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     sched = await _get_schedule_or_404(schedule_id, org_id, db)
+
+    await enforce_scan_quota(db, org_id)
 
     cfg = sched.scan_config or {}
     intensity_str = cfg.get("intensity", "passive")

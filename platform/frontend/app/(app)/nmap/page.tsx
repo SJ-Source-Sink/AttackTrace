@@ -60,8 +60,11 @@ interface ScanHistoryEntry {
   command: string;
   status: string;
   started_at: string;
-  hosts: HostResult[];
-  raw: string;
+  completed_at?: string;
+  hosts?: HostResult[];
+  raw?: string;
+  host_count?: number;
+  open_port_count?: number;
 }
 
 const STATE_COLOR: Record<string, string> = {
@@ -104,17 +107,56 @@ export default function NmapPage() {
   const [rawLines, setRawLines] = useState<string[]>([]);
   const [hosts, setHosts] = useState<HostResult[]>([]);
   const [showRaw, setShowRaw] = useState(false);
-  const [history, setHistory] = useState<ScanHistoryEntry[]>(() => {
-    try {
-      const saved = typeof window !== "undefined" ? localStorage.getItem("nmap_history") : null;
-      return saved ? JSON.parse(saved) : [];
-    } catch { return []; }
-  });
+  const [history, setHistory] = useState<ScanHistoryEntry[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
 
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const res = await fetchWithAuth(`${API_BASE}/nmap/history`);
+      if (res.ok) {
+        const data = await res.json();
+        setHistory(data.items ?? []);
+      }
+    } catch {
+      // silently ignore — history is best-effort
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    try { localStorage.setItem("nmap_history", JSON.stringify(history.slice(0, 20))); } catch {}
-  }, [history]);
+    loadHistory();
+  }, [loadHistory]);
+
+  const loadHistoryEntry = useCallback(async (id: string) => {
+    try {
+      const res = await fetchWithAuth(`${API_BASE}/nmap/history/${id}`);
+      if (res.ok) {
+        const full = await res.json();
+        setHosts(full.hosts ?? []);
+        setRawLines((full.raw ?? "").split("\n"));
+        setScanCommand(full.command ?? "");
+        setScanStatus("completed");
+        setShowHistory(false);
+      }
+    } catch {
+      toast.error("Failed to load scan");
+    }
+  }, []);
+
+  const deleteHistoryEntry = useCallback(async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const res = await fetchWithAuth(`${API_BASE}/nmap/history/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        setHistory((prev) => prev.filter((h) => h.id !== id));
+      }
+    } catch {
+      toast.error("Failed to delete scan");
+    }
+  }, []);
   const [scanCommand, setScanCommand] = useState("");
   const [scanStatus, setScanStatus] = useState<"idle" | "running" | "completed" | "failed">("idle");
 
@@ -188,19 +230,8 @@ export default function NmapPage() {
             setIsScanning(false);
             toast.success(`Scan completed — ${data.hosts?.length ?? 0} host(s) found`);
 
-            // Add to history
-            setHistory((prev) => [
-              {
-                id: crypto.randomUUID(),
-                target: target.trim(),
-                command: scanCommand,
-                status: "completed",
-                started_at: new Date().toISOString(),
-                hosts: data.hosts ?? [],
-                raw: rawLines.join("\n"),
-              },
-              ...prev.slice(0, 19),
-            ]);
+            // Backend persists the completed scan to disk — just refresh the list.
+            loadHistory();
           } else if (event === "error") {
             setScanStatus("failed");
             setIsScanning(false);
@@ -215,7 +246,7 @@ export default function NmapPage() {
       }
       setIsScanning(false);
     }
-  }, [target, scanType, ports, timing, customFlags, scanCommand, rawLines]);
+  }, [target, scanType, ports, timing, customFlags, scanCommand, rawLines, loadHistory]);
 
   const stopScan = () => {
     abortRef.current?.abort();
@@ -583,42 +614,44 @@ export default function NmapPage() {
                 <History className="h-4 w-4 text-zinc-400" />
                 Scan History
               </CardTitle>
-              {history.length > 0 && (
-                <Button variant="ghost" size="sm" onClick={() => { setHistory([]); localStorage.removeItem("nmap_history"); }} className="gap-1.5 text-xs text-zinc-500">
-                  <Trash2 className="h-3 w-3" /> Clear
-                </Button>
-              )}
+              <Button variant="ghost" size="sm" onClick={loadHistory} disabled={historyLoading} className="gap-1.5 text-xs text-zinc-500">
+                <RotateCcw className={cn("h-3 w-3", historyLoading && "animate-spin")} /> Refresh
+              </Button>
             </div>
           </CardHeader>
           <CardContent>
-            {history.length === 0 ? (
+            {historyLoading ? (
+              <p className="text-sm text-zinc-600 py-4 text-center">Loading...</p>
+            ) : history.length === 0 ? (
               <p className="text-sm text-zinc-600 py-4 text-center">No scans yet</p>
             ) : (
               <div className="space-y-2">
                 {history.map((entry) => (
-                  <button
-                    key={entry.id}
-                    className="w-full flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900 p-3 hover:border-zinc-700 transition-colors text-left"
-                    onClick={() => {
-                      setHosts(entry.hosts);
-                      setRawLines(entry.raw.split("\n"));
-                      setScanCommand(entry.command);
-                      setScanStatus("completed");
-                      setShowHistory(false);
-                    }}
-                  >
-                    <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-mono text-zinc-200">{entry.target}</p>
-                      <p className="text-[10px] text-zinc-500 truncate">{entry.command}</p>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <p className="text-xs text-zinc-400">{entry.hosts.length} host(s)</p>
-                      <p className="text-[10px] text-zinc-600">
-                        {new Date(entry.started_at).toLocaleTimeString()}
-                      </p>
-                    </div>
-                  </button>
+                  <div key={entry.id} className="relative group">
+                    <button
+                      className="w-full flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900 p-3 hover:border-zinc-700 transition-colors text-left"
+                      onClick={() => loadHistoryEntry(entry.id)}
+                    >
+                      <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-mono text-zinc-200">{entry.target}</p>
+                        <p className="text-[10px] text-zinc-500 truncate">{entry.command}</p>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <p className="text-xs text-zinc-400">{entry.host_count ?? entry.hosts?.length ?? 0} host(s)</p>
+                        <p className="text-[10px] text-zinc-600">
+                          {new Date(entry.started_at).toLocaleTimeString()}
+                        </p>
+                      </div>
+                    </button>
+                    <button
+                      onClick={(e) => deleteHistoryEntry(entry.id, e)}
+                      className="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded text-zinc-600 hover:text-red-400"
+                      title="Delete scan"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 ))}
               </div>
             )}

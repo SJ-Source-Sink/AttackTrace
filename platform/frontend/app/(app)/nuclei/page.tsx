@@ -5,7 +5,7 @@ import { useSearchParams } from "next/navigation";
 import {
   Crosshair, Play, Square, Download, CheckCircle2,
   Wifi, Shield, ChevronDown, ChevronRight, Search,
-  Tag, User, Link as LinkIcon, History, Trash2, FileText, X,
+  Tag, User, Link as LinkIcon, History, Trash2, FileText, X, RotateCcw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -88,9 +88,13 @@ interface NucleiTemplate {
 interface ScanHistoryEntry {
   id: string;
   target: string;
-  findings: NucleiFinding[];
-  counts: Record<string, number>;
+  command?: string;
+  status?: string;
   started_at: string;
+  completed_at?: string;
+  counts: Record<string, number>;
+  total?: number;
+  findings?: NucleiFinding[];
 }
 
 function FindingCard({ finding }: { finding: NucleiFinding }) {
@@ -233,17 +237,56 @@ export default function NucleiPage() {
   const [scanStatus, setScanStatus]     = useState<"idle" | "running" | "completed" | "failed">("idle");
   const [filterSev, setFilterSev]       = useState<string | null>(null);
   const [searchQuery, setSearchQuery]   = useState("");
-  const [history, setHistory]           = useState<ScanHistoryEntry[]>(() => {
-    try {
-      const saved = typeof window !== "undefined" ? localStorage.getItem("nuclei_history") : null;
-      return saved ? JSON.parse(saved) : [];
-    } catch { return []; }
-  });
+  const [history, setHistory]           = useState<ScanHistoryEntry[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [showHistory, setShowHistory]   = useState(false);
 
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const res = await fetchWithAuth(`${API_BASE}/nuclei/history`);
+      if (res.ok) {
+        const data = await res.json();
+        setHistory(data.items ?? []);
+      }
+    } catch {
+      // silently ignore — history is best-effort
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    try { localStorage.setItem("nuclei_history", JSON.stringify(history.slice(0, 20))); } catch {}
-  }, [history]);
+    loadHistory();
+  }, [loadHistory]);
+
+  const loadHistoryEntry = useCallback(async (id: string) => {
+    try {
+      const res = await fetchWithAuth(`${API_BASE}/nuclei/history/${id}`);
+      if (res.ok) {
+        const full = await res.json();
+        setFindings(full.findings ?? []);
+        setCounts(full.counts ?? {});
+        setTarget(full.target ?? "");
+        setScanStatus("completed");
+        setShowHistory(false);
+      }
+    } catch {
+      toast.error("Failed to load scan");
+    }
+  }, []);
+
+  const deleteHistoryEntry = useCallback(async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const res = await fetchWithAuth(`${API_BASE}/nuclei/history/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        setHistory((prev) => prev.filter((h) => h.id !== id));
+      }
+    } catch {
+      toast.error("Failed to delete scan");
+    }
+  }, []);
   const [progressLog, setProgressLog]   = useState<string[]>([]);
   const [runningCmd, setRunningCmd]     = useState<string>("");
   const progressEndRef                  = useRef<HTMLDivElement | null>(null);
@@ -391,13 +434,8 @@ export default function NucleiPage() {
             setScanStatus("completed");
             setIsScanning(false);
             toast.success(`Nuclei scan complete — ${data.total ?? allFindings.length} finding(s)`);
-            setHistory((prev) => [{
-              id: crypto.randomUUID(),
-              target: target.trim(),
-              findings: [...allFindings],
-              counts: { ...allCounts },
-              started_at: new Date().toISOString(),
-            }, ...prev.slice(0, 19)]);
+            // Backend persists the completed scan to disk — just refresh the list.
+            loadHistory();
           } else if (event === "error") {
             setScanStatus("failed");
             setIsScanning(false);
@@ -413,7 +451,7 @@ export default function NucleiPage() {
       setIsScanning(false);
     }
   }, [target, templateMode, selectedCategories, selectedSeverities, selectedTemplates,
-      concurrency, rateLimit, timeout, followRedirects, customTemplateDir]);
+      concurrency, rateLimit, timeout, followRedirects, customTemplateDir, loadHistory]);
 
   const stopScan = () => {
     abortRef.current?.abort();
@@ -889,42 +927,44 @@ export default function NucleiPage() {
                 <History className="h-4 w-4 text-zinc-400" />
                 Scan History
               </CardTitle>
-              {history.length > 0 && (
-                <Button variant="ghost" size="sm" onClick={() => { setHistory([]); localStorage.removeItem("nuclei_history"); }} className="gap-1.5 text-xs text-zinc-500">
-                  <Trash2 className="h-3 w-3" /> Clear
-                </Button>
-              )}
+              <Button variant="ghost" size="sm" onClick={loadHistory} disabled={historyLoading} className="gap-1.5 text-xs text-zinc-500">
+                <RotateCcw className={cn("h-3 w-3", historyLoading && "animate-spin")} /> Refresh
+              </Button>
             </div>
           </CardHeader>
           <CardContent>
-            {history.length === 0 ? (
+            {historyLoading ? (
+              <p className="text-sm text-zinc-600 py-4 text-center">Loading...</p>
+            ) : history.length === 0 ? (
               <p className="text-sm text-zinc-600 py-4 text-center">No scans yet</p>
             ) : (
               <div className="space-y-2">
                 {history.map((entry) => (
-                  <button
-                    key={entry.id}
-                    className="w-full flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900 p-3 hover:border-zinc-700 transition-colors text-left"
-                    onClick={() => {
-                      setFindings(entry.findings);
-                      setCounts(entry.counts);
-                      setTarget(entry.target);
-                      setScanStatus("completed");
-                      setShowHistory(false);
-                    }}
-                  >
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm text-zinc-300 font-mono truncate">{entry.target}</p>
-                      <p className="text-xs text-zinc-600">{new Date(entry.started_at).toLocaleString()}</p>
-                    </div>
-                    <div className="flex gap-1.5 shrink-0">
-                      {SEVERITIES.map((sev) => entry.counts[sev] ? (
-                        <Badge key={sev} className={cn("text-[10px] border capitalize py-0 h-4", SEV_COLORS[sev])}>
-                          {entry.counts[sev]} {sev}
-                        </Badge>
-                      ) : null)}
-                    </div>
-                  </button>
+                  <div key={entry.id} className="relative group">
+                    <button
+                      className="w-full flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900 p-3 hover:border-zinc-700 transition-colors text-left"
+                      onClick={() => loadHistoryEntry(entry.id)}
+                    >
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm text-zinc-300 font-mono truncate">{entry.target}</p>
+                        <p className="text-xs text-zinc-600">{new Date(entry.started_at).toLocaleString()}</p>
+                      </div>
+                      <div className="flex gap-1.5 shrink-0">
+                        {SEVERITIES.map((sev) => entry.counts?.[sev] ? (
+                          <Badge key={sev} className={cn("text-[10px] border capitalize py-0 h-4", SEV_COLORS[sev])}>
+                            {entry.counts[sev]} {sev}
+                          </Badge>
+                        ) : null)}
+                      </div>
+                    </button>
+                    <button
+                      onClick={(e) => deleteHistoryEntry(entry.id, e)}
+                      className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded text-zinc-600 hover:text-red-400"
+                      title="Delete scan"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 ))}
               </div>
             )}

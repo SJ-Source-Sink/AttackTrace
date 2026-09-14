@@ -4,7 +4,7 @@ import React, { useState, useRef, useCallback, useEffect } from "react";
 import {
   Cloud, Play, Square, Shield, ShieldAlert, ShieldCheck, ShieldX,
   CheckCircle2, XCircle, AlertTriangle, Info, ChevronDown, ChevronRight,
-  History, Trash2, Clock, Download, Eye, EyeOff, RefreshCw,
+  History, Trash2, Clock, Download, Eye, EyeOff, RefreshCw, RotateCcw,
   Server, Database, Lock, Key, Globe, Layers,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -243,6 +243,15 @@ export default function CSPMPage() {
     } catch {
       toast.error("Failed to delete scan");
     }
+  };
+
+  const restoreFromHistory = (h: HistoryDetail) => {
+    const p = h.provider as Provider;
+    setProvider(p);
+    if (p === "aws" && h.region) setAwsRegion(h.region);
+    if (h.severity_filter) setSeverityFilter(h.severity_filter);
+    setActiveTab("scanner");
+    toast.success(`Restored ${h.provider.toUpperCase()} scan configuration`);
   };
 
   // ── Scan ──────────────────────────────────────────────────────────────────
@@ -1051,14 +1060,24 @@ export default function CSPMPage() {
                         <span className="text-xs text-zinc-500 font-normal">{selectedHistory.region}</span>
                       )}
                     </CardTitle>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => deleteHistory(selectedHistory.id)}
-                      className="h-7 w-7 p-0 text-zinc-500 hover:text-red-400"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => restoreFromHistory(selectedHistory)}
+                        className="gap-1.5 h-7"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" /> Restore to Scanner
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => deleteHistory(selectedHistory.id)}
+                        className="h-7 w-7 p-0 text-zinc-500 hover:text-red-400"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
                   </div>
                   <p className="text-xs text-zinc-500">
                     {new Date(selectedHistory.started_at).toLocaleString()} ·{" "}

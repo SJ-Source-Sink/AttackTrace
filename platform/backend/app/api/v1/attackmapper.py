@@ -6,6 +6,7 @@ Works on any machine after git pull with no pip install required.
 import asyncio
 import json
 import os
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 
+from app.core.config import get_settings as _get_settings
 from app.core.dependencies import get_current_org_id, get_current_user, require_tool
 from app.models.db.user import User
 
@@ -66,6 +68,86 @@ def _get_module(infra: str):
 
 # In-memory scan history
 _scan_history: dict[str, dict] = {}
+
+# ── Filesystem history (org-scoped) — same pattern as secrets.py/cspm.py ─────
+
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def _validate_uuid(value: str, label: str) -> str:
+    if not _UUID_RE.match(value):
+        raise HTTPException(status_code=400, detail=f"Invalid {label}: must be a UUID")
+    return value
+
+
+def _history_dir(org_id: str) -> Path:
+    d = Path(_get_settings().ATTACKTRACE_WORKSPACE_DIR) / "attackmapper" / org_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _safe_history_path(org_id: str, scan_id: str) -> Path:
+    """Build and confine the history file path to the org's history directory."""
+    _validate_uuid(scan_id, "scan_id")
+    base = _history_dir(org_id)
+    candidate = (base / f"{scan_id}.json").resolve()
+    if not candidate.is_relative_to(base.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid scan_id")
+    return candidate
+
+
+def _save_scan_result(org_id: str, record: dict) -> None:
+    """Persist a completed scan record as JSON."""
+    try:
+        path = _history_dir(org_id) / f"{record['id']}.json"
+        path.write_text(json.dumps(record, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def _load_history(org_id: str, limit: int = 50) -> list[dict]:
+    """Load scan history for an org, newest first."""
+    try:
+        files = sorted(
+            _history_dir(org_id).glob("*.json"),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )[:limit]
+        records = []
+        for f in files:
+            try:
+                records.append(json.loads(f.read_text()))
+            except Exception:
+                pass
+        return records
+    except Exception:
+        return []
+
+
+def _load_scan(org_id: str, scan_id: str) -> dict | None:
+    """Load a single scan record by ID."""
+    try:
+        path = _safe_history_path(org_id, scan_id)
+        if path.exists():
+            return json.loads(path.read_text())
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    return None
+
+
+def _delete_scan(org_id: str, scan_id: str) -> bool:
+    try:
+        path = _safe_history_path(org_id, scan_id)
+        if path.exists():
+            path.unlink()
+            return True
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    return False
 
 INFRA_LABELS: dict[str, str] = {
     "ad": "Active Directory",
@@ -252,6 +334,11 @@ async def _stream_attackmapper(scan_id: str, req: AttackMapperRequest, org_id: u
             "threat_intel": threat_intel,
         })
 
+        # Persist the completed scan to disk — the in-memory dict above is
+        # only good for the process lifetime; without this, history was lost
+        # on every backend restart.
+        _save_scan_result(str(org_id), _scan_history[scan_id])
+
         yield _sse("complete", {
             "scan_id": scan_id,
             "infrastructure_type": infra,
@@ -267,6 +354,7 @@ async def _stream_attackmapper(scan_id: str, req: AttackMapperRequest, org_id: u
 
     except Exception as exc:
         _scan_history[scan_id].update({"status": "failed", "error": str(exc)})
+        _save_scan_result(str(org_id), _scan_history[scan_id])
         yield _sse("error", {"message": str(exc)})
 
 
@@ -330,6 +418,55 @@ async def get_attackmapper_scan(
     if not scan or scan.get("org_id") != str(org_id):
         raise HTTPException(status_code=404, detail="Scan not found")
     return scan
+
+
+# ── Filesystem-backed history endpoints (survive backend restarts) ───────────
+
+@router.get("/history", summary="List AttackMapper scan history (disk-persisted)")
+async def list_history(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: uuid.UUID = Depends(get_current_org_id),
+) -> dict:
+    records = _load_history(str(org_id))
+    # Lightweight summaries — no full technique/chain/intel data
+    summaries = []
+    for r in records:
+        summaries.append({
+            "id": r.get("id"),
+            "infrastructure_type": r.get("infrastructure_type"),
+            "infrastructure_label": r.get("infrastructure_label"),
+            "status": r.get("status"),
+            "started_at": r.get("started_at"),
+            "completed_at": r.get("completed_at"),
+            "technique_count": len(r.get("techniques", [])),
+            "chain_steps": len((r.get("attack_chain") or {}).get("steps", [])),
+            "critical_cves": len((r.get("threat_intel") or {}).get("critical_cves", [])),
+        })
+    return {"items": summaries, "total": len(summaries)}
+
+
+@router.get("/history/{scan_id}", summary="Get a single AttackMapper scan result (disk-persisted)")
+async def get_history_item(
+    scan_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: uuid.UUID = Depends(get_current_org_id),
+) -> dict:
+    record = _load_scan(str(org_id), scan_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return record
+
+
+@router.delete("/history/{scan_id}", summary="Delete an AttackMapper scan result")
+async def delete_history_item(
+    scan_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: uuid.UUID = Depends(get_current_org_id),
+) -> dict:
+    deleted = _delete_scan(str(org_id), scan_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return {"ok": True, "scan_id": scan_id}
 
 
 async def _stream_update_intel() -> AsyncGenerator[str, None]:

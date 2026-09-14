@@ -28,10 +28,15 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings as _get_settings
+from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
+from app.core.finding_confidence import grade_confidence
+from app.core.remediation import get_remediation
 from app.models.db.user import User
+from app.services.finding_ingest import ingest_findings
 
 router = APIRouter(prefix="/api-scanner", tags=["API Security Scanner"])
 
@@ -386,6 +391,48 @@ async def _fetch_openapi_spec(client: httpx.AsyncClient, url: str) -> dict | Non
     return None
 
 
+# ── finding_ingest adapter ───────────────────────────────────────────────────
+
+def _adapt_api_findings(findings: list[dict]) -> list[dict]:
+    """Normalize api_scanner.py's OWASP-API-Top-10 finding shape
+    (category/title/severity/detail/endpoint/evidence, all already built by
+    the _check_* functions above) for finding_ingest.ingest_findings.
+
+    Confidence follows the false-positive-gate doctrine
+    (app.core.finding_confidence): headers/body content actually read back
+    (missing-header check, version header, GraphQL schema dump, exposed docs
+    content) is a directly-observed fact; CORS and BOLA are differential
+    checks (two requests compared); the SSRF check only confirms payload
+    reflection, not an actual out-of-band callback, so it's the weakest
+    signal here.
+    """
+    adapted = []
+    for f in findings:
+        title = str(f.get("title") or "Untitled finding")
+        if title.startswith("Potential SSRF via"):
+            oracle = "reflected"
+        elif title.startswith("Potential BOLA/IDOR"):
+            oracle = "differential"
+        elif title == "CORS Misconfiguration":
+            oracle = "differential"
+        elif title in ("Server Version Disclosure", "GraphQL Introspection Enabled", "API Documentation Exposed"):
+            oracle = "extracted-value"
+        else:
+            oracle = "bare-signal"  # e.g. "Missing Security Headers", "No Rate Limiting Detected"
+
+        adapted.append({
+            "title": title,
+            "description": f.get("detail", ""),
+            "severity": f.get("severity", "medium"),
+            "category": f.get("category", ""),
+            "affected_asset": f.get("endpoint", ""),
+            "evidence": f.get("evidence", ""),
+            "remediation": get_remediation(category=f.get("category"), title=title),
+            "confidence": grade_confidence(oracle),
+        })
+    return adapted
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @router.get("/history", summary="List API security scan history")
@@ -425,6 +472,7 @@ async def scan_api(
     payload: APIScanRequest,
     org_id: Annotated[str, Depends(get_current_org_id)],
     user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> StreamingResponse:
     """
     Runs OWASP API Top 10 checks against the target API base URL.
@@ -525,6 +573,14 @@ async def scan_api(
             "status": "completed",
         }
         _save_scan_result(org_id, record)
+
+        if all_findings:
+            try:
+                adapted = _adapt_api_findings(all_findings)
+                await ingest_findings(db, org_id, source="api_scanner", source_scan_id=scan_id, findings=adapted)
+                await db.commit()
+            except Exception:
+                await db.rollback()
 
         yield _sse("complete", {
             "scan_id": scan_id,

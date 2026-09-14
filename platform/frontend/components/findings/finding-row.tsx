@@ -222,7 +222,7 @@ export function FindingRow({ finding }: FindingRowProps) {
             )}
             <span className="text-xs text-zinc-500 truncate max-w-xs font-mono">{finding.asset_value}</span>
             <span className="inline-flex items-center gap-1 text-xs text-zinc-600">
-              {finding.category === "exposed_secret" && (
+              {(finding.category === "exposed_secret" || finding.category === "secrets") && (
                 <Lock className="h-3 w-3 text-amber-400" />
               )}
               {finding.category}

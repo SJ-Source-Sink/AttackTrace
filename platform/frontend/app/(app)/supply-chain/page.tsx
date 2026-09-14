@@ -4,7 +4,7 @@ import React, { useState, useRef, useCallback, useEffect } from "react";
 import {
   Package, Upload, Play, Square, CheckCircle2, AlertTriangle,
   ChevronDown, ChevronUp, History, Trash2, ArrowLeft, Clock,
-  Loader2, ShieldAlert, ShieldOff, ExternalLink, FileText, RefreshCw,
+  Loader2, ShieldAlert, ShieldOff, ExternalLink, FileText, RefreshCw, RotateCcw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -241,6 +241,14 @@ export default function SupplyChainPage() {
     if (historyDetail?.id === id) setHistoryDetail(null);
   };
 
+  // The uploaded manifest file itself isn't persisted server-side, so there's
+  // no target/URL to restore — just take the user back to the scanner tab
+  // ready to re-upload the same kind of file.
+  const restoreFromHistory = (h: ScanRecord) => {
+    setTab("scanner");
+    toast.info(`Switched to Scanner — re-upload ${h.filename} to rescan`);
+  };
+
   const sevCounts = findings.reduce((acc, f) => {
     acc[f.severity] = (acc[f.severity] || 0) + 1;
     return acc;
@@ -408,14 +416,24 @@ export default function SupplyChainPage() {
                   </Button>
                   <h2 className="text-lg font-semibold text-zinc-200">{historyDetail.filename}</h2>
                   <Badge className="text-xs bg-zinc-800 text-zinc-400">{historyDetail.ecosystem}</Badge>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="ml-auto gap-1.5"
-                    onClick={() => downloadSbom(historyDetail.id)}
-                  >
-                    <FileText className="h-3.5 w-3.5" /> Export SBOM
-                  </Button>
+                  <div className="ml-auto flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={() => restoreFromHistory(historyDetail)}
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" /> Restore to Scanner
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={() => downloadSbom(historyDetail.id)}
+                    >
+                      <FileText className="h-3.5 w-3.5" /> Export SBOM
+                    </Button>
+                  </div>
                 </div>
                 <div className="grid grid-cols-5 gap-3">
                   {(["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] as Severity[]).map(sev => (

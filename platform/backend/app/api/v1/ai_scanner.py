@@ -28,7 +28,9 @@ from pydantic import BaseModel
 from app.core.config import get_settings as _get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
+from app.core.remediation import get_remediation
 from app.models.db.user import User
+from app.services.finding_ingest import ingest_findings
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # ── Scan history storage (filesystem) ────────────────────────────────────────
@@ -1129,6 +1131,81 @@ async def _run_crescendo(
     return is_vulnerable, best_score, best_reason, conversation
 
 # ──────────────────────────────────────────────────────────────────────────────
+# finding_ingest ADAPTER
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _adapt_ai_findings(findings: list[dict]) -> list[dict]:
+    """Normalize ai_scanner.py's LLM red-team test-result shape (plugin_id,
+    plugin_name, category, owasp, mitre, strategy, severity, endpoint, prompt,
+    response, result, score, reason, multi_turn, conversation — see the
+    `result` dict built in the plugin-test loop below) for
+    finding_ingest.ingest_findings.
+
+    Confidence is derived from the grading score (heuristic phrase-match or
+    LLM-judge, 0-1) rather than ever set to "certain" — a semantic compliance
+    judgment (did the model's free-text response actually comply with the
+    attack?) is inherently a soft oracle under the false-positive-gate
+    doctrine (app.core.finding_confidence), never the top reliability tier.
+    The one deterministic exception is the rate-limit probe (a pass/fail
+    "did any of 10 requests get a 429" bare-signal check).
+
+    A finding's dedup key is (org_id, title, affected_asset, cve) — the same
+    plugin re-triggering under a different transform strategy (base64, ROT13,
+    etc.) is a materially different attack variant worth keeping as its own
+    row, so the strategy name is folded into the title whenever it isn't the
+    plain baseline.
+    """
+    adapted = []
+    for f in findings:
+        plugin_id = f.get("plugin_id", "")
+        plugin_name = str(f.get("plugin_name") or "Untitled finding")
+        strategy_id = f.get("strategy", "none")
+        strategy_name = f.get("strategy_name", "")
+        title = plugin_name if strategy_id in ("none", "", "crescendo") else f"{plugin_name} ({strategy_name})"
+
+        try:
+            score = float(f.get("score") or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+
+        if plugin_id == "behavioral:rate-limit":
+            confidence = "low"  # bare-signal: single pass/fail probe, no corroboration
+        elif score >= 0.8:
+            confidence = "high"
+        elif score >= 0.5:
+            confidence = "medium"
+        else:
+            confidence = "low"
+
+        description = (
+            f"{plugin_name} ({f.get('owasp', '')}/{f.get('mitre', '')}) flagged VULNERABLE "
+            f"via the {strategy_name or 'Baseline'} strategy. {f.get('reason', '')}"
+        ).strip()
+
+        adapted.append({
+            "title": title,
+            "description": description,
+            "severity": f.get("severity", "medium"),
+            "category": f.get("category", ""),
+            "affected_asset": f.get("endpoint", ""),
+            "evidence": {
+                "prompt": f.get("prompt", ""),
+                "response": f.get("response", ""),
+                "reason": f.get("reason", ""),
+                "score": f.get("score"),
+                "result": f.get("result"),
+                "owasp": f.get("owasp"),
+                "mitre": f.get("mitre"),
+                "multi_turn": f.get("multi_turn", False),
+                "conversation": f.get("conversation") or [],
+            },
+            "remediation": get_remediation(category=f.get("category"), title=plugin_name),
+            "confidence": confidence,
+        })
+    return adapted
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # MAIN SCAN GENERATOR
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -1142,6 +1219,7 @@ async def _run_ai_scan(
     user_auth: str | None,
     llm_grader_key: dict | None,
     org_id: str | None = None,
+    db: AsyncSession | None = None,
 ) -> AsyncGenerator[str, None]:
     scan_id = str(_uuid_mod.uuid4())
     started_at = datetime.now(timezone.utc).isoformat()
@@ -1486,6 +1564,14 @@ async def _run_ai_scan(
                 "summary":     summary_payload,
             })
 
+            if test_results and db is not None:
+                try:
+                    adapted = _adapt_ai_findings(test_results)
+                    await ingest_findings(db, org_id, source="ai_scanner", source_scan_id=scan_id, findings=adapted)
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # REQUEST MODEL + ROUTER
@@ -1596,6 +1682,7 @@ async def scan_ai_endpoints(
             user_auth=payload.build_auth_header(),
             llm_grader_key=grader_config,
             org_id=str(org_id),
+            db=db,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

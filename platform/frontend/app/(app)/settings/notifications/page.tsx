@@ -41,9 +41,19 @@ const EVENT_LABELS: Record<NotificationEvent, string> = {
   "scan.completed": "Scan Completed",
   "finding.critical": "Critical Finding",
   "sla.breached": "SLA Breach",
+  "asset.discovered": "New Asset Discovered",
+  "port.opened": "New Port Opened",
+  "cert.expiring": "Certificate Expiring",
 };
 
-const ALL_EVENTS: NotificationEvent[] = ["scan.completed", "finding.critical", "sla.breached"];
+const ALL_EVENTS: NotificationEvent[] = [
+  "scan.completed",
+  "finding.critical",
+  "sla.breached",
+  "asset.discovered",
+  "port.opened",
+  "cert.expiring",
+];
 
 interface ChannelTypeConfig {
   type: NotificationChannelType;

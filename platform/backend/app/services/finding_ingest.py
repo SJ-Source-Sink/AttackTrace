@@ -60,6 +60,19 @@ async def ingest_findings(
     skipped = 0
     newly_created_critical_high: list[Finding] = []
 
+    # dedup_hash -> Finding object added earlier in *this* call. AsyncSessionLocal
+    # is configured with autoflush=False (app.core.database), so a `db.add()`
+    # from a few iterations ago is never visible to a later SELECT in the same
+    # call — without this, two findings that share a dedup_hash (e.g. the same
+    # pattern name matched at multiple lines in the same file, which is common:
+    # js_scanner.py alone allows up to 5 per pattern per file) both pass the
+    # "not found" check, both get added, and the flush/commit at the end of the
+    # request then hits `uq_finding_org_dedup_hash` and crashes the whole scan.
+    # This mirrors the same root cause already fixed once in scan_worker.py
+    # (commit 5f0306b) for the core pipeline, applied here for every scanner
+    # that goes through this shared helper.
+    seen_this_call: dict[str, Finding] = {}
+
     for f in findings:
         severity_raw = str(f.get("severity", "info")).lower()
         if severity_raw == "info":
@@ -74,9 +87,11 @@ async def ingest_findings(
 
         dedup = compute_dedup_hash(org_id, title, affected_asset, cve_list)
 
-        existing = (
-            await db.execute(select(Finding).where(Finding.org_id == org_id, Finding.dedup_hash == dedup))
-        ).scalar_one_or_none()
+        existing = seen_this_call.get(dedup)
+        if existing is None:
+            existing = (
+                await db.execute(select(Finding).where(Finding.org_id == org_id, Finding.dedup_hash == dedup))
+            ).scalar_one_or_none()
 
         severity = _SEVERITY_MAP.get(severity_raw, FindingSeverity.INFO)
         evidence = f.get("evidence")
@@ -106,12 +121,14 @@ async def ingest_findings(
                 dedup_hash=dedup,
             )
             db.add(new_finding)
+            seen_this_call[dedup] = new_finding
             inserted += 1
             if severity in _NOTIFY_SEVERITIES:
                 newly_created_critical_high.append(new_finding)
         else:
             # Refresh the mutable evidence trail on a rescan; don't touch
             # lifecycle fields (status/suppressed) the user may have set.
+            seen_this_call[dedup] = existing
             existing.evidence = evidence
             existing.source_scan_id = source_scan_id
             if f.get("remediation"):
