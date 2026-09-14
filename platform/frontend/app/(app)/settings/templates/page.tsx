@@ -45,7 +45,7 @@ export default function TemplatesPage() {
 
   const PER_PAGE = 50;
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["nuclei", "templates", "browse", search, category, page],
     queryFn: () =>
       nucleiApi.browseTemplates({ search, category, page, per_page: PER_PAGE }) as Promise<NucleiTemplateListResponse>,
@@ -167,6 +167,17 @@ export default function TemplatesPage() {
               {Array.from({ length: 8 }).map((_, i) => (
                 <Skeleton key={i} className="h-10 w-full" />
               ))}
+            </div>
+          ) : isError ? (
+            <div className="p-6">
+              <EmptyState
+                isError
+                icon={<FileCode2 className="h-8 w-8" />}
+                title="Something went wrong loading templates"
+                errorMessage={(error as Error)?.message || "Failed to load nuclei templates. Please try again."}
+                onRetry={() => refetch()}
+                isRetrying={isFetching}
+              />
             </div>
           ) : templates.length === 0 ? (
             <div className="p-6">

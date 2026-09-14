@@ -36,6 +36,7 @@ from app.models.schemas.finding import (
     FindingResponse,
     FindingUpdate,
 )
+from app.services.notification_service import push_in_app_notification
 from app.services.risk_scoring_service import compute_risk_score
 from app.services.sla_service import apply_compliance_tags, compute_sla_deadline
 
@@ -696,6 +697,7 @@ async def update_finding(
         "false_positive": finding.false_positive,
         "suppressed": finding.suppressed,
     }
+    old_assigned_to = finding.assigned_to
 
     if payload.status is not None:
         try:
@@ -827,6 +829,21 @@ async def update_finding(
     if before_state != after_state:
         background_tasks.add_task(invalidate_dashboard_cache, org_id)
 
+    # Assignment used to be entirely silent — the assignee had no way to
+    # learn a finding landed on them short of stumbling onto it in the list.
+    if finding.assigned_to is not None and finding.assigned_to != old_assigned_to:
+        background_tasks.add_task(
+            push_in_app_notification,
+            org_id=str(org_id),
+            event_type="finding.assigned",
+            title=f"Finding assigned to you: {finding.title[:80]}",
+            body=f"Assigned by {current_user.full_name or current_user.email}",
+            resource_type="finding",
+            resource_id=str(finding_id),
+            severity=finding.severity.value,
+            user_id=str(finding.assigned_to),
+        )
+
     cc_result = await db.execute(
         select(func.count(FindingComment.id)).where(FindingComment.finding_id == finding_id)
     )
@@ -901,11 +918,12 @@ async def revalidate_finding_endpoint(
 async def add_comment(
     finding_id: UUID,
     payload: FindingCommentCreate,
+    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_user)],
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
 ) -> FindingCommentResponse:
-    await _get_finding_or_404(db, finding_id, org_id)
+    finding = await _get_finding_or_404(db, finding_id, org_id)
 
     comment = FindingComment(
         finding_id=finding_id,
@@ -915,6 +933,22 @@ async def add_comment(
     db.add(comment)
     await db.flush()
     await db.refresh(comment)
+
+    # Comments used to be entirely silent to everyone but the person who
+    # happened to reload the page — notify the finding's assignee (unless
+    # they're the one commenting).
+    if finding.assigned_to is not None and finding.assigned_to != current_user.id:
+        background_tasks.add_task(
+            push_in_app_notification,
+            org_id=str(org_id),
+            event_type="finding.commented",
+            title=f"New comment on: {finding.title[:80]}",
+            body=f"{current_user.full_name or current_user.email}: {payload.body[:140]}",
+            resource_type="finding",
+            resource_id=str(finding_id),
+            severity="info",
+            user_id=str(finding.assigned_to),
+        )
 
     return FindingCommentResponse.from_orm(comment, current_user)
 
@@ -959,6 +993,48 @@ async def list_comments(
     }
 
 
+@router.get(
+    "/{finding_id}/history",
+    summary="Get audit history for a finding",
+    description=(
+        "Returns AuditLog events recorded against this finding (status changes, "
+        "creation, deletion, suppression, etc.), newest first, with the acting "
+        "user's display name resolved where available."
+    ),
+)
+async def get_finding_history(
+    finding_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    await _get_finding_or_404(db, finding_id, org_id)
+
+    result = await db.execute(
+        select(AuditLog, User.full_name, User.email)
+        .outerjoin(User, User.id == AuditLog.user_id)
+        .where(
+            AuditLog.org_id == org_id,
+            AuditLog.resource_type == "finding",
+            AuditLog.resource_id == str(finding_id),
+        )
+        .order_by(AuditLog.created_at.desc())
+    )
+    rows = result.all()
+
+    items = []
+    for log, full_name, email in rows:
+        items.append({
+            "id": str(log.id),
+            "action": log.action,
+            "before_state": log.before_state,
+            "after_state": log.after_state,
+            "created_at": log.created_at.isoformat(),
+            "user_id": str(log.user_id) if log.user_id else None,
+            "user_name": full_name or (email or "Unknown"),
+        })
+
+    return {"items": items, "total": len(items)}
 
 
 @router.get(

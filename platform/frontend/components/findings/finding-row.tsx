@@ -151,6 +151,8 @@ export function FindingRow({ finding }: FindingRowProps) {
       <div
         role="button"
         tabIndex={0}
+        aria-label={expanded ? "Collapse finding details" : "Expand finding details"}
+        aria-expanded={expanded}
         className="w-full flex items-center gap-3 px-4 py-3 text-left cursor-pointer"
         onClick={() => setExpanded(!expanded)}
         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setExpanded(!expanded); } }}
@@ -201,7 +203,22 @@ export function FindingRow({ finding }: FindingRowProps) {
         {/* Title + meta */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-sm font-medium text-zinc-200 truncate max-w-md">{finding.title}</span>
+            <span
+              role="link"
+              tabIndex={0}
+              title="Open full finding detail"
+              className="text-sm font-medium text-zinc-200 truncate max-w-md hover:text-blue-400 hover:underline decoration-zinc-600 underline-offset-2 cursor-pointer"
+              onClick={(e) => { e.stopPropagation(); router.push(`/findings/${finding.id}`); }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  router.push(`/findings/${finding.id}`);
+                }
+              }}
+            >
+              {finding.title}
+            </span>
             <KevBadge kev_status={finding.kev_status} epss_score={finding.epss_score} />
             <SlaBadge sla_deadline={finding.sla_deadline} />
           </div>

@@ -89,6 +89,54 @@ async def get_org_notifications(
         return []
 
 
+async def get_recent_notifications(org_id: str, count: int = 50) -> list[dict]:
+    """
+    Read the most recent in-app notifications from the org's Redis stream,
+    newest first — the shape the notification center's feed endpoint needs
+    (get_org_notifications is oldest-first from a given cursor, built for
+    XREAD-based polling instead).
+    """
+    r = _get_redis()
+    stream_key = f"notifications:{org_id}"
+    try:
+        entries = await r.xrevrange(stream_key, count=count)
+        return [{"id": msg_id, **data} for msg_id, data in entries]
+    except Exception as e:
+        logger.error(f"Failed to read recent notifications: {e}")
+        return []
+
+
+async def get_last_read_id(org_id: str, user_id: str) -> str:
+    """Per-user 'last seen' cursor into the org's shared notification stream —
+    the stream itself is org-wide (any member can see scan/finding events),
+    but unread state is naturally per-viewer."""
+    r = _get_redis()
+    try:
+        val = await r.get(f"notifications:{org_id}:read:{user_id}")
+        return val or "0"
+    except Exception as e:
+        logger.error(f"Failed to read last-read cursor: {e}")
+        return "0"
+
+
+async def set_last_read_id(org_id: str, user_id: str, last_id: str) -> None:
+    r = _get_redis()
+    try:
+        await r.set(f"notifications:{org_id}:read:{user_id}", last_id, ex=60 * 60 * 24 * 90)
+    except Exception as e:
+        logger.error(f"Failed to set last-read cursor: {e}")
+
+
+def stream_id_gt(a: str, b: str) -> bool:
+    """Compare two Redis stream ids ('<ms>-<seq>') numerically, not lexically."""
+    try:
+        a_ms, a_seq = a.split("-")
+        b_ms, b_seq = b.split("-")
+        return (int(a_ms), int(a_seq)) > (int(b_ms), int(b_seq))
+    except (ValueError, AttributeError):
+        return False
+
+
 # --- Webhook Notifications ---
 
 def _sign_webhook_payload(payload: bytes, secret: str) -> str:

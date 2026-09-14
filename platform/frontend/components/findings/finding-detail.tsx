@@ -42,6 +42,7 @@ import { ConfidenceBadge } from "@/components/findings/confidence-badge";
 import { StatusWorkflow } from "@/components/findings/status-workflow";
 import { EvidenceBlock } from "@/components/findings/evidence-block";
 import { FindingComments } from "@/components/findings/finding-comments";
+import { FindingHistory } from "@/components/findings/finding-history";
 import { severityBgColor, formatDate, capitalize } from "@/lib/utils";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { findingsApi } from "@/lib/api";
@@ -443,6 +444,11 @@ export function FindingDetail({ finding, onClose }: FindingDetailProps) {
               </dl>
             </div>
           )}
+
+          <Separator />
+
+          {/* History */}
+          <FindingHistory findingId={finding.id} />
 
           <Separator />
 

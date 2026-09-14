@@ -16,10 +16,13 @@ interface ExecutiveMetrics {
   risk_trend: { "30d": number; "60d": number; "90d": number };
   new_vs_recurring: { new: number; recurring: number; total: number };
   coverage_percent: number;
+  total_assets: number;
   open_critical: number;
   sla_compliance_percent: number;
   generated_at: string;
 }
+
+const NEUTRAL_COLOR = "bg-zinc-500/10 text-zinc-400";
 
 function MetricCard({
   label,
@@ -103,18 +106,6 @@ export function ExecutiveKPIs() {
 
   if (!data) return null;
 
-  const slaColor = data.sla_compliance_percent >= 80
-    ? "text-emerald-400"
-    : data.sla_compliance_percent >= 60
-    ? "text-yellow-400"
-    : "text-red-400";
-
-  const coverageColor = data.coverage_percent >= 80
-    ? "text-emerald-400"
-    : data.coverage_percent >= 50
-    ? "text-yellow-400"
-    : "text-red-400";
-
   // Risk trend: compare 30d vs 90d avg risk
   const riskTrend = data.risk_trend["30d"] > data.risk_trend["90d"]
     ? "up"
@@ -126,6 +117,12 @@ export function ExecutiveKPIs() {
   const recurringPct = totalFP > 0
     ? Math.round((data.new_vs_recurring.recurring / totalFP) * 100)
     : 0;
+
+  // A brand-new org (no assets onboarded yet) or one with no findings at all
+  // shouldn't show alarming red/orange KPI tiles — those thresholds are only
+  // meaningful once there's actually something to measure.
+  const hasNoAssets = data.total_assets === 0;
+  const hasNoFindings = totalFP === 0;
 
   return (
     <div className="space-y-4">
@@ -143,35 +140,35 @@ export function ExecutiveKPIs() {
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <MetricCard
           label="SLA Compliance"
-          value={`${data.sla_compliance_percent.toFixed(0)}%`}
-          subtext="findings resolved on time"
+          value={hasNoFindings ? "—" : `${data.sla_compliance_percent.toFixed(0)}%`}
+          subtext={hasNoFindings ? "no findings yet" : "findings resolved on time"}
           icon={Target}
-          color={data.sla_compliance_percent >= 80 ? "bg-emerald-500/10 text-emerald-400" : "bg-red-500/10 text-red-400"}
-          trend={data.sla_compliance_percent >= 80 ? "down" : "up"}
+          color={hasNoFindings ? NEUTRAL_COLOR : data.sla_compliance_percent >= 80 ? "bg-emerald-500/10 text-emerald-400" : "bg-red-500/10 text-red-400"}
+          trend={hasNoFindings ? "neutral" : data.sla_compliance_percent >= 80 ? "down" : "up"}
         />
         <MetricCard
           label="Open Critical"
           value={String(data.open_critical)}
-          subtext="require immediate action"
+          subtext={hasNoAssets ? "no assets onboarded yet" : "require immediate action"}
           icon={Shield}
           color={data.open_critical === 0 ? "bg-emerald-500/10 text-emerald-400" : "bg-red-500/10 text-red-400"}
           trend={data.open_critical === 0 ? "neutral" : "up"}
         />
         <MetricCard
           label="Asset Coverage"
-          value={`${data.coverage_percent.toFixed(0)}%`}
-          subtext="assets scanned recently"
+          value={hasNoAssets ? "No assets" : `${data.coverage_percent.toFixed(0)}%`}
+          subtext={hasNoAssets ? "add assets to track coverage" : "assets scanned recently"}
           icon={Activity}
-          color="bg-blue-500/10 text-blue-400"
-          trend={data.coverage_percent >= 80 ? "down" : "up"}
+          color={hasNoAssets ? NEUTRAL_COLOR : "bg-blue-500/10 text-blue-400"}
+          trend={hasNoAssets ? "neutral" : data.coverage_percent >= 80 ? "down" : "up"}
         />
         <MetricCard
           label="Avg Risk Score"
-          value={data.risk_trend["30d"].toFixed(0)}
-          subtext="30-day average (0–100)"
+          value={hasNoFindings ? "—" : data.risk_trend["30d"].toFixed(0)}
+          subtext={hasNoFindings ? "no findings yet" : "30-day average (0–100)"}
           icon={TrendingUp}
-          color={riskTrend === "down" ? "bg-emerald-500/10 text-emerald-400" : "bg-orange-500/10 text-orange-400"}
-          trend={riskTrend}
+          color={hasNoFindings ? NEUTRAL_COLOR : riskTrend === "down" ? "bg-emerald-500/10 text-emerald-400" : "bg-orange-500/10 text-orange-400"}
+          trend={hasNoFindings ? "neutral" : riskTrend}
         />
       </div>
 

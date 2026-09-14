@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Bell, ChevronDown, LogOut, Settings, User, Plus, Search, CheckCircle2, XCircle, Loader2, Clock } from "lucide-react";
+import { Bell, ChevronDown, LogOut, Settings, User, Plus, Search, CheckCircle2, XCircle, Loader2, AlertTriangle, MessageSquare, UserPlus, Radar, Clock3 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,10 +16,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
-import { scansApi } from "@/lib/api";
-import type { Scan } from "@/types";
+import { notificationsApi } from "@/lib/api";
+import type { NotificationFeedItem } from "@/types";
 
-const NOTIF_LS_KEY = "attacktrace:notif:last_seen";
 const POLL_INTERVAL_MS = 30_000;
 
 function relativeTime(iso: string): string {
@@ -32,93 +31,106 @@ function relativeTime(iso: string): string {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
-function NotificationIcon({ status }: { status: Scan["status"] }) {
-  if (status === "completed") return <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />;
-  if (status === "failed") return <XCircle className="h-4 w-4 text-red-400 shrink-0" />;
-  if (status === "running") return <Loader2 className="h-4 w-4 text-blue-400 shrink-0 animate-spin" />;
-  return <Clock className="h-4 w-4 text-zinc-400 shrink-0" />;
+const EVENT_ICONS: Record<string, React.ElementType> = {
+  "scan.completed": CheckCircle2,
+  "scan.failed": XCircle,
+  "finding.created": AlertTriangle,
+  "finding.critical": AlertTriangle,
+  "finding.assigned": UserPlus,
+  "finding.commented": MessageSquare,
+  "sla.breached": Clock3,
+  "member.added": UserPlus,
+};
+
+function NotificationIcon({ eventType, severity }: { eventType: string; severity: string }) {
+  const Icon = EVENT_ICONS[eventType] ?? Radar;
+  const color =
+    severity === "critical" || eventType === "scan.failed" ? "text-red-400"
+    : severity === "high" ? "text-orange-400"
+    : eventType === "scan.completed" ? "text-emerald-400"
+    : "text-blue-400";
+  return <Icon className={cn("h-4 w-4 shrink-0", color)} />;
 }
 
-function NotificationPanel({ onOpen }: { onOpen: () => void }) {
+function notificationHref(item: NotificationFeedItem): string | null {
+  if (!item.resource_id) return null;
+  if (item.resource_type === "finding") return `/findings/${item.resource_id}`;
+  if (item.resource_type === "scan_job") return `/scans/${item.resource_id}`;
+  return null;
+}
+
+function NotificationPanel({ onOpen }: { onOpen: (lastId: string) => void }) {
   const router = useRouter();
-  const [scans, setScans] = useState<Scan[]>([]);
+  const [items, setItems] = useState<NotificationFeedItem[]>([]);
   const [loading, setLoading] = useState(true);
   const hasFetched = useRef(false);
 
-  const fetchScans = useCallback(async () => {
+  const fetchFeed = useCallback(async () => {
     try {
-      const res = await scansApi.list({ per_page: 15, page: 1 }) as { items?: Scan[] } | Scan[];
-      const items: Scan[] = (res as { items?: Scan[] }).items ?? (res as Scan[]) ?? [];
-      setScans(items.slice(0, 12));
+      const res = await notificationsApi.feed(20);
+      setItems(res.items);
+      onOpen(res.items[0]?.id ?? "0");
     } catch {
       // silently fail
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [onOpen]);
 
   useEffect(() => {
     if (!hasFetched.current) {
       hasFetched.current = true;
-      fetchScans();
-      onOpen();
+      fetchFeed();
     }
-  }, [fetchScans, onOpen]);
+  }, [fetchFeed]);
 
-  const handleClick = (scanId: string) => {
-    router.push(`/scans/${scanId}`);
+  const handleClick = (item: NotificationFeedItem) => {
+    const href = notificationHref(item);
+    if (href) router.push(href);
   };
 
   return (
-    <div className="w-80">
+    <div className="w-96">
       <div className="px-3 py-2 border-b border-zinc-800 flex items-center justify-between">
         <span className="text-sm font-semibold text-zinc-100">Notifications</span>
-        <span className="text-xs text-zinc-500">Recent scans</span>
+        <span className="text-xs text-zinc-500">Scans, findings &amp; alerts</span>
       </div>
       <div className="max-h-[420px] overflow-y-auto">
         {loading ? (
           <div className="flex items-center justify-center py-8">
             <Loader2 className="h-5 w-5 text-zinc-500 animate-spin" />
           </div>
-        ) : scans.length === 0 ? (
-          <div className="py-8 text-center text-sm text-zinc-500">No scans yet</div>
+        ) : items.length === 0 ? (
+          <div className="py-8 text-center text-sm text-zinc-500">No activity yet</div>
         ) : (
-          scans.map((scan) => (
-            <button
-              key={scan.id}
-              type="button"
-              onClick={() => handleClick(scan.id)}
-              className="w-full text-left px-3 py-2.5 hover:bg-zinc-800/60 transition-colors border-b border-zinc-800/50 last:border-0"
-            >
-              <div className="flex items-start gap-2.5">
-                <div className="mt-0.5">
-                  <NotificationIcon status={scan.status} />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm text-zinc-200 font-medium truncate">
-                    {scan.company_name || scan.target_domains?.[0] || "Scan"}
-                  </p>
-                  <p className="text-xs text-zinc-500 truncate">
-                    {scan.target_domains?.[0]}
-                  </p>
-                  <div className="flex items-center gap-1.5 mt-0.5">
-                    <span className={cn(
-                      "text-xs capitalize",
-                      scan.status === "completed" && "text-emerald-400",
-                      scan.status === "failed" && "text-red-400",
-                      scan.status === "running" && "text-blue-400",
-                      scan.status === "pending" && "text-zinc-400",
-                      scan.status === "cancelled" && "text-zinc-500",
-                    )}>
-                      {scan.status}
-                    </span>
-                    <span className="text-zinc-600">·</span>
-                    <span className="text-xs text-zinc-500">{relativeTime(scan.updated_at)}</span>
+          items.map((item) => {
+            const href = notificationHref(item);
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => handleClick(item)}
+                disabled={!href}
+                className={cn(
+                  "w-full text-left px-3 py-2.5 border-b border-zinc-800/50 last:border-0 transition-colors",
+                  href ? "hover:bg-zinc-800/60 cursor-pointer" : "cursor-default",
+                )}
+              >
+                <div className="flex items-start gap-2.5">
+                  <div className="mt-0.5">
+                    <NotificationIcon eventType={item.event_type} severity={item.severity} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-zinc-200 font-medium truncate">{item.title}</p>
+                    {item.body && (
+                      <p className="text-xs text-zinc-500 truncate">{item.body}</p>
+                    )}
+                    <span className="text-xs text-zinc-600">{relativeTime(item.timestamp)}</span>
                   </div>
                 </div>
-              </div>
-            </button>
-          ))
+              </button>
+            );
+          })
         )}
       </div>
       <div className="px-3 py-2 border-t border-zinc-800">
@@ -153,18 +165,13 @@ export function Topbar({ className }: TopbarProps) {
   const [notifOpen, setNotifOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
 
-  // Poll for unread count (scans completed/failed since last opened)
+  // Poll the real notification feed for the unread count (scan completions/
+  // failures, critical findings, SLA breaches, assignments, comments).
   useEffect(() => {
     const computeUnread = async () => {
       try {
-        const lastSeen = parseInt(localStorage.getItem(NOTIF_LS_KEY) ?? "0", 10);
-        const res = await scansApi.list({ per_page: 15, page: 1 }) as { items?: Scan[] } | Scan[];
-        const items: Scan[] = (res as { items?: Scan[] }).items ?? (res as Scan[]) ?? [];
-        const count = items.filter((s) => {
-          const t = new Date(s.updated_at).getTime();
-          return t > lastSeen && (s.status === "completed" || s.status === "failed");
-        }).length;
-        setUnreadCount(count);
+        const res = await notificationsApi.feed(1);
+        setUnreadCount(res.unread_count);
       } catch {
         // ignore
       }
@@ -174,8 +181,8 @@ export function Topbar({ className }: TopbarProps) {
     return () => clearInterval(id);
   }, []);
 
-  const handleNotifOpen = useCallback(() => {
-    localStorage.setItem(NOTIF_LS_KEY, Date.now().toString());
+  const handleNotifOpen = useCallback((lastId: string) => {
+    notificationsApi.markRead(lastId).catch(() => {});
     setUnreadCount(0);
   }, []);
 

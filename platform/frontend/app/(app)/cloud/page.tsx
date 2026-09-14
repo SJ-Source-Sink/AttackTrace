@@ -239,13 +239,27 @@ export default function CloudDiscoveryPage() {
   const queryClient = useQueryClient();
   const [sessions, setSessions] = useState<DiscoveredSession[]>([]);
 
-  const { data: savedAssets, isLoading: assetsLoading } = useQuery({
+  const {
+    data: savedAssets,
+    isLoading: assetsLoading,
+    isError: assetsError,
+    error: assetsErrorObj,
+    refetch: refetchAssets,
+    isFetching: assetsFetching,
+  } = useQuery({
     queryKey: ["cloud", "assets"],
     queryFn: () => cloudApi.listAssets() as Promise<CloudAssetListResponse>,
     staleTime: 60_000,
   });
 
-  const { data: history, isLoading: historyLoading } = useQuery({
+  const {
+    data: history,
+    isLoading: historyLoading,
+    isError: historyError,
+    error: historyErrorObj,
+    refetch: refetchHistory,
+    isFetching: historyFetching,
+  } = useQuery({
     queryKey: ["cloud", "history"],
     queryFn: () =>
       cloudApi.history() as Promise<{
@@ -341,6 +355,17 @@ export default function CloudDiscoveryPage() {
                 <Skeleton key={i} className="h-10 w-full" />
               ))}
             </div>
+          ) : assetsError ? (
+            <div className="p-6">
+              <EmptyState
+                isError
+                icon={<Server className="h-8 w-8" />}
+                title="Something went wrong loading cloud assets"
+                errorMessage={(assetsErrorObj as Error)?.message || "Failed to load cloud assets. Please try again."}
+                onRetry={() => refetchAssets()}
+                isRetrying={assetsFetching}
+              />
+            </div>
           ) : (savedAssets?.items ?? []).length === 0 ? (
             <div className="p-6">
               <EmptyState
@@ -402,6 +427,17 @@ export default function CloudDiscoveryPage() {
               {Array.from({ length: 3 }).map((_, i) => (
                 <Skeleton key={i} className="h-10 w-full" />
               ))}
+            </div>
+          ) : historyError ? (
+            <div className="p-6">
+              <EmptyState
+                isError
+                icon={<History className="h-8 w-8" />}
+                title="Something went wrong loading discovery history"
+                errorMessage={(historyErrorObj as Error)?.message || "Failed to load discovery history. Please try again."}
+                onRetry={() => refetchHistory()}
+                isRetrying={historyFetching}
+              />
             </div>
           ) : (history?.items ?? []).length === 0 ? (
             <div className="p-6">

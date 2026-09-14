@@ -2,6 +2,7 @@
 
 import React, { useState } from "react";
 import { useRouter } from "next/navigation";
+import { useQuery } from "@tanstack/react-query";
 import {
   useReactTable,
   getCoreRowModel,
@@ -31,11 +32,21 @@ import {
   X,
   GitFork,
   MoreHorizontal,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/shared/loading-skeleton";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -43,6 +54,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { formatDate, riskScoreBarColor } from "@/lib/utils";
+import { findingsApi } from "@/lib/api";
+import { useBulkTagAssets, useBulkAssignAssets, useExportAssetsCsv } from "@/hooks/use-assets";
 import type { Asset, AssetType } from "@/types";
 
 const stripProtocol = (val: string) => val.replace(/^https?:\/\//, "");
@@ -103,6 +116,119 @@ function ScreenshotModal({ url, value, onClose }: { url: string; value: string; 
   );
 }
 
+function BulkTagDialog({
+  open,
+  onOpenChange,
+  assetIds,
+  onDone,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  assetIds: string[];
+  onDone: () => void;
+}) {
+  const [tagInput, setTagInput] = useState("");
+  const bulkTag = useBulkTagAssets();
+
+  const handleSubmit = () => {
+    const tags = tagInput
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    if (tags.length === 0 || assetIds.length === 0) return;
+    bulkTag.mutate(
+      { ids: assetIds, tags },
+      {
+        onSuccess: () => {
+          setTagInput("");
+          onOpenChange(false);
+          onDone();
+        },
+      },
+    );
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Add tags</DialogTitle>
+          <DialogDescription>
+            Add one or more tags to {assetIds.length} selected asset{assetIds.length === 1 ? "" : "s"}. Existing
+            tags are kept.
+          </DialogDescription>
+        </DialogHeader>
+        <Input
+          autoFocus
+          placeholder="e.g. production, pci-scope"
+          value={tagInput}
+          onChange={(e) => setTagInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") handleSubmit();
+          }}
+        />
+        <DialogFooter>
+          <Button variant="outline" size="sm" onClick={() => onOpenChange(false)} disabled={bulkTag.isPending}>
+            Cancel
+          </Button>
+          <Button size="sm" onClick={handleSubmit} disabled={bulkTag.isPending || !tagInput.trim()}>
+            {bulkTag.isPending && <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />}
+            Add tags
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function AssignOwnerMenu({ assetIds, onDone }: { assetIds: string[]; onDone: () => void }) {
+  const { data } = useQuery({
+    queryKey: ["findings", "assignees"],
+    queryFn: () => findingsApi.assignees(),
+    staleTime: 5 * 60_000,
+  });
+  const bulkAssign = useBulkAssignAssets();
+  const assignees = data?.items ?? [];
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 text-xs gap-1"
+          disabled={bulkAssign.isPending}
+        >
+          {bulkAssign.isPending ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <UserCircle className="h-3 w-3" />
+          )}
+          Assign Owner
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-52">
+        {assignees.length === 0 && (
+          <div className="px-2 py-1.5 text-xs text-zinc-500">No org members found</div>
+        )}
+        {assignees.map((a) => (
+          <DropdownMenuItem
+            key={a.id}
+            onClick={() =>
+              bulkAssign.mutate({ ids: assetIds, owner: a.id }, { onSuccess: onDone })
+            }
+          >
+            <div className="flex flex-col gap-0.5">
+              <span className="text-sm">{a.name}</span>
+              <span className="text-xs text-zinc-500">{a.email}</span>
+            </div>
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 const TYPE_ICONS: Record<string, React.ElementType> = {
   subdomain: Globe,
   domain: Globe,
@@ -114,24 +240,20 @@ const TYPE_ICONS: Record<string, React.ElementType> = {
 interface AssetTableProps {
   assets: Asset[];
   isLoading?: boolean;
-  onBulkTag?: (ids: string[]) => void;
-  onBulkAssign?: (ids: string[]) => void;
-  onExport?: () => void;
   onCheckTakeover?: (values: string[]) => void;
 }
 
 export function AssetTable({
   assets,
   isLoading,
-  onBulkTag,
-  onBulkAssign,
-  onExport,
   onCheckTakeover,
 }: AssetTableProps) {
   const router = useRouter();
   const [sorting, setSorting] = useState<SortingState>([]);
   const [rowSelection, setRowSelection] = useState<Record<string, boolean>>({});
   const [screenshotModal, setScreenshotModal] = useState<{ url: string; value: string } | null>(null);
+  const [tagDialogOpen, setTagDialogOpen] = useState(false);
+  const exportCsv = useExportAssetsCsv();
 
   const columns: ColumnDef<Asset>[] = [
     {
@@ -330,14 +452,20 @@ export function AssetTable({
     getSortedRowModel: getSortedRowModel(),
   });
 
-  const selectedIds = Object.keys(rowSelection).filter((k) => rowSelection[k]);
-  // Map row indices to asset values for takeover check
-  const selectedAssets = selectedIds
+  // Row selection is keyed by row index (no getRowId configured) — map back to real assets/ids.
+  const selectedRowKeys = Object.keys(rowSelection).filter((k) => rowSelection[k]);
+  const selectedAssetObjs = selectedRowKeys
     .map((k) => {
       const idx = parseInt(k, 10);
       return isNaN(idx) ? null : assets[idx];
     })
-    .filter((a): a is Asset => a != null && (a.asset_type === "subdomain" || a.asset_type === "domain"));
+    .filter((a): a is Asset => a != null);
+  const selectedIds = selectedAssetObjs.map((a) => a.id);
+  const selectedTakeoverAssets = selectedAssetObjs.filter(
+    (a) => a.asset_type === "subdomain" || a.asset_type === "domain",
+  );
+
+  const clearSelection = () => setRowSelection({});
 
   return (
     <div className="space-y-3">
@@ -353,43 +481,47 @@ export function AssetTable({
               variant="outline"
               size="sm"
               className="h-7 text-xs gap-1"
-              onClick={() => onBulkTag?.(selectedIds)}
+              onClick={() => setTagDialogOpen(true)}
             >
               <Tag className="h-3 w-3" />
               Add Tags
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 text-xs gap-1"
-              onClick={() => onBulkAssign?.(selectedIds)}
-            >
-              <UserCircle className="h-3 w-3" />
-              Assign Owner
-            </Button>
-            {selectedAssets.length > 0 && (
+            <AssignOwnerMenu assetIds={selectedIds} onDone={clearSelection} />
+            {selectedTakeoverAssets.length > 0 && (
               <Button
                 variant="outline"
                 size="sm"
                 className="h-7 text-xs gap-1 border-purple-500/40 text-purple-400 hover:bg-purple-500/10 hover:text-purple-300"
-                onClick={() => onCheckTakeover?.(selectedAssets.map((a) => a.value))}
+                onClick={() => onCheckTakeover?.(selectedTakeoverAssets.map((a) => a.value))}
               >
                 <GitFork className="h-3 w-3" />
-                Check Takeover ({selectedAssets.length})
+                Check Takeover ({selectedTakeoverAssets.length})
               </Button>
             )}
             <Button
               variant="outline"
               size="sm"
               className="h-7 text-xs gap-1"
-              onClick={onExport}
+              disabled={exportCsv.isPending}
+              onClick={() => exportCsv.mutate({ ids: selectedIds })}
             >
-              <Download className="h-3 w-3" />
+              {exportCsv.isPending ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <Download className="h-3 w-3" />
+              )}
               Export CSV
             </Button>
           </div>
         </div>
       )}
+
+      <BulkTagDialog
+        open={tagDialogOpen}
+        onOpenChange={setTagDialogOpen}
+        assetIds={selectedIds}
+        onDone={clearSelection}
+      />
 
       {/* Table */}
       <div className="rounded-lg border border-zinc-800 overflow-hidden">

@@ -1351,6 +1351,12 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
             db.commit()
             _publish_event(r, scan_job_id, "error", {"message": "Scan exceeded time limit"})
             _publish_event(r, scan_job_id, "status_change", {"status": "failed"})
+            try:
+                asyncio.run(_async_notify_scan_failed(
+                    str(job.org_id), scan_job_id, job.target_domains or [], "Scan exceeded time limit"
+                ))
+            except Exception as e:
+                logger.warning(f"notify_scan_failed failed: {e}")
             raise
 
         except Exception as exc:
@@ -1366,6 +1372,12 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
 
             _publish_event(r, scan_job_id, "error", {"message": str(exc)[:500]})
             _publish_event(r, scan_job_id, "status_change", {"status": "failed"})
+            try:
+                asyncio.run(_async_notify_scan_failed(
+                    str(job.org_id), scan_job_id, job.target_domains or [], str(exc)
+                ))
+            except Exception as e:
+                logger.warning(f"notify_scan_failed failed: {e}")
 
             # Only auto-retry transient infrastructure errors.
             # Logic errors (bad config, invalid target) are permanent — don't retry.
@@ -1751,10 +1763,37 @@ async def _async_notify_critical_findings(org_id: str, scan_job_id: str, finding
                         )
                     except Exception as _fe:
                         logger.warning(f"dispatch_notifications finding.critical failed for {f.id}: {_fe}")
+
+                    try:
+                        from app.services.notification_service import push_in_app_notification as _push_in_app
+                        await _push_in_app(
+                            org_id=org_id,
+                            event_type="finding.created",
+                            title=f"New {f.severity.value} finding: {f.title[:60]}",
+                            body=f"Affected: {f.affected_asset or 'unknown'}",
+                            resource_type="finding",
+                            resource_id=str(f.id),
+                            severity=f.severity.value,
+                        )
+                    except Exception as _fe:
+                        logger.warning(f"push_in_app_notification finding.created failed for {f.id}: {_fe}")
         finally:
             await _engine.dispose()
     except Exception as exc:
         logger.warning(f"_async_notify_critical_findings failed: {exc}")
+
+
+async def _async_notify_scan_failed(org_id, scan_job_id, target_domains, error_message):
+    try:
+        from app.services.notification_service import notify_scan_failed
+        await notify_scan_failed(
+            org_id=org_id,
+            scan_id=scan_job_id,
+            target_domains=target_domains,
+            error_message=error_message,
+        )
+    except Exception as e:
+        logger.warning(f"notify_scan_failed failed: {e}")
 
 
 async def _async_notify_completion(org_id, scan_job_id, target_domains, findings_count):

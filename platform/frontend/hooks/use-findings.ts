@@ -6,6 +6,7 @@ import type {
   Finding,
   FindingComment,
   FindingCommentListResponse,
+  FindingHistoryListResponse,
   FindingListResponse,
   FindingFilters,
   UpdateFindingRequest,
@@ -19,6 +20,7 @@ export const findingKeys = {
   details: () => [...findingKeys.all, "detail"] as const,
   detail: (id: string) => [...findingKeys.details(), id] as const,
   comments: (id: string) => [...findingKeys.detail(id), "comments"] as const,
+  history: (id: string) => [...findingKeys.detail(id), "history"] as const,
 };
 
 function filtersToParams(
@@ -87,6 +89,7 @@ export function useUpdateFinding() {
       findingsApi.update(id, data) as Promise<Finding>,
     onSuccess: (finding) => {
       queryClient.invalidateQueries({ queryKey: findingKeys.detail(finding.id) });
+      queryClient.invalidateQueries({ queryKey: findingKeys.history(finding.id) });
       queryClient.invalidateQueries({ queryKey: findingKeys.lists() });
       toast.success("Finding updated");
     },
@@ -117,6 +120,15 @@ export function useFindingComments(findingId: string | null) {
     queryKey: findingKeys.comments(findingId ?? ""),
     queryFn: () =>
       findingsApi.comments(findingId!) as Promise<FindingCommentListResponse>,
+    enabled: !!findingId,
+  });
+}
+
+export function useFindingHistory(findingId: string | null) {
+  return useQuery({
+    queryKey: findingKeys.history(findingId ?? ""),
+    queryFn: () =>
+      findingsApi.history(findingId!) as Promise<FindingHistoryListResponse>,
     enabled: !!findingId,
   });
 }

@@ -3,6 +3,7 @@
 import React, { useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Globe, ChevronLeft, ChevronRight, Radar, Plus, Network } from "lucide-react";
+import Link from "next/link";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -120,7 +121,7 @@ export default function AssetsPage() {
     [router, pathname],
   );
 
-  const { data, isLoading } = useAssets({ ...filters, page, per_page: PER_PAGE });
+  const { data, isLoading, isError, error, refetch, isFetching } = useAssets({ ...filters, page, per_page: PER_PAGE });
   const assets = data?.items ?? [];
   const total = data?.total ?? 0;
   const totalPages = Math.ceil(total / PER_PAGE);
@@ -165,19 +166,30 @@ export default function AssetsPage() {
 
         {/* Table */}
         <div className="flex-1 min-w-0 space-y-4">
-          {assets.length === 0 && !isLoading ? (
+          {isError ? (
+            <EmptyState
+              isError
+              icon={<Globe className="h-8 w-8" />}
+              title="Something went wrong loading assets"
+              errorMessage={(error as Error)?.message || "Failed to load assets. Please try again."}
+              onRetry={() => refetch()}
+              isRetrying={isFetching}
+            />
+          ) : assets.length === 0 && !isLoading ? (
             <EmptyState
               icon={<Globe className="h-8 w-8" />}
               title="No assets found"
               description="Start a scan to discover assets, or adjust your filters"
+              action={
+                <Button asChild>
+                  <Link href="/scans/new">Start your first scan</Link>
+                </Button>
+              }
             />
           ) : (
             <AssetTable
               assets={assets}
               isLoading={isLoading}
-              onBulkTag={(ids) => console.log("bulk tag", ids)}
-              onBulkAssign={(ids) => console.log("bulk assign", ids)}
-              onExport={() => console.log("export")}
               onCheckTakeover={(values) => router.push(`/takeover?hosts=${values.join(",")}`)}
             />
           )}

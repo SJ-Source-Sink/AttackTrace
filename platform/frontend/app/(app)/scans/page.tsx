@@ -26,7 +26,7 @@ export default function ScansPage() {
     return () => clearTimeout(t);
   }, [searchInput]);
 
-  const { data, isLoading } = useScans({
+  const { data, isLoading, isError, error, refetch, isFetching } = useScans({
     status: statusFilter === "all" ? undefined : statusFilter,
     per_page: 20,
     search: debouncedSearch || undefined,
@@ -160,6 +160,15 @@ export default function ScansPage() {
             <Skeleton key={i} className="h-28 w-full rounded-lg" />
           ))}
         </div>
+      ) : isError ? (
+        <EmptyState
+          isError
+          icon={<Search className="h-8 w-8" />}
+          title="Something went wrong loading scans"
+          errorMessage={(error as Error)?.message || "Failed to load scans. Please try again."}
+          onRetry={() => refetch()}
+          isRetrying={isFetching}
+        />
       ) : filteredScans.length === 0 ? (
         <EmptyState
           icon={<Search className="h-8 w-8" />}

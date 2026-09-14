@@ -19,6 +19,12 @@ from app.core.security import decrypt_credential, encrypt_credential
 from app.core.ssrf_guard import SAFE_CLIENT_KWARGS, SSRFValidationError, validate_outbound_url
 from app.models.db.org import NotificationChannel
 from app.models.db.user import User
+from app.services.notification_service import (
+    get_last_read_id,
+    get_recent_notifications,
+    set_last_read_id,
+    stream_id_gt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -453,3 +459,68 @@ async def _test_teams(client: httpx.AsyncClient, config: dict) -> tuple[bool, st
         return False, f"Teams returned HTTP {resp.status_code}"
     except httpx.RequestError as exc:
         return False, f"Failed to reach Teams: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# In-app notification center — org-wide event feed (scan completed/failed,
+# critical findings, SLA breaches, assignments, comments) with a per-viewer
+# unread cursor. This was previously write-only: notification_service.py has
+# always pushed events into an org's Redis stream, but nothing ever read them
+# back — no endpoint existed, so no UI could exist. See CLAUDE.md's Tier 1
+# audit ("wire in-app notification center").
+# ---------------------------------------------------------------------------
+
+
+def _visible_to(notif: dict, user_id: str) -> bool:
+    """Org-wide events (empty user_id) are visible to every member; targeted
+    events (finding.assigned/finding.commented) only to their recipient."""
+    target = notif.get("user_id") or ""
+    return target == "" or target == user_id
+
+
+@router.get(
+    "/feed",
+    summary="Get the current org's in-app notification feed for this user",
+)
+async def get_notification_feed(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    limit: int = 50,
+) -> dict:
+    limit = max(1, min(limit, 200))
+    # unread_count must reflect ALL unread notifications, not just however many
+    # the caller asked to display — a caller polling with a small limit (e.g.
+    # just checking the badge count) must still see the true count, not one
+    # silently capped at `limit`. Stream reads are cheap (bounded by the
+    # stream's own maxlen=500), so always scan the full window for counting
+    # and separately slice to `limit` for the items actually returned.
+    raw = await get_recent_notifications(str(org_id), count=500)
+    visible = [n for n in raw if _visible_to(n, str(current_user.id))]
+    items = visible[:limit]
+
+    last_read = await get_last_read_id(str(org_id), str(current_user.id))
+    unread_count = sum(1 for n in visible if stream_id_gt(n["id"], last_read))
+
+    return {"items": items, "unread_count": unread_count, "last_read_id": last_read}
+
+
+class MarkReadPayload(BaseModel):
+    last_id: Optional[str] = None
+
+
+@router.post(
+    "/feed/read",
+    summary="Mark the notification feed as read up to a given id (defaults to the newest)",
+)
+async def mark_notification_feed_read(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    payload: MarkReadPayload = MarkReadPayload(),
+) -> dict:
+    last_id = payload.last_id
+    if not last_id:
+        latest = await get_recent_notifications(str(org_id), count=1)
+        last_id = latest[0]["id"] if latest else "0"
+
+    await set_last_read_id(str(org_id), str(current_user.id), last_id)
+    return {"last_read_id": last_id}

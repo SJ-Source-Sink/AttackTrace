@@ -35,6 +35,7 @@ async def get_executive_metrics(db: AsyncSession, org_id: UUID) -> dict:
         risk_90d          = await _avg_risk_for_period(session, org_id, days=90)
         new_recurring     = await _new_vs_recurring(session, org_id)
         coverage_res      = await _coverage_percent(session, org_id, now)
+        total_assets_res  = await _total_assets(session, org_id)
         open_critical_res = await _open_critical_count(session, org_id)
         sla_res           = await _sla_compliance(session, org_id)
 
@@ -47,6 +48,7 @@ async def get_executive_metrics(db: AsyncSession, org_id: UUID) -> dict:
         },
         "new_vs_recurring": new_recurring,
         "coverage_percent": round(coverage_res, 1),
+        "total_assets": total_assets_res,
         "open_critical": open_critical_res,
         "sla_compliance_percent": round(sla_res, 1),
         "generated_at": now.isoformat(),
@@ -204,6 +206,14 @@ async def _coverage_percent(db: AsyncSession, org_id: UUID, now: datetime) -> fl
     recent_scanned = recent_result.scalar_one()
 
     return (recent_scanned / total_assets) * 100.0
+
+
+async def _total_assets(db: AsyncSession, org_id: UUID) -> int:
+    """Total asset count for the org — used to distinguish a genuinely new/empty org from one with poor scan coverage."""
+    result = await db.execute(
+        select(func.count()).where(Asset.org_id == org_id)
+    )
+    return result.scalar_one()
 
 
 async def _open_critical_count(db: AsyncSession, org_id: UUID) -> int:

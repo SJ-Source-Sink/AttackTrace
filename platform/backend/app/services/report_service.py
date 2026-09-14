@@ -5,9 +5,11 @@ findings and assets.
 """
 
 import asyncio
+import glob
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -26,7 +28,35 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-async def _load_scan_context(db: AsyncSession, scan_job_id: UUID, org_id: UUID):
+# Standalone scanners mint ids like UUIDs (hyphenated hex) or short hex
+# tokens (e.g. "fe0397bf233a") — both fit this allowlist. scan_job_id is
+# used to build on-disk filenames and glob patterns below (report_service +
+# app/api/v1/reports.py), so this is a hard requirement, not just tidiness:
+# an unvalidated value here would let a caller inject path separators
+# ("/", "..") into a filename/glob pattern and escape the per-org report
+# directory (path traversal), the same bug class already fixed once in this
+# codebase for the Burp history file helpers.
+_SAFE_SCAN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def is_safe_scan_id(scan_job_id: str) -> bool:
+    """True if scan_job_id is safe to interpolate into an on-disk filename
+    or glob pattern (no path separators/traversal, no glob metacharacters)."""
+    return bool(scan_job_id) and bool(_SAFE_SCAN_ID_RE.match(str(scan_job_id)))
+
+
+def _try_parse_uuid(value) -> Optional[UUID]:
+    """Best-effort UUID parse. Standalone scanners (nmap/secrets/etc.) mint
+    their own short-hex source_scan_id values that are never valid UUIDs —
+    callers must treat a None return as "fall back to the source_scan_id
+    lookup", not as an error."""
+    try:
+        return UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+async def _load_scan_context(db: AsyncSession, scan_job_id: str, org_id: UUID):
     """Resolve a report target to either an orchestrated ScanJob (the main
     scan pipeline) or a standalone scanner run (cspm/secrets/supply_chain/
     container_scanner/firewall_physical/exposure_scanner/mcp_scanner/
@@ -34,32 +64,44 @@ async def _load_scan_context(db: AsyncSession, scan_job_id: UUID, org_id: UUID):
     and source_scan_id=<their own scan id> instead of a ScanJob row, so a
     report for one of those ids previously always 404'd or came back empty.
 
+    scan_job_id may be a real UUID (orchestrated ScanJob) or a short-hex
+    standalone-scanner id (not a valid UUID at all) — accept both as str.
+
     Returns (job_or_none, findings, assets, target_domains, company_name).
-    Raises ValueError if nothing in this org matches scan_job_id at all.
+    Raises ValueError if scan_job_id is malformed or nothing in this org
+    matches it at all.
     """
-    job_result = await db.execute(
-        select(ScanJob).where(ScanJob.id == scan_job_id, ScanJob.org_id == org_id)
-    )
-    job = job_result.scalar_one_or_none()
+    if not is_safe_scan_id(scan_job_id):
+        raise ValueError(f"Invalid scan_job_id: {scan_job_id!r}")
+
+    job = None
+    scan_uuid = _try_parse_uuid(scan_job_id)
+    if scan_uuid is not None:
+        job_result = await db.execute(
+            select(ScanJob).where(ScanJob.id == scan_uuid, ScanJob.org_id == org_id)
+        )
+        job = job_result.scalar_one_or_none()
 
     if job is not None:
         if job.status != ScanStatus.COMPLETED:
             raise ValueError(f"Cannot generate report for scan in status: {job.status.value}")
 
         findings_result = await db.execute(
-            select(Finding).where(Finding.scan_job_id == scan_job_id, Finding.org_id == org_id)
+            select(Finding).where(Finding.scan_job_id == scan_uuid, Finding.org_id == org_id)
         )
         findings = findings_result.scalars().all()
 
         assets_result = await db.execute(
-            select(Asset).where(Asset.scan_job_id == scan_job_id, Asset.org_id == org_id)
+            select(Asset).where(Asset.scan_job_id == scan_uuid, Asset.org_id == org_id)
         )
         assets = assets_result.scalars().all()
 
         return job, findings, assets, (job.target_domains or []), job.company_name
 
-    # Not an orchestrated scan — look for a standalone-scanner run tagged
-    # with this id via source_scan_id.
+    # Not an orchestrated scan (either scan_job_id isn't a UUID at all, or it
+    # is but doesn't match any ScanJob in this org) — look for a
+    # standalone-scanner run tagged with this id via source_scan_id, which is
+    # always a plain string comparison regardless of the id's shape.
     findings_result = await db.execute(
         select(Finding).where(Finding.source_scan_id == str(scan_job_id), Finding.org_id == org_id)
     )
@@ -71,14 +113,19 @@ async def _load_scan_context(db: AsyncSession, scan_job_id: UUID, org_id: UUID):
     return None, findings, [], target_domains, None
 
 
-async def scan_id_belongs_to_org(db: AsyncSession, scan_job_id: UUID, org_id: UUID) -> bool:
+async def scan_id_belongs_to_org(db: AsyncSession, scan_job_id: str, org_id: UUID) -> bool:
     """Ownership check for the report download routes — true if scan_job_id
-    is either a ScanJob or a standalone-scanner source_scan_id in this org."""
-    job = (await db.execute(
-        select(ScanJob.id).where(ScanJob.id == scan_job_id, ScanJob.org_id == org_id)
-    )).scalar_one_or_none()
-    if job is not None:
-        return True
+    is either a ScanJob or a standalone-scanner source_scan_id in this org.
+    Accepts both real UUIDs and non-UUID standalone-scanner ids as str."""
+    if not is_safe_scan_id(scan_job_id):
+        return False
+    scan_uuid = _try_parse_uuid(scan_job_id)
+    if scan_uuid is not None:
+        job = (await db.execute(
+            select(ScanJob.id).where(ScanJob.id == scan_uuid, ScanJob.org_id == org_id)
+        )).scalar_one_or_none()
+        if job is not None:
+            return True
     finding = (await db.execute(
         select(Finding.id).where(Finding.source_scan_id == str(scan_job_id), Finding.org_id == org_id).limit(1)
     )).scalar_one_or_none()
@@ -87,7 +134,7 @@ async def scan_id_belongs_to_org(db: AsyncSession, scan_job_id: UUID, org_id: UU
 
 async def generate_report(
     db: AsyncSession,
-    scan_job_id: UUID,
+    scan_job_id: str,
     org_id: UUID,
     report_format: str = "html",
     include_evidence: bool = True,
@@ -148,10 +195,15 @@ async def generate_pdf_report(
     Returns:
         Path to the generated PDF file.
     """
-    # Resolve an existing HTML report or generate one
+    if not is_safe_scan_id(scan_job_id):
+        raise ValueError(f"Invalid scan_job_id: {scan_job_id!r}")
+
+    # Resolve an existing HTML report or generate one. scan_job_id is a
+    # caller-supplied string (UUID or a standalone scanner's non-UUID id) —
+    # glob.escape it so metacharacters in it can't broaden the glob match.
     report_dir = Path(workspace_dir) / "reports" / str(org_id)
     existing_html = sorted(
-        report_dir.glob(f"report_{scan_job_id}_*.html"),
+        report_dir.glob(f"report_{glob.escape(scan_job_id)}_*.html"),
         key=lambda x: x.stat().st_mtime,
         reverse=True,
     ) if report_dir.exists() else []
@@ -159,10 +211,11 @@ async def generate_pdf_report(
     if existing_html and existing_html[0].stat().st_size > 0:
         html_path = existing_html[0]
     else:
-        # Generate fresh HTML report
+        # Generate fresh HTML report (scan_job_id may be a real UUID or a
+        # standalone-scanner's non-UUID id — generate_report accepts either)
         report_meta = await generate_report(
             db=db,
-            scan_job_id=UUID(scan_job_id),
+            scan_job_id=scan_job_id,
             org_id=org_id,
             report_format="html",
             include_evidence=True,
@@ -326,7 +379,7 @@ def _render_evidence(evidence: Optional[dict]) -> str:
 
 
 def _build_html_report(
-    scan_job_id: UUID, target_domains: list[str], company_name: Optional[str],
+    scan_job_id: str, target_domains: list[str], company_name: Optional[str],
     findings, assets, job=None,
 ) -> str:
     """Build a professional, detailed HTML security-assessment report.

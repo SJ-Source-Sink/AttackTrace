@@ -3,20 +3,31 @@ Asset management API: list, filter, search, and update assets.
 """
 
 import math
-from typing import Annotated, Optional
+from typing import Annotated, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel as _PydanticBaseModel, Field
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.csv_safety import csv_safe
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
 from app.models.db.asset import Asset, AssetType
-from app.models.db.user import User
+from app.models.db.audit import AuditLog
+from app.models.db.user import OrgMember, User
 from app.models.schemas.asset import AssetResponse, AssetUpdate
 
 router = APIRouter(prefix="/assets", tags=["Assets"])
+
+
+def _get_client_ip(request: Request) -> Optional[str]:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else None
 
 
 @router.get(
@@ -172,6 +183,214 @@ async def update_asset(
     await db.flush()
     await db.refresh(asset)
     return AssetResponse.from_orm(asset)
+
+
+class BulkTagPayload(_PydanticBaseModel):
+    ids: List[str] = Field(..., min_length=1, max_length=500,
+                            description="Up to 500 asset UUIDs to tag in one request")
+    tags: List[str] = Field(..., min_length=1, description="Tags to add (merged with each asset's existing tags)")
+
+
+class BulkAssignPayload(_PydanticBaseModel):
+    ids: List[str] = Field(..., min_length=1, max_length=500,
+                            description="Up to 500 asset UUIDs to assign an owner to in one request")
+    owner: str = Field(..., description="user_id of the org member to assign as owner")
+
+
+@router.post(
+    "/bulk/tag",
+    summary="Bulk-add tags to assets (merges with each asset's existing tags, max 500 per request)",
+)
+async def bulk_tag_assets(
+    payload: BulkTagPayload,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    try:
+        uuids = [UUID(aid) for aid in payload.ids]
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"code": "INVALID_UUID", "message": "One or more ids are not valid UUIDs"}},
+        )
+
+    new_tags = [t.strip() for t in payload.tags if t.strip()]
+    if not new_tags:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"code": "INVALID_TAGS", "message": "No non-empty tags supplied"}},
+        )
+
+    result = await db.execute(
+        select(Asset).where(Asset.org_id == org_id, Asset.id.in_(uuids))
+    )
+    assets = result.scalars().all()
+
+    updated_count = 0
+    for asset in assets:
+        existing = list(asset.tags or [])
+        merged = existing + [t for t in new_tags if t not in existing]
+        if merged != existing:
+            asset.tags = merged
+            db.add(asset)
+            updated_count += 1
+
+    if updated_count > 0:
+        log = AuditLog(
+            org_id=org_id,
+            user_id=current_user.id,
+            action="asset.bulk_tagged",
+            resource_type="asset_bulk",
+            resource_id=f"{updated_count}_assets",
+            before_state=None,
+            after_state={"tags_added": new_tags, "asset_ids": [str(u) for u in uuids], "count": updated_count},
+            ip_address=_get_client_ip(request),
+        )
+        db.add(log)
+
+    await db.flush()
+    return {"updated": updated_count, "not_found": len(uuids) - len(assets)}
+
+
+@router.post(
+    "/bulk/assign",
+    summary="Bulk-assign an owner to assets (max 500 per request)",
+)
+async def bulk_assign_assets(
+    payload: BulkAssignPayload,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    try:
+        uuids = [UUID(aid) for aid in payload.ids]
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"code": "INVALID_UUID", "message": "One or more ids are not valid UUIDs"}},
+        )
+
+    try:
+        owner_uuid = UUID(payload.owner)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"code": "INVALID_UUID", "message": "Invalid owner id"}},
+        )
+
+    # Validate the target user is actually a member of this org
+    member_check = await db.execute(
+        select(OrgMember.user_id).where(OrgMember.org_id == org_id, OrgMember.user_id == owner_uuid)
+    )
+    if member_check.scalar_one_or_none() is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"code": "NOT_ORG_MEMBER", "message": "Owner must be a member of this organization"}},
+        )
+
+    result = await db.execute(
+        select(Asset).where(Asset.org_id == org_id, Asset.id.in_(uuids))
+    )
+    assets = result.scalars().all()
+
+    for asset in assets:
+        asset.owner_user_id = owner_uuid
+        db.add(asset)
+
+    if assets:
+        log = AuditLog(
+            org_id=org_id,
+            user_id=current_user.id,
+            action="asset.bulk_assigned",
+            resource_type="asset_bulk",
+            resource_id=f"{len(assets)}_assets",
+            before_state=None,
+            after_state={"owner_user_id": str(owner_uuid), "asset_ids": [str(u) for u in uuids], "count": len(assets)},
+            ip_address=_get_client_ip(request),
+        )
+        db.add(log)
+
+    await db.flush()
+    return {"updated": len(assets), "not_found": len(uuids) - len(assets)}
+
+
+@router.get(
+    "/export/csv",
+    summary="Export assets as CSV",
+)
+async def export_assets_csv(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+    ids: Optional[str] = None,  # comma-separated asset UUIDs; omit to export all filtered/visible assets
+    asset_type: Optional[str] = None,
+    search: Optional[str] = None,
+):
+    from fastapi.responses import StreamingResponse
+    import csv, io
+
+    query = select(Asset).where(Asset.org_id == org_id)
+
+    if ids:
+        try:
+            id_list = [UUID(i.strip()) for i in ids.split(",") if i.strip()]
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": {"code": "INVALID_UUID", "message": "One or more ids are not valid UUIDs"}},
+            )
+        query = query.where(Asset.id.in_(id_list))
+
+    if asset_type:
+        try:
+            query = query.where(Asset.asset_type == AssetType(asset_type))
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": {"code": "INVALID_ASSET_TYPE", "message": f"Invalid asset type: {asset_type}"}},
+            )
+
+    if search:
+        query = query.where(Asset.value.ilike(f"%{search}%"))
+
+    # Hard cap to prevent OOM — export at most 10k assets at once
+    result = await db.execute(query.order_by(Asset.last_seen.desc()).limit(10_000))
+    assets = result.scalars().all()
+
+    # Resolve owner names for the export in one query
+    owner_ids = {a.owner_user_id for a in assets if a.owner_user_id}
+    owner_names: dict = {}
+    if owner_ids:
+        owner_rows = await db.execute(select(User.id, User.full_name, User.email).where(User.id.in_(owner_ids)))
+        owner_names = {r[0]: (r[1] or r[2]) for r in owner_rows.all()}
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "id", "value", "asset_type", "tags", "owner", "risk_score",
+        "is_active", "first_seen", "last_seen",
+    ])
+    for a in assets:
+        writer.writerow([
+            str(a.id),
+            csv_safe(a.value),
+            a.asset_type.value,
+            csv_safe("|".join(a.tags or [])),
+            csv_safe(owner_names.get(a.owner_user_id, "") if a.owner_user_id else ""),
+            a.risk_score if a.risk_score is not None else "",
+            "yes" if a.is_active else "no",
+            a.first_seen.isoformat() if a.first_seen else "",
+            a.last_seen.isoformat() if a.last_seen else "",
+        ])
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=assets.csv"},
+    )
 
 
 @router.get(

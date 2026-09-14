@@ -145,6 +145,10 @@ class Finding(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     # SLA / compliance / risk
     sla_deadline: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set the first time app/workers/sla_worker.py's periodic breach-check task
+    # fires an sla.breached notification for this finding, so it never re-fires
+    # on a subsequent run. NULL = not yet notified (or not currently breached).
+    sla_breach_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     compliance_tags: Mapped[Optional[list[str]]] = mapped_column(ARRAY(String(50)), nullable=True)
     risk_score: Mapped[Optional[float]] = mapped_column(Float(), nullable=True)
     risk_explanation: Mapped[Optional[str]] = mapped_column(Text(), nullable=True)

@@ -25,6 +25,7 @@ celery_app = Celery(
         "app.workers.easm_worker",
         "app.workers.correlation_worker",
         "app.workers.standalone_scan_worker",
+        "app.workers.sla_worker",
     ],
 )
 
@@ -53,6 +54,7 @@ celery_app.conf.update(
         "app.workers.correlation_worker.correlate_after_scan": {"queue": "default"},
         "app.workers.correlation_worker.correlate_all_orgs": {"queue": "default"},
         "app.workers.standalone_scan_worker.run_standalone_scanners_after_scan": {"queue": "scans"},
+        "app.workers.sla_worker.check_sla_breaches": {"queue": "default"},
     },
     task_default_queue="default",
     broker_connection_retry_on_startup=True,
@@ -97,6 +99,14 @@ celery_app.conf.update(
             # trigger in scan_worker.py instead).
             "task": "app.workers.correlation_worker.correlate_all_orgs",
             "schedule": 21600.0,  # every 6 hours
+        },
+        "check-sla-breaches-hourly": {
+            # Finds OPEN findings whose sla_deadline has passed and fires
+            # sla.breached notifications, once per finding. Hourly, matching
+            # expire_stale_suppressions's cadence — SLA breaches don't need
+            # minute-level freshness.
+            "task": "app.workers.sla_worker.check_sla_breaches",
+            "schedule": 3600.0,  # every hour
         },
     },
 )

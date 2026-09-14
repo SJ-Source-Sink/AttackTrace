@@ -342,6 +342,24 @@ export interface FindingCommentListResponse {
   pages: number;
 }
 
+// Matches the real GET /findings/{id}/history response shape
+// (app/api/v1/findings.py::get_finding_history) — audit log entries scoped
+// to this finding, newest first.
+export interface FindingHistoryEntry {
+  id: string;
+  action: string;
+  before_state: Record<string, unknown> | null;
+  after_state: Record<string, unknown> | null;
+  created_at: string;
+  user_id: string | null;
+  user_name: string;
+}
+
+export interface FindingHistoryListResponse {
+  items: FindingHistoryEntry[];
+  total: number;
+}
+
 export interface AcceptRiskInfo {
   reason: string;
   expires_at?: string;
@@ -690,4 +708,23 @@ export interface CreateChannelRequest {
 
 export interface NotificationChannelListResponse {
   items: NotificationChannel[];
+}
+
+export interface NotificationFeedItem {
+  id: string;
+  event_type: string;
+  title: string;
+  body: string;
+  resource_type: string;
+  resource_id: string;
+  severity: "info" | "low" | "medium" | "high" | "critical";
+  user_id: string;
+  timestamp: string;
+  read: string;
+}
+
+export interface NotificationFeedResponse {
+  items: NotificationFeedItem[];
+  unread_count: number;
+  last_read_id: string;
 }

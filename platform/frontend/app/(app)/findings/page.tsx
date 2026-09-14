@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useMemo } from "react";
+import Link from "next/link";
 import { useQueryClient } from "@tanstack/react-query";
 import { ShieldAlert, ChevronLeft, ChevronRight, X, Plus, AlertTriangle, Lock, Clock, Search, Download, CheckSquare, FileText, ChevronDown, ChevronUp, ExternalLink, Zap, Target, Eye, Shield, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -2226,7 +2227,7 @@ export default function FindingsPage() {
         per_page: PER_PAGE,
       };
 
-  const { data, isLoading } = useFindings(activeQueryFilters);
+  const { data, isLoading, isError, error, refetch, isFetching } = useFindings(activeQueryFilters);
   const findings = data?.items ?? [];
   const total = data?.total ?? 0;
   const totalPages = Math.ceil(total / PER_PAGE);
@@ -2632,6 +2633,15 @@ export default function FindingsPage() {
               </div>
             ))}
           </div>
+        ) : isError ? (
+          <EmptyState
+            isError
+            icon={<ShieldAlert className="h-8 w-8" />}
+            title="Something went wrong loading findings"
+            errorMessage={(error as Error)?.message || "Failed to load findings. Please try again."}
+            onRetry={() => refetch()}
+            isRetrying={isFetching}
+          />
         ) : filteredFindings.length === 0 ? (
           <EmptyState
             icon={<ShieldAlert className="h-8 w-8" />}
@@ -2645,7 +2655,16 @@ export default function FindingsPage() {
                 ? `No findings matched "${searchQuery}". Try a different search term.`
                 : viewMode === 'suppressed'
                   ? "No findings have been suppressed or marked as false positive."
-                  : "No findings match your current filters. Run a scan or create a manual finding."
+                  : hasFilters
+                    ? "No findings match your current filters. Run a scan or create a manual finding."
+                    : "Run your first scan to start discovering findings across your attack surface."
+            }
+            action={
+              !searchQuery && !hasFilters && viewMode === 'active' ? (
+                <Button asChild>
+                  <Link href="/scans/new">Start your first scan</Link>
+                </Button>
+              ) : undefined
             }
           />
         ) : (

@@ -56,11 +56,11 @@ export function useBulkTagAssets() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({ ids, tags }: { ids: string[]; tags: unknown[] }) =>
-      assetsApi.bulkTag(ids, tags),
-    onSuccess: () => {
+    mutationFn: ({ ids, tags }: { ids: string[]; tags: string[] }) =>
+      assetsApi.bulkTag(ids, tags) as Promise<{ updated: number; not_found: number }>,
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: assetKeys.lists() });
-      toast.success("Tags updated successfully");
+      toast.success(`${result.updated} asset${result.updated === 1 ? "" : "s"} tagged`);
     },
     onError: (error: Error) => {
       toast.error(`Failed to update tags: ${error.message}`);
@@ -73,13 +73,26 @@ export function useBulkAssignAssets() {
 
   return useMutation({
     mutationFn: ({ ids, owner }: { ids: string[]; owner: string }) =>
-      assetsApi.bulkAssign(ids, owner),
-    onSuccess: () => {
+      assetsApi.bulkAssign(ids, owner) as Promise<{ updated: number; not_found: number }>,
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: assetKeys.lists() });
-      toast.success("Owner assigned successfully");
+      toast.success(`Owner assigned to ${result.updated} asset${result.updated === 1 ? "" : "s"}`);
     },
     onError: (error: Error) => {
       toast.error(`Failed to assign owner: ${error.message}`);
+    },
+  });
+}
+
+export function useExportAssetsCsv() {
+  return useMutation({
+    mutationFn: ({ ids }: { ids?: string[] }) => assetsApi.exportCsv(ids),
+    onSuccess: (_data, variables) => {
+      const count = variables.ids?.length;
+      toast.success(count ? `Export downloaded (${count} asset${count === 1 ? "" : "s"})` : "Export downloaded");
+    },
+    onError: (error: Error) => {
+      toast.error(`Failed to export assets: ${error.message}`);
     },
   });
 }

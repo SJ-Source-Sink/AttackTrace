@@ -7,6 +7,7 @@ import type {
   NotificationChannel,
   NotificationChannelListResponse,
   CreateChannelRequest,
+  NotificationFeedResponse,
 } from "@/types";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
@@ -192,12 +193,34 @@ export const assetsApi = {
     api.get("/assets", params),
   get: (id: string) => api.get(`/assets/${id}`),
   update: (id: string, data: unknown) => api.patch(`/assets/${id}`, data),
-  bulkTag: (ids: string[], tags: unknown[]) =>
+  bulkTag: (ids: string[], tags: string[]) =>
     api.post("/assets/bulk/tag", { ids, tags }),
   bulkAssign: (ids: string[], owner: string) =>
     api.post("/assets/bulk/assign", { ids, owner }),
-  exportCsv: (params?: Record<string, string | undefined>) =>
-    apiFetch<Blob>("/assets/export/csv", { method: "GET", params }),
+  /** Authenticated CSV download — fetches with JWT then triggers browser save-as dialog */
+  exportCsv: async (ids?: string[], filename = "assets.csv"): Promise<void> => {
+    const token = getAccessToken();
+    const url = buildUrl("/assets/export/csv", ids?.length ? { ids: ids.join(",") } : undefined);
+    const res = await fetch(url, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => `HTTP ${res.status}`);
+      throw new ApiError(res.status, detail);
+    }
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    try {
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
+  },
   surfaceDiff: () => api.get("/assets/surface-diff/recent"),
 };
 
@@ -219,6 +242,8 @@ export const findingsApi = {
     api.post(`/findings/${id}/comments`, { body: content }),
   comments: (id: string) =>
     api.get(`/findings/${id}/comments`),
+  history: (id: string) =>
+    api.get(`/findings/${id}/history`),
   timeline: (params: Record<string, string | number | undefined>) =>
     api.get("/findings/timeline", params),
   assignees: () => api.get<{ items: { id: string; name: string; email: string; role: string }[] }>("/findings/assignees"),
@@ -227,6 +252,36 @@ export const findingsApi = {
       `/findings/${id}/revalidate`, {},
     ),
 };
+
+/** Extract a clean, user-facing message from a failed report-download response.
+ * The backend returns JSON bodies shaped like {"error":{"code","message"}} (or,
+ * for a bare 404 on an unmatched/orphaned resource, a generic {"error":{"code":
+ * "NOT_FOUND","message":"The requested resource was not found"}}). Callers must
+ * not surface that raw JSON verbatim in a toast — parse it and fall back to a
+ * specific, friendly message per status code. */
+async function reportErrorMessage(res: Response): Promise<string> {
+  try {
+    const text = await res.text();
+    if (res.headers.get("content-type")?.includes("json")) {
+      const parsed = JSON.parse(text);
+      const msg = parsed?.error?.message ?? parsed?.detail;
+      if (typeof msg === "string" && msg.trim()) {
+        // The 404 case (deleted file / deleted underlying scan data) gets a
+        // dedicated, more actionable message instead of the generic backend text.
+        if (res.status === 404) {
+          return "This report file is no longer available. Try regenerating it.";
+        }
+        return msg;
+      }
+    }
+  } catch {
+    // fall through to status-based default below
+  }
+  if (res.status === 404) {
+    return "This report file is no longer available. Try regenerating it.";
+  }
+  return `Download failed (HTTP ${res.status})`;
+}
 
 export const reportsApi = {
   list: (scanId?: string) =>
@@ -240,8 +295,7 @@ export const reportsApi = {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (!res.ok) {
-      const detail = await res.text().catch(() => `HTTP ${res.status}`);
-      throw new ApiError(res.status, detail);
+      throw new ApiError(res.status, await reportErrorMessage(res));
     }
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
@@ -263,8 +317,7 @@ export const reportsApi = {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (!res.ok) {
-      const detail = await res.text().catch(() => `HTTP ${res.status}`);
-      throw new ApiError(res.status, detail);
+      throw new ApiError(res.status, await reportErrorMessage(res));
     }
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
@@ -408,6 +461,13 @@ export const notificationsApi = {
       `/notifications/channels/${id}/test`,
       { method: "POST" },
     ),
+  feed: (limit = 50) =>
+    apiFetch<NotificationFeedResponse>(`/notifications/feed?limit=${limit}`),
+  markRead: (lastId?: string) =>
+    apiFetch<{ last_read_id: string }>("/notifications/feed/read", {
+      method: "POST",
+      body: JSON.stringify(lastId ? { last_id: lastId } : {}),
+    }),
 };
 
 export interface InviteCodeItem {
