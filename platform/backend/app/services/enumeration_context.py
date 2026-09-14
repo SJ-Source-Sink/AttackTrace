@@ -26,9 +26,20 @@ _MAX_FINDINGS = 500
 
 
 def _asset_matches_target(value: str, target: str) -> bool:
-    value = value.lower()
-    target = target.lower().lstrip(".")
-    return value == target or value.endswith(f".{target}") or target in value
+    """True if `value` is exactly `target` or a dotted subdomain of it.
+
+    Dotted-suffix match only — no substring containment. A substring check
+    here is bypassable (e.g. asset "test.com" would wrongly match attacker
+    hosts like "test.com.evil.net" or "evil-test.com"), and this function
+    also backs attack_agent.py's hard scope-enforcement gate for the
+    autonomous agent's active tools, where that bypass would let it run
+    live probes against infrastructure the org doesn't own.
+    """
+    value = (value or "").lower().rstrip(".")
+    target = (target or "").lower().strip(".")
+    if not value or not target:
+        return False
+    return value == target or value.endswith(f".{target}")
 
 
 def _serialize_asset(asset: Asset) -> dict:

@@ -36,7 +36,7 @@ async def check_port_live(host: str, port: int, timeout: float = 3.0) -> bool:
         return False
 
 
-async def check_endpoint_live(url: str, timeout: float = 8.0) -> dict:
+async def check_endpoint_live(url: str, timeout: float = 8.0, follow_redirects: bool = True) -> dict:
     """Fetch a URL and report whether it's still reachable, its current
     status/headers, and a body hash (to detect if the content changed).
 
@@ -45,9 +45,17 @@ async def check_endpoint_live(url: str, timeout: float = 8.0) -> dict:
     targets under authorized test, not the platform's own trusted resources —
     rejecting a self-signed/misconfigured cert would falsely report a live
     target as unreachable, which is the opposite of what this check is for.
+
+    follow_redirects defaults True for the manual "Re-verify" action (a human
+    triggers one check on one already-known finding). Callers that run this
+    unattended and repeatedly against model-chosen URLs — the Attack Suite
+    agent — should pass follow_redirects=False: an in-scope target could
+    otherwise redirect this server's own outbound request to an internal or
+    private address (SSRF via redirect), and a 3xx response is more useful
+    to an agent reasoning about SSRF/open-redirect than one silently followed.
     """
     try:
-        async with httpx.AsyncClient(follow_redirects=True, verify=False, timeout=timeout) as client:
+        async with httpx.AsyncClient(follow_redirects=follow_redirects, verify=False, timeout=timeout) as client:
             resp = await client.get(url, headers={"User-Agent": "AttackTrace-Validator/1.0"})
         body_hash = hashlib.sha256(resp.content).hexdigest()[:16]
         return {

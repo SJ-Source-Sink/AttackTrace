@@ -6291,10 +6291,13 @@ async def run_attack_agent(
 async def stop_attack_agent(
     run_id: str,
     current_user: Annotated[User, Depends(require_tool("attack_suite"))],
+    org_id: UUID = Depends(get_current_org_id),
 ) -> dict:
-    from app.services.attack_agent import stop_run
-    if not stop_run(run_id):
+    from app.services.attack_agent import get_run_status, stop_run
+    status_info = get_run_status(run_id)
+    if status_info is None or status_info.get("org_id") != str(org_id):
         raise HTTPException(status_code=404, detail="Agent run not found")
+    stop_run(run_id)
     return {"run_id": run_id, "stopping": True}
 
 
@@ -6302,9 +6305,10 @@ async def stop_attack_agent(
 async def get_attack_agent_status(
     run_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
 ) -> dict:
     from app.services.attack_agent import get_run_status
     status_info = get_run_status(run_id)
-    if status_info is None:
+    if status_info is None or status_info.get("org_id") != str(org_id):
         raise HTTPException(status_code=404, detail="Agent run not found")
     return status_info

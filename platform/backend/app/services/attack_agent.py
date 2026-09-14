@@ -189,14 +189,21 @@ def _host_of(value: str) -> str:
 async def _is_in_scope(db: AsyncSession, org_id, host: str) -> bool:
     """Hard, code-level scope check — the compensating control for running the
     agent's active tools with no per-action human approval. In scope only if
-    the host matches (or is a subdomain of, or is a superdomain of) an
-    existing Asset already known to this org."""
+    the host is exactly an existing Asset's value, or a dotted subdomain of
+    one, for this org.
+
+    Deliberately one-directional (host must narrow to an asset, never the
+    reverse) — matching the other way would let a single known subdomain
+    asset (e.g. mail.test.com) widen scope to an arbitrary broader host
+    (e.g. test.com, or any other domain an attacker crafts to contain it),
+    which is a real scope-escalation path, not just a theoretical one.
+    """
     host = (host or "").lower().strip()
     if not host:
         return False
     result = await db.execute(select(Asset.value).where(Asset.org_id == org_id, Asset.is_active.is_(True)))
     for (value,) in result:
-        if _asset_matches_target(host, value) or _asset_matches_target(value, host):
+        if _asset_matches_target(host, value):
             return True
     return False
 
@@ -243,8 +250,11 @@ async def _run_ssrf_probe(url: str, param: str) -> dict:
 
 
 async def _run_injection_probe(url: str, param: str, injection_class: str) -> dict:
+    # follow_redirects=False: the in-scope target itself could otherwise redirect this
+    # server's outbound request to an internal/private address (SSRF via redirect) — a
+    # 3xx response is reported as-is for the model to reason about, never auto-followed.
     timeout = httpx.Timeout(connect=4.0, read=6.0, write=6.0, pool=5.0)
-    async with httpx.AsyncClient(verify=False, timeout=timeout, follow_redirects=True) as client:
+    async with httpx.AsyncClient(verify=False, timeout=timeout, follow_redirects=False) as client:
         baseline = await _timed_get(client, _with_param(url, param, "1"))
         if injection_class == "sqli":
             probe = await _timed_get(client, _with_param(url, param, "1'"))
@@ -310,7 +320,7 @@ async def _execute_tool(db: AsyncSession, org_id, user_id, run_id: str, name: st
             url = tool_input.get("url", "")
             if not await _is_in_scope(db, org_id, _host_of(url)):
                 return await _reject_out_of_scope(db, org_id, user_id, run_id, name, tool_input)
-            result = await check_endpoint_live(url)
+            result = await check_endpoint_live(url, follow_redirects=False)
             await _audit(db, org_id, user_id, run_id, name, tool_input,
                          {k: v for k, v in result.items() if k != "headers"})
             return result
@@ -319,10 +329,24 @@ async def _execute_tool(db: AsyncSession, org_id, user_id, run_id: str, name: st
             url = tool_input.get("url", "")
             if not await _is_in_scope(db, org_id, _host_of(url)):
                 return await _reject_out_of_scope(db, org_id, user_id, run_id, name, tool_input)
-            from app.api.v1.secrets import _fetch_text, _scan_content_for_secrets
+            from app.api.v1.secrets import _scan_content_for_secrets
+            # Deliberately not reusing secrets.py's _fetch_text here: it hardcodes
+            # follow_redirects=True at the request level (overriding any client-level
+            # default), which would let an in-scope target redirect this unattended,
+            # repeated tool call to an internal address (SSRF via redirect) and have
+            # its content scanned and returned. Fetch directly instead, redirects off.
             timeout = httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=5.0)
-            async with httpx.AsyncClient(verify=False, timeout=timeout, follow_redirects=True) as client:
-                content, status_code = await _fetch_text(client, url)
+            content, status_code = None, 0
+            try:
+                async with httpx.AsyncClient(verify=False, timeout=timeout, follow_redirects=False) as client:
+                    resp = await client.get(url)
+                    status_code = resp.status_code
+                    ct = resp.headers.get("content-type", "")
+                    is_text_like = any(marker in ct for marker in ("text", "javascript", "json"))
+                    if status_code == 200 and is_text_like:
+                        content = resp.text
+            except Exception:
+                pass
             secrets_found = _scan_content_for_secrets(content, url) if content else []
             result = {"url": url, "status_code": status_code, "secrets_found": secrets_found}
             await _audit(db, org_id, user_id, run_id, name, tool_input, {"status_code": status_code, "count": len(secrets_found)})
