@@ -57,6 +57,21 @@ async def _get_redis() -> aioredis.Redis | None:
         return None
 
 
+async def invalidate_dashboard_cache(org_id: UUID | str) -> None:
+    """Clear both dashboard cache keys for an org so the next load reflects
+    a mutation immediately instead of waiting out the 5-15min TTL. Call this
+    from any endpoint that creates/deletes/changes findings or assets in a
+    way that would change dashboard counts — never let a cache-invalidation
+    failure break the actual mutation, so this always swallows its own
+    errors."""
+    try:
+        redis = await _get_redis()
+        if redis:
+            await redis.delete(f"dashboard:stats:{org_id}", f"dashboard:executive:{org_id}")
+    except Exception:
+        pass
+
+
 @router.get("/stats", summary="Get dashboard summary statistics")
 async def get_dashboard_stats(
     current_user: Annotated[User, Depends(get_current_user)],

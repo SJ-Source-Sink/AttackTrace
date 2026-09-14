@@ -10,10 +10,11 @@ from uuid import UUID
 
 from pydantic import BaseModel as _PydanticBaseModel, Field
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.dashboard import invalidate_dashboard_cache
 from app.core.csv_safety import csv_safe
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
@@ -57,6 +58,7 @@ def _get_client_ip(request: Request) -> str:
 async def create_finding(
     payload: FindingCreate,
     request: Request,
+    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_user)],
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
@@ -134,6 +136,8 @@ async def create_finding(
     )
     db.add(log)
     await db.flush()
+
+    background_tasks.add_task(invalidate_dashboard_cache, org_id)
 
     return FindingResponse.from_orm(finding)
 
@@ -552,6 +556,7 @@ class BulkDeletePayload(_PydanticBaseModel):
 async def bulk_update_status(
     payload: BulkStatusPayload,
     request: Request,
+    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_user)],
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
@@ -600,6 +605,9 @@ async def bulk_update_status(
         )
         db.add(log)
 
+    if updated_count > 0:
+        background_tasks.add_task(invalidate_dashboard_cache, org_id)
+
     return {"updated": updated_count}
 
 
@@ -610,6 +618,7 @@ async def bulk_update_status(
 async def bulk_delete_findings(
     payload: BulkDeletePayload,
     request: Request,
+    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_user)],
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
@@ -639,6 +648,9 @@ async def bulk_delete_findings(
             ip_address=_get_client_ip(request),
         )
         db.add(log)
+
+    if deleted_count > 0:
+        background_tasks.add_task(invalidate_dashboard_cache, org_id)
 
     return {"deleted": deleted_count}
 
@@ -671,6 +683,7 @@ async def update_finding(
     finding_id: UUID,
     payload: FindingUpdate,
     request: Request,
+    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_user)],
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
@@ -808,6 +821,12 @@ async def update_finding(
     await db.flush()
     await db.refresh(finding)
 
+    # Status/severity/false_positive changes all shift dashboard counts
+    # (open findings, severity breakdown) — invalidate so the next dashboard
+    # load reflects this immediately rather than up to the cache's 5-15min TTL.
+    if before_state != after_state:
+        background_tasks.add_task(invalidate_dashboard_cache, org_id)
+
     cc_result = await db.execute(
         select(func.count(FindingComment.id)).where(FindingComment.finding_id == finding_id)
     )
@@ -823,6 +842,7 @@ async def update_finding(
 async def delete_finding(
     finding_id: UUID,
     request: Request,
+    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_user)],
     org_id: UUID = Depends(get_current_org_id),
     db: AsyncSession = Depends(get_db),
@@ -840,7 +860,12 @@ async def delete_finding(
     )
     db.add(log)
     await db.delete(finding)
-    # get_db auto-commits on return; explicit commit removed to keep audit log atomic
+    # get_db auto-commits on return; explicit commit removed to keep audit log atomic.
+    # invalidate_dashboard_cache is scheduled as a BackgroundTask specifically
+    # because it must run AFTER that commit (FastAPI runs background tasks
+    # only after the response — and this dependency's teardown commit — has
+    # completed), not because it's low-priority.
+    background_tasks.add_task(invalidate_dashboard_cache, org_id)
 
 
 @router.post(

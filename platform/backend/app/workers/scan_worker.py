@@ -1271,6 +1271,16 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
             job.findings_count = findings_count
             db.commit()
 
+            # Invalidate dashboard cache so newly-discovered findings/assets
+            # show up immediately instead of waiting out the 5-15min TTL —
+            # this is the single most common cache-staleness trigger (every
+            # completed scan changes dashboard counts), previously only
+            # invalidated on scan *deletion*.
+            try:
+                r.delete(f"dashboard:stats:{job.org_id}", f"dashboard:executive:{job.org_id}")
+            except Exception as _cache_err:
+                logger.warning(f"Dashboard cache invalidation skipped: {_cache_err}")
+
             # Refresh scan metrics materialized view (best-effort, non-blocking)
             try:
                 from sqlalchemy import text as sa_text
