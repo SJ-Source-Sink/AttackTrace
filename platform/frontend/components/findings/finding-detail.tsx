@@ -14,6 +14,7 @@ import {
   UserCircle,
   ChevronDown,
   RefreshCw,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -32,12 +33,21 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+  DialogDescription,
+} from "@/components/ui/dialog";
 import { SeverityBadge } from "@/components/findings/severity-badge";
 import { StatusWorkflow } from "@/components/findings/status-workflow";
 import { FindingComments } from "@/components/findings/finding-comments";
 import { severityBgColor, formatDate, capitalize } from "@/lib/utils";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { findingsApi } from "@/lib/api";
+import { useDeleteFinding } from "@/hooks/use-findings";
 import { toast } from "sonner";
 import type { Finding, FindingSeverity } from "@/types";
 
@@ -142,6 +152,8 @@ function RevalidateButton({ finding }: { finding: Finding }) {
 }
 
 export function FindingDetail({ finding, onClose }: FindingDetailProps) {
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const deleteFinding = useDeleteFinding();
   const confidenceColor =
     finding.ai_triage?.confidence !== undefined
       ? finding.ai_triage.confidence >= 80
@@ -187,11 +199,44 @@ export function FindingDetail({ finding, onClose }: FindingDetailProps) {
           <RevalidateButton finding={finding} />
           <AssigneeSelector finding={finding} />
           <StatusWorkflow finding={finding} />
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setShowDeleteConfirm(true)}
+            className="h-8 w-8 text-red-400/70 hover:text-red-400 hover:bg-red-500/10"
+            title="Delete finding"
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
           <Button variant="ghost" size="icon" onClick={onClose} className="h-8 w-8">
             <X className="h-4 w-4" />
           </Button>
         </div>
       </div>
+
+      <Dialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete this finding?</DialogTitle>
+            <DialogDescription>
+              &ldquo;{finding.title}&rdquo; will be permanently deleted, along with any comments and history
+              attached to it. This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowDeleteConfirm(false)} disabled={deleteFinding.isPending}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => deleteFinding.mutate(finding.id, { onSuccess: () => { setShowDeleteConfirm(false); onClose(); } })}
+              disabled={deleteFinding.isPending}
+            >
+              {deleteFinding.isPending ? "Deleting..." : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Scrollable content */}
       <ScrollArea className="flex-1">

@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useMemo } from "react";
+import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { FileDown, Loader2, Brain, TrendingDown, ChevronLeft, ChevronRight, GitBranch, ExternalLink, ChevronDown, ChevronRight as ChevronRightIcon } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -220,6 +221,7 @@ function AssetsTab({ scanId }: { scanId: string }) {
 }
 
 function FindingsTab({ scanId }: { scanId: string }) {
+  const router = useRouter();
   const [page, setPage] = useState(1);
   const [viewMode, setViewMode] = useState<'active' | 'suppressed'>('active');
   const [kevOnly, setKevOnly] = useState(false);
@@ -332,7 +334,11 @@ function FindingsTab({ scanId }: { scanId: string }) {
                   </tr>
                 ))
               : data?.items.map((finding) => (
-                  <tr key={finding.id} className="hover:bg-zinc-800/40 transition-colors">
+                  <tr
+                    key={finding.id}
+                    className="hover:bg-zinc-800/40 transition-colors cursor-pointer"
+                    onClick={() => router.push(`/findings/${finding.id}`)}
+                  >
                     <td className="px-4 py-3">
                       <div className="flex flex-col gap-1">
                         <Badge

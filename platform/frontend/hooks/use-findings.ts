@@ -88,6 +88,22 @@ export function useUpdateFinding() {
   });
 }
 
+export function useDeleteFinding() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (id: string) => findingsApi.delete(id),
+    onSuccess: (_data, id) => {
+      queryClient.removeQueries({ queryKey: findingKeys.detail(id) });
+      queryClient.invalidateQueries({ queryKey: findingKeys.lists() });
+      toast.success("Finding deleted");
+    },
+    onError: (error: Error) => {
+      toast.error(`Failed to delete finding: ${error.message}`);
+    },
+  });
+}
+
 export function useAddFindingComment() {
   const queryClient = useQueryClient();
 

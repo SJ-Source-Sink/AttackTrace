@@ -212,6 +212,9 @@ export const findingsApi = {
   get: (id: string) => api.get(`/findings/${id}`),
   create: (data: unknown) => api.post("/findings", data),
   update: (id: string, data: unknown) => api.patch(`/findings/${id}`, data),
+  delete: (id: string) => api.delete(`/findings/${id}`),
+  bulkDelete: (findingIds: string[]) =>
+    api.post<{ deleted: number }>("/findings/bulk-delete", { finding_ids: findingIds }),
   addComment: (id: string, content: string) =>
     api.post(`/findings/${id}/comments`, { body: content }),
   timeline: (params: Record<string, string | number | undefined>) =>

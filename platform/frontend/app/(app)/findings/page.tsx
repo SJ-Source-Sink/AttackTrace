@@ -1,14 +1,23 @@
 "use client";
 
 import React, { useState, useEffect, useMemo } from "react";
-import { ShieldAlert, ChevronLeft, ChevronRight, X, Plus, AlertTriangle, Lock, Clock, Search, Download, CheckSquare, FileText, ChevronDown, ChevronUp, ExternalLink, Zap, Target, Eye, Shield } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { ShieldAlert, ChevronLeft, ChevronRight, X, Plus, AlertTriangle, Lock, Clock, Search, Download, CheckSquare, FileText, ChevronDown, ChevronUp, ExternalLink, Zap, Target, Eye, Shield, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+  DialogDescription,
+} from "@/components/ui/dialog";
 import { EmptyState } from "@/components/shared/empty-state";
 import { FindingRow } from "@/components/findings/finding-row";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { useFindings } from "@/hooks/use-findings";
+import { useFindings, findingKeys } from "@/hooks/use-findings";
 import { useCreateFinding } from "@/hooks/use-findings";
 import { toast } from "sonner";
 import type { FindingFilters, FindingSeverity, FindingStatus } from "@/types";
@@ -2192,6 +2201,8 @@ export default function FindingsPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkLoading, setBulkLoading] = useState(false);
+  const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
+  const queryClient = useQueryClient();
 
   // Build query params based on view mode + filters
   const activeQueryFilters: FindingFilters & { page?: number; per_page?: number; category?: string; overdue?: boolean } = viewMode === 'active'
@@ -2299,8 +2310,30 @@ export default function FindingsPage() {
       if (!resp.ok) throw new Error("Bulk status update failed");
       toast.success(`Marked ${selectedIds.size} finding(s) as ${status.replace("_", " ")}`);
       setSelectedIds(new Set());
+      queryClient.invalidateQueries({ queryKey: findingKeys.lists() });
     } catch {
       toast.error("Failed to update findings");
+    } finally {
+      setBulkLoading(false);
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    setBulkLoading(true);
+    try {
+      const resp = await fetchWithAuth(`${API_BASE}/findings/bulk-delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ finding_ids: Array.from(selectedIds) }),
+      });
+      if (!resp.ok) throw new Error("Bulk delete failed");
+      toast.success(`Deleted ${selectedIds.size} finding(s)`);
+      setSelectedIds(new Set());
+      setShowBulkDeleteConfirm(false);
+      queryClient.invalidateQueries({ queryKey: findingKeys.lists() });
+    } catch {
+      toast.error("Failed to delete findings");
     } finally {
       setBulkLoading(false);
     }
@@ -2716,6 +2749,15 @@ export default function FindingsPage() {
           </button>
           <div className="w-px h-5 bg-zinc-600" />
           <button
+            onClick={() => setShowBulkDeleteConfirm(true)}
+            disabled={bulkLoading}
+            className="px-3 py-1.5 rounded-md text-xs font-medium bg-red-900/60 hover:bg-red-800 text-red-200 disabled:opacity-50 transition-colors flex items-center gap-1"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Delete
+          </button>
+          <div className="w-px h-5 bg-zinc-600" />
+          <button
             onClick={() => setSelectedIds(new Set())}
             className="text-zinc-400 hover:text-zinc-200 transition-colors"
             aria-label="Clear selection"
@@ -2724,6 +2766,26 @@ export default function FindingsPage() {
           </button>
         </div>
       )}
+
+      <Dialog open={showBulkDeleteConfirm} onOpenChange={setShowBulkDeleteConfirm}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete {selectedIds.size} finding(s)?</DialogTitle>
+            <DialogDescription>
+              This permanently deletes the selected finding(s) and cannot be undone. Comments and history
+              attached to them will be deleted too.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowBulkDeleteConfirm(false)} disabled={bulkLoading}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleBulkDelete} disabled={bulkLoading}>
+              {bulkLoading ? "Deleting..." : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <CreateFindingDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
     </div>

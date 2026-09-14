@@ -539,6 +539,11 @@ class BulkStatusPayload(_PydanticBaseModel):
     status: str = Field(..., description="Target FindingStatus value")
 
 
+class BulkDeletePayload(_PydanticBaseModel):
+    finding_ids: List[str] = Field(..., min_length=1, max_length=500,
+                                   description="Up to 500 finding UUIDs to delete in one request")
+
+
 @router.post(
     "/bulk-status",
     summary="Bulk update finding status (max 500 findings per request)",
@@ -595,6 +600,46 @@ async def bulk_update_status(
         db.add(log)
 
     return {"updated": updated_count}
+
+
+@router.post(
+    "/bulk-delete",
+    summary="Bulk delete findings (max 500 findings per request)",
+)
+async def bulk_delete_findings(
+    payload: BulkDeletePayload,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    try:
+        uuids = [UUID(fid) for fid in payload.finding_ids]
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"code": "INVALID_UUID", "message": "One or more finding_ids are not valid UUIDs"}},
+        )
+
+    from sqlalchemy import delete as _delete
+    stmt = _delete(Finding).where(Finding.org_id == org_id, Finding.id.in_(uuids))
+    result = await db.execute(stmt)
+    deleted_count = result.rowcount
+
+    if deleted_count > 0:
+        log = AuditLog(
+            org_id=org_id,
+            user_id=current_user.id,
+            action="finding.bulk_deleted",
+            resource_type="finding_bulk",
+            resource_id=f"{deleted_count}_findings",
+            before_state={"finding_ids": [str(u) for u in uuids], "count": deleted_count},
+            after_state=None,
+            ip_address=_get_client_ip(request),
+        )
+        db.add(log)
+
+    return {"deleted": deleted_count}
 
 
 @router.get(

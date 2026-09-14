@@ -4,7 +4,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
   ChevronRight, ChevronDown, Code2, Zap, Activity,
-  Shield, ExternalLink, Smartphone, Globe, Loader2, Lock,
+  Shield, ExternalLink, Smartphone, Globe, Loader2, Lock, Trash2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -18,7 +18,15 @@ import { RiskScoreGauge } from "@/components/findings/risk-score-gauge";
 import { fetchWithAuth } from "@/lib/auth";
 import { cn, formatRelativeTime } from "@/lib/utils";
 import { toast } from "sonner";
-import { useUpdateFinding } from "@/hooks/use-findings";
+import { useUpdateFinding, useDeleteFinding } from "@/hooks/use-findings";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+  DialogDescription,
+} from "@/components/ui/dialog";
 import type { Finding } from "@/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
@@ -105,8 +113,10 @@ export function FindingRow({ finding }: FindingRowProps) {
   const [loadingPoc, setLoadingPoc] = useState(false);
   const [poc, setPoc] = useState<string | null>(null);
   const [severityMenuOpen, setSeverityMenuOpen] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const severityMenuRef = useRef<HTMLDivElement>(null);
   const updateFinding = useUpdateFinding();
+  const deleteFinding = useDeleteFinding();
 
   useEffect(() => {
     if (!severityMenuOpen) return;
@@ -429,9 +439,43 @@ export function FindingRow({ finding }: FindingRowProps) {
                 View in Mobile Scanner
               </Button>
             )}
+
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 text-xs text-red-400/70 hover:text-red-400 hover:bg-red-500/10 ml-auto"
+              onClick={() => setShowDeleteConfirm(true)}
+            >
+              <Trash2 className="h-3 w-3 mr-1" />
+              Delete
+            </Button>
           </div>
         </div>
       )}
+
+      <Dialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <DialogContent onClick={(e) => e.stopPropagation()}>
+          <DialogHeader>
+            <DialogTitle>Delete this finding?</DialogTitle>
+            <DialogDescription>
+              &ldquo;{finding.title}&rdquo; will be permanently deleted, along with any comments and history
+              attached to it. This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowDeleteConfirm(false)} disabled={deleteFinding.isPending}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => deleteFinding.mutate(finding.id, { onSuccess: () => setShowDeleteConfirm(false) })}
+              disabled={deleteFinding.isPending}
+            >
+              {deleteFinding.isPending ? "Deleting..." : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
