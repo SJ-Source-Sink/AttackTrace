@@ -275,7 +275,7 @@ def _parse_nuclei_line(line: str) -> dict | None:
         return None
 
 
-async def _stream_nuclei(scan_id: str, req: NucleiScanRequest, request: Request) -> AsyncGenerator[str, None]:
+async def _stream_nuclei(scan_id: str, req: NucleiScanRequest, request: Request, org_id: uuid.UUID) -> AsyncGenerator[str, None]:
     cmd = _build_nuclei_cmd(req)
 
     def _sse(event: str, data: dict) -> str:
@@ -296,6 +296,7 @@ async def _stream_nuclei(scan_id: str, req: NucleiScanRequest, request: Request)
         "started_at": datetime.now(timezone.utc).isoformat(),
         "findings": [],
         "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+        "org_id": str(org_id),
     }
 
     findings: list[dict] = []
@@ -474,7 +475,7 @@ async def run_nuclei_scan(
     await db.commit()
 
     return StreamingResponse(
-        _stream_nuclei(scan_id, payload, request),
+        _stream_nuclei(scan_id, payload, request, org_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -487,9 +488,10 @@ async def run_nuclei_scan(
 @router.get("/scans", summary="List nuclei scan history")
 async def list_nuclei_scans(
     current_user: Annotated[User, Depends(get_current_user)],
+    org_id: uuid.UUID = Depends(get_current_org_id),
 ) -> dict:
     scans = sorted(
-        _scan_history.values(),
+        (s for s in _scan_history.values() if s.get("org_id") == str(org_id)),
         key=lambda s: s.get("started_at", ""),
         reverse=True,
     )
@@ -500,9 +502,10 @@ async def list_nuclei_scans(
 async def get_nuclei_scan(
     scan_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
+    org_id: uuid.UUID = Depends(get_current_org_id),
 ) -> dict:
     scan = _scan_history.get(scan_id)
-    if not scan:
+    if not scan or scan.get("org_id") != str(org_id):
         raise HTTPException(status_code=404, detail="Scan not found")
     return scan
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -32,10 +33,29 @@ router = APIRouter(prefix="/iac", tags=["IaC Scanner"])
 
 # ── History helpers (filesystem) ──────────────────────────────────────────────
 
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def _validate_uuid(value: str, label: str) -> str:
+    if not _UUID_RE.match(value):
+        raise HTTPException(status_code=400, detail=f"Invalid {label}: must be a UUID")
+    return value
+
+
 def _history_dir(org_id: str) -> Path:
     d = Path(_get_settings().ATTACKTRACE_WORKSPACE_DIR) / "iac_scanner" / org_id
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _safe_history_path(org_id: str, scan_id: str) -> Path:
+    """Build and confine the history file path to the org's history directory."""
+    _validate_uuid(scan_id, "scan_id")
+    base = _history_dir(org_id)
+    candidate = (base / f"{scan_id}.json").resolve()
+    if not candidate.is_relative_to(base.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid scan_id")
+    return candidate
 
 
 def _save_scan_result(org_id: str, record: dict) -> None:
@@ -66,9 +86,11 @@ def _load_history(org_id: str, limit: int = 50) -> list[dict]:
 
 def _load_scan(org_id: str, scan_id: str) -> dict | None:
     try:
-        path = _history_dir(org_id) / f"{scan_id}.json"
+        path = _safe_history_path(org_id, scan_id)
         if path.exists():
             return json.loads(path.read_text())
+    except HTTPException:
+        raise
     except Exception:
         pass
     return None
@@ -76,10 +98,12 @@ def _load_scan(org_id: str, scan_id: str) -> dict | None:
 
 def _delete_scan(org_id: str, scan_id: str) -> bool:
     try:
-        path = _history_dir(org_id) / f"{scan_id}.json"
+        path = _safe_history_path(org_id, scan_id)
         if path.exists():
             path.unlink()
             return True
+    except HTTPException:
+        raise
     except Exception:
         pass
     return False
@@ -505,6 +529,46 @@ def _run_checkov(tmp_dir: str) -> list[dict]:
 from app.core.sse import sse_event as _sse
 
 
+# ── Upload filename sanitization ──────────────────────────────────────────────
+# Mirrors the pattern used by nuclei.py's upload_template: strip any directory
+# components with os.path.basename() (attacker-controlled multipart filenames
+# must never be trusted — a value like "/etc/cron.d/pwn" or "../../x" would
+# otherwise let pathlib's "/" operator escape the intended temp directory
+# entirely), then allowlist the remaining characters. Anything that doesn't
+# survive is replaced with a safe synthetic name.
+
+_SAFE_FILENAME_RE = re.compile(r'^[a-zA-Z0-9_\-.]+$')
+
+
+def _sanitize_upload_filename(raw_name: str | None, index: int, used_names: set[str]) -> str:
+    name = os.path.basename((raw_name or "").strip())
+
+    # Preserve a plausible extension (helps _detect_iac_type / Checkov) if safe.
+    ext = ""
+    if "." in name:
+        candidate_ext = name.rsplit(".", 1)[-1].lower()
+        if re.match(r'^[a-zA-Z0-9]{1,10}$', candidate_ext):
+            ext = candidate_ext
+
+    if not name or name in (".", "..") or not _SAFE_FILENAME_RE.match(name):
+        name = f"file_{index}.{ext}" if ext else f"file_{index}"
+
+    # De-duplicate collisions after sanitization (e.g. two uploads whose
+    # names both sanitize down to the same string) rather than silently
+    # overwriting a previously-written file.
+    base_name = name
+    counter = 1
+    while name in used_names:
+        if "." in base_name:
+            stem, _, e = base_name.rpartition(".")
+            name = f"{stem}_{counter}.{e}"
+        else:
+            name = f"{base_name}_{counter}"
+        counter += 1
+    used_names.add(name)
+    return name
+
+
 # ── Scan generator ────────────────────────────────────────────────────────────
 
 async def _scan_generator(
@@ -523,15 +587,23 @@ async def _scan_generator(
     by_severity: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
 
     tmp_dir = tempfile.mkdtemp(prefix="iac_scan_")
+    tmp_dir_resolved = Path(tmp_dir).resolve()
+    used_names: set[str] = set()
 
     try:
         for upload in files:
-            filename = upload.filename or f"file_{files_scanned}"
             raw = await upload.read()
 
+            # Sanitize the client-supplied filename before it ever touches
+            # the filesystem — see _sanitize_upload_filename above.
+            filename = _sanitize_upload_filename(upload.filename, files_scanned, used_names)
+
             # Save to temp dir for Checkov
-            tmp_path = Path(tmp_dir) / filename
-            tmp_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = (Path(tmp_dir) / filename).resolve()
+            if tmp_path != tmp_dir_resolved and tmp_dir_resolved not in tmp_path.parents:
+                # Defense in depth: sanitization above should make this
+                # unreachable, but never write outside the intended dir.
+                raise ValueError(f"Rejected unsafe upload filename: {upload.filename!r}")
             tmp_path.write_bytes(raw)
 
             try:

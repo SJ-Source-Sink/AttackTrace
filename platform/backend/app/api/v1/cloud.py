@@ -23,8 +23,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings as _get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
+from app.core.finding_confidence import grade_confidence
+from app.core.remediation import get_remediation
 from app.models.db.asset import Asset, AssetType
 from app.models.db.user import User
+from app.services.asset_upsert import upsert_asset_async
+from app.services.finding_ingest import ingest_findings
 
 router = APIRouter(prefix="/cloud", tags=["Cloud Discovery"])
 
@@ -137,6 +141,86 @@ def _build_cloudlist_config(provider: str, credentials: dict) -> dict:
     return {}
 
 
+def _cloud_resource_risk(resource_type: str, public_ip: str, hostname: str) -> tuple[str, str, str] | None:
+    """Classify a single discovered cloud resource for security relevance.
+
+    cloudlist is a pure asset-enumeration tool — it queries each provider's
+    API for resources the supplied credentials can see. It does not itself
+    assess misconfigurations (bucket ACLs, IAM policies, encryption-at-rest,
+    security-group rules). The only security-relevant signal actually present
+    in its output is whether a resource is directly reachable from the public
+    internet, and whether its resource type is one that normally should not
+    be (storage/database/cache/cluster-management/admin interfaces) versus
+    resource types that are intentionally public (DNS records, CDN
+    distributions, load balancers). Returns (title, severity, category), or
+    None if this is pure inventory with no exposure signal worth a Finding —
+    those stay visible only as Assets.
+    """
+    if not (public_ip or hostname):
+        return None
+
+    rt = (resource_type or "").lower()
+
+    # Resource types that are supposed to be internet-facing — not a finding.
+    if any(k in rt for k in ("dns", "cdn", "loadbalancer", "load-balancer", "elb", "alb", "waf", "cloudfront")):
+        return None
+
+    if any(k in rt for k in ("bucket", "storage", "s3", "blob", "container")):
+        return ("Publicly reachable cloud storage resource", "critical", "cloud-storage-exposure")
+    if any(k in rt for k in ("database", "rds", "sql", "mongo", "redis", "cache", "elasticsearch", "cosmosdb", "dynamodb")):
+        return ("Publicly reachable cloud database/cache resource", "critical", "cloud-data-exposure")
+    if any(k in rt for k in ("kubernetes", "k8s", "cluster", "eks", "gke", "aks")):
+        return ("Publicly reachable cluster management endpoint", "high", "cloud-cluster-exposure")
+    if any(k in rt for k in ("admin", "management", "console", "bastion")):
+        return ("Publicly reachable cloud admin/management interface", "high", "cloud-admin-exposure")
+    if any(k in rt for k in ("instance", "vm", "compute", "server", "function", "lambda", "vmss")):
+        return ("Cloud compute resource directly exposed to the internet", "medium", "cloud-compute-exposure")
+    return ("Cloud resource directly exposed to the internet", "low", "cloud-exposure")
+
+
+def _adapt_cloud_findings(assets: list[dict], provider: str) -> list[dict]:
+    """Normalize cloud.py's discovered assets for finding_ingest.
+
+    Confidence is graded "api-confirmed" (-> certain): the exposure fact
+    (public IP/hostname) is read directly from the cloud provider's own API
+    response, not inferred or guessed.
+    """
+    adapted = []
+    for a in assets:
+        meta = a.get("metadata") or {}
+        public_ip = str(meta.get("public_ip") or meta.get("public_ipv4") or "")
+        hostname = str(meta.get("hostname") or "")
+        resource_type = str(a.get("resource_type") or "unknown")
+
+        classification = _cloud_resource_risk(resource_type, public_ip, hostname)
+        if classification is None:
+            continue
+        title, severity, category = classification
+        value = str(a.get("value") or "unknown")
+
+        reachable_via = f"public IP {public_ip}" if public_ip else f"hostname {hostname}"
+        adapted.append({
+            "title": f"{title} ({provider}: {resource_type})",
+            "description": (
+                f"Cloud asset discovery ({provider}) found a '{resource_type}' resource "
+                f"({value}) directly reachable from the public internet via {reachable_via}. "
+                "Confirm this exposure is intentional and reviewed for the access it grants."
+            ),
+            "severity": severity,
+            "category": category,
+            "affected_asset": value,
+            "evidence": {
+                "provider": provider,
+                "resource_type": resource_type,
+                "public_ip": public_ip or None,
+                "hostname": hostname or None,
+            },
+            "remediation": get_remediation(category=category, title=title),
+            "confidence": grade_confidence("api-confirmed"),
+        })
+    return adapted
+
+
 @router.post("/discover", summary="Discover cloud assets via cloudlist")
 async def discover_cloud_assets(
     body: dict,
@@ -225,6 +309,25 @@ async def discover_cloud_assets(
             "created_at": time.time(),
         }
         _save_scan_result(str(org_id), record)
+
+        try:
+            for a in assets:
+                await upsert_asset_async(
+                    db,
+                    org_id,
+                    AssetType.CLOUD,
+                    str(a.get("value") or "unknown"),
+                    {
+                        "provider": a.get("provider"),
+                        "resource_type": a.get("resource_type"),
+                        "cloudlist": a.get("metadata"),
+                    },
+                )
+            adapted = _adapt_cloud_findings(assets, provider)
+            await ingest_findings(db, org_id, source="cloud", source_scan_id=record["id"], findings=adapted)
+            await db.commit()
+        except Exception:
+            await db.rollback()
 
         return {
             "id": record["id"],

@@ -637,6 +637,7 @@ async def detect_waf(
             "started_at": result["timestamp"],
             "completed_at": result["timestamp"],
             "result": result,
+            "org_id": str(org_id),
         }
         return JSONResponse(content=result)
 
@@ -796,6 +797,7 @@ async def detect_waf(
         "started_at": timestamp,
         "completed_at": timestamp,
         "result": result,
+        "org_id": str(org_id),
     }
 
     return JSONResponse(content=result)
@@ -1004,6 +1006,7 @@ REMEDIATION_RULES: list[dict] = [
 async def _stream_bypass(
     scan_id: str,
     req: WafBypassRequest,
+    org_id: uuid.UUID,
 ) -> AsyncGenerator[str, None]:
     started_at = datetime.now(timezone.utc).isoformat()
 
@@ -1037,6 +1040,7 @@ async def _stream_bypass(
         "status": "running",
         "started_at": started_at,
         "probes": [],
+        "org_id": str(org_id),
     }
 
     yield _sse("start", {
@@ -1201,7 +1205,7 @@ async def probe_waf_bypass(
     await db.commit()
 
     return StreamingResponse(
-        _stream_bypass(scan_id, payload),
+        _stream_bypass(scan_id, payload, org_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1217,9 +1221,10 @@ async def probe_waf_bypass(
 async def get_bypass_report(
     scan_id: str,
     current_user: Annotated[User, Depends(require_tool("firewall"))],
+    org_id: uuid.UUID = Depends(get_current_org_id),
 ) -> JSONResponse:
     entry = _scan_history.get(scan_id)
-    if not entry:
+    if not entry or entry.get("org_id") != str(org_id):
         raise HTTPException(status_code=404, detail=f"Scan '{scan_id}' not found")
     if entry.get("type") != "waf_bypass":
         raise HTTPException(status_code=400, detail="Scan is not a waf_bypass type")
@@ -1560,6 +1565,7 @@ async def _nmap_prefix() -> list[str]:
 async def _stream_port_map(
     scan_id: str,
     req: PortFirewallRequest,
+    org_id: uuid.UUID,
 ) -> AsyncGenerator[str, None]:
     nmap_bin = shutil.which("nmap") or "nmap"
     sudo_prefix = await _nmap_prefix()
@@ -1574,6 +1580,7 @@ async def _stream_port_map(
         "started_at": started_at,
         "modes_run": [],
         "all_hosts": [],
+        "org_id": str(org_id),
     }
 
     yield _sse("start", {
@@ -1706,7 +1713,7 @@ async def port_firewall_map(
     await db.commit()
 
     return StreamingResponse(
-        _stream_port_map(scan_id, payload),
+        _stream_port_map(scan_id, payload, org_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -2261,6 +2268,7 @@ async def analyze_firewall_rules(
         "started_at": result["timestamp"],
         "completed_at": result["timestamp"],
         "result": result,
+        "org_id": str(org_id),
     }
 
     return JSONResponse(content=result)
@@ -2271,6 +2279,7 @@ async def analyze_firewall_rules(
 async def _stream_rate_limit(
     scan_id: str,
     req: RateLimitRequest,
+    org_id: uuid.UUID,
 ) -> AsyncGenerator[str, None]:
     started_at = datetime.now(timezone.utc).isoformat()
     target_url = req.target.rstrip("/") + req.path
@@ -2281,6 +2290,7 @@ async def _stream_rate_limit(
         "target": req.target,
         "status": "running",
         "started_at": started_at,
+        "org_id": str(org_id),
     }
 
     yield _sse("start", {
@@ -2465,7 +2475,7 @@ async def probe_rate_limit(
     await db.commit()
 
     return StreamingResponse(
-        _stream_rate_limit(scan_id, payload),
+        _stream_rate_limit(scan_id, payload, org_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -2480,6 +2490,7 @@ async def probe_rate_limit(
 async def _stream_smuggling(
     scan_id: str,
     req: SmugglingRequest,
+    org_id: uuid.UUID,
 ) -> AsyncGenerator[str, None]:
     started_at = datetime.now(timezone.utc).isoformat()
 
@@ -2489,6 +2500,7 @@ async def _stream_smuggling(
         "target": req.target,
         "status": "running",
         "started_at": started_at,
+        "org_id": str(org_id),
     }
 
     yield _sse("start", {
@@ -2673,7 +2685,7 @@ async def probe_smuggling(
     await db.commit()
 
     return StreamingResponse(
-        _stream_smuggling(scan_id, payload),
+        _stream_smuggling(scan_id, payload, org_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

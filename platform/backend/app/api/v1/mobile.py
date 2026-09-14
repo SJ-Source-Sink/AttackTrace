@@ -27,6 +27,7 @@ Proxied endpoints:
 """
 
 import hashlib
+import json
 import logging
 from typing import Annotated
 
@@ -41,6 +42,7 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_user, get_current_org_id, require_tool
 from app.models.db.user import User
 from app.models.db.finding import Finding, FindingSeverity, FindingStatus
+from app.models.db.mobile import MSRAScanOwnership
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +106,69 @@ def _proxy_response(resp: httpx.Response) -> Response:
     )
 
 
+# ── MSRA scan tenant-ownership helpers ─────────────────────────────────────────
+# MSRA has no org concept of its own (see msra_scan_ownership migration /
+# app/models/db/mobile.py::MSRAScanOwnership docstring) — every route below
+# that takes a scan_id must be checked against this table before it is
+# forwarded to MSRA, and a scan_id with no known owner is treated as not
+# found (never defaulted to the calling org).
+
+async def _get_owned_scan_ids(org_id: str, db: AsyncSession) -> set[str]:
+    result = await db.execute(
+        select(MSRAScanOwnership.msra_scan_id).where(MSRAScanOwnership.org_id == org_id)
+    )
+    return {row[0] for row in result.all()}
+
+
+async def _require_owned_scan(scan_id: str, org_id: str, db: AsyncSession) -> None:
+    result = await db.execute(
+        select(MSRAScanOwnership.org_id).where(MSRAScanOwnership.msra_scan_id == scan_id)
+    )
+    owner = result.scalar_one_or_none()
+    if owner is None or str(owner) != str(org_id):
+        # 404, not 403 — matches this codebase's existing IDOR-fix convention
+        # of not confirming that another org's scan_id even exists.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"code": "NOT_FOUND", "message": "Scan not found."}},
+        )
+
+
+def _scope_dashboard_stats(stats: dict, owned_ids: set[str]) -> dict:
+    """Filter MSRA's globally-aggregated dashboard stats down to one org's scans."""
+    recent = [s for s in (stats.get("recent_scans") or []) if s.get("scan_id") in owned_ids]
+    total_findings = 0
+    by_severity: dict = {}
+    for s in recent:
+        total_findings += s.get("total_findings", 0) or 0
+        for sev, cnt in (s.get("severity_counts") or {}).items():
+            by_severity[sev] = by_severity.get(sev, 0) + cnt
+    return {
+        **stats,
+        "total_scans": len(recent),
+        "total_findings": total_findings,
+        "by_severity": by_severity,
+        "recent_scans": recent,
+    }
+
+
+async def _scoped_dashboard_response(org_id: str, db: AsyncSession) -> Response:
+    resp = await _msra_request("GET", "/api/dashboard/stats")
+    if resp.status_code != 200:
+        return _proxy_response(resp)
+    try:
+        stats = resp.json()
+    except Exception:
+        return _proxy_response(resp)
+    owned_ids = await _get_owned_scan_ids(org_id, db)
+    scoped = _scope_dashboard_stats(stats, owned_ids)
+    return Response(
+        content=json.dumps(scoped),
+        status_code=200,
+        media_type="application/json",
+    )
+
+
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @router.get("/health", summary="Check MSRA service reachability")
@@ -123,9 +188,10 @@ async def mobile_health(
 @router.get("/stats", summary="MSRA dashboard statistics")
 async def mobile_stats(
     current_user: Annotated[User, Depends(get_current_user)],
+    org_id: Annotated[str, Depends(get_current_org_id)],
+    db: AsyncSession = Depends(get_db),
 ) -> Response:
-    resp = await _msra_request("GET", "/api/dashboard/stats")
-    return _proxy_response(resp)
+    return await _scoped_dashboard_response(str(org_id), db)
 
 
 # ── Scans ─────────────────────────────────────────────────────────────────────
@@ -133,18 +199,24 @@ async def mobile_stats(
 @router.get("/scans", summary="List mobile scans")
 async def list_scans(
     current_user: Annotated[User, Depends(get_current_user)],
+    org_id: Annotated[str, Depends(get_current_org_id)],
+    db: AsyncSession = Depends(get_db),
 ) -> Response:
     # MSRA doesn't have a dedicated list endpoint — we parse dashboard stats
-    # which includes the full scan list in the `scans` key.
-    resp = await _msra_request("GET", "/api/dashboard/stats")
-    return _proxy_response(resp)
+    # which includes the full scan list in the `scans` key. That list is
+    # global across every org that has ever used MSRA, so it's scoped down
+    # to this org's own scans (via msra_scan_ownership) before returning.
+    return await _scoped_dashboard_response(str(org_id), db)
 
 
 @router.get("/scans/{scan_id}/findings", summary="Get findings for a scan")
 async def get_findings(
     scan_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
+    org_id: Annotated[str, Depends(get_current_org_id)],
+    db: AsyncSession = Depends(get_db),
 ) -> Response:
+    await _require_owned_scan(scan_id, str(org_id), db)
     resp = await _msra_request("GET", f"/api/scans/{scan_id}/findings")
     return _proxy_response(resp)
 
@@ -153,7 +225,10 @@ async def get_findings(
 async def get_scan_status(
     scan_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
+    org_id: Annotated[str, Depends(get_current_org_id)],
+    db: AsyncSession = Depends(get_db),
 ) -> Response:
+    await _require_owned_scan(scan_id, str(org_id), db)
     resp = await _msra_request("GET", f"/api/scan/{scan_id}/status")
     return _proxy_response(resp)
 
@@ -162,10 +237,20 @@ async def get_scan_status(
 async def delete_scan(
     scan_id: str,
     current_user: Annotated[User, Depends(require_tool("mobile"))],
+    org_id: Annotated[str, Depends(get_current_org_id)],
+    db: AsyncSession = Depends(get_db),
 ) -> None:
+    await _require_owned_scan(scan_id, str(org_id), db)
     resp = await _msra_request("DELETE", f"/api/scans/{scan_id}")
     if resp.status_code not in (200, 204):
         raise HTTPException(status_code=resp.status_code, detail=resp.text)
+
+    # Drop the ownership row too, so a MSRA scan_id doesn't stay "claimed" by
+    # this org forever once the underlying MSRA scan is gone.
+    await db.execute(
+        MSRAScanOwnership.__table__.delete().where(MSRAScanOwnership.msra_scan_id == scan_id)
+    )
+    await db.commit()
 
 
 # ── Upload ────────────────────────────────────────────────────────────────────
@@ -173,6 +258,8 @@ async def delete_scan(
 @router.post("/upload", summary="Upload a mobile app file for scanning")
 async def upload_file(
     current_user: Annotated[User, Depends(require_tool("mobile"))],
+    org_id: Annotated[str, Depends(get_current_org_id)],
+    db: AsyncSession = Depends(get_db),
     file: UploadFile = File(...),
 ) -> Response:
     allowed_suffixes = {".apk", ".apkm", ".xapk", ".ipa", ".jar", ".exe", ".dll"}
@@ -210,6 +297,28 @@ async def upload_file(
                 detail={"error": {"code": "MSRA_UNAVAILABLE", "message": "Mobile Scanner service is not reachable."}},
             )
 
+    # Record which org this MSRA-assigned scan_id belongs to — this is the
+    # only place that association can be established, since MSRA itself has
+    # no org concept. Every other route checks this table before touching
+    # the scan. If we can't parse a scan_id out of MSRA's response, the scan
+    # is simply inaccessible through this proxy afterwards (safe failure —
+    # never silently attributed to this org anyway).
+    if resp.status_code < 300:
+        new_scan_id = None
+        try:
+            new_scan_id = resp.json().get("scan_id")
+        except Exception:
+            pass
+        if new_scan_id:
+            db.add(MSRAScanOwnership(msra_scan_id=new_scan_id, org_id=org_id))
+            try:
+                await db.commit()
+            except Exception as exc:
+                await db.rollback()
+                logger.error("Failed to record MSRA scan ownership for scan %s: %s", new_scan_id, exc)
+        else:
+            logger.error("MSRA upload response missing scan_id for org %s — ownership not recorded", org_id)
+
     return _proxy_response(resp)
 
 
@@ -221,7 +330,10 @@ async def triage_finding(
     finding_id: int,
     request: Request,
     current_user: Annotated[User, Depends(get_current_user)],
+    org_id: Annotated[str, Depends(get_current_org_id)],
+    db: AsyncSession = Depends(get_db),
 ) -> Response:
+    await _require_owned_scan(scan_id, str(org_id), db)
     body = await request.json()
     resp = await _msra_request(
         "PATCH",
@@ -238,7 +350,10 @@ async def get_snippet(
     scan_id: str,
     finding_id: int,
     current_user: Annotated[User, Depends(get_current_user)],
+    org_id: Annotated[str, Depends(get_current_org_id)],
+    db: AsyncSession = Depends(get_db),
 ) -> Response:
+    await _require_owned_scan(scan_id, str(org_id), db)
     resp = await _msra_request("GET", f"/api/scans/{scan_id}/findings/{finding_id}/snippet")
     return _proxy_response(resp)
 
@@ -250,9 +365,13 @@ async def export_scan(
     scan_id: str,
     fmt: str,
     current_user: Annotated[User, Depends(get_current_user)],
+    org_id: Annotated[str, Depends(get_current_org_id)],
+    db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     if fmt not in ("pdf", "csv", "sarif", "json"):
         raise HTTPException(status_code=400, detail="Invalid export format. Use: pdf, csv, sarif, json")
+
+    await _require_owned_scan(scan_id, str(org_id), db)
 
     if fmt == "json":
         # JSON findings come from the findings endpoint
@@ -300,7 +419,10 @@ async def start_dynamic(
     scan_id: str,
     request: Request,
     current_user: Annotated[User, Depends(require_tool("mobile"))],
+    org_id: Annotated[str, Depends(get_current_org_id)],
+    db: AsyncSession = Depends(get_db),
 ) -> Response:
+    await _require_owned_scan(scan_id, str(org_id), db)
     body = await request.json()
     resp = await _msra_request("POST", "/api/dynamic/verify", json=body)
     return _proxy_response(resp)
@@ -415,6 +537,7 @@ async def _sync_msra_to_db(org_id: str, db: AsyncSession) -> dict:
     updated = 0
     skipped = 0
     errors = 0
+    newly_created_critical_high: list[Finding] = []
 
     # Fetch MSRA scan list
     try:
@@ -428,12 +551,21 @@ async def _sync_msra_to_db(org_id: str, db: AsyncSession) -> dict:
     except Exception as exc:
         return {"error": str(exc), "inserted": 0, "updated": 0, "skipped": 0}
 
+    # MSRA's `recent_scans` list is global across every org that has ever used
+    # the mobile scanner (MSRA has no org filter internally) — never trust it
+    # directly. Only scans this org is verified to own (via msra_scan_ownership,
+    # recorded at upload time) may be ingested; anything else is skipped.
+    owned_ids = await _get_owned_scan_ids(org_id, db)
+
     scans = stats.get("recent_scans", [])
     done_scans = [s for s in scans if s.get("status") in ("done", "completed")]
 
     for scan in done_scans:
         scan_id = scan.get("scan_id")
         if not scan_id:
+            continue
+        if scan_id not in owned_ids:
+            skipped += 1
             continue
 
         # Fetch findings for this MSRA scan
@@ -484,7 +616,7 @@ async def _sync_msra_to_db(org_id: str, db: AsyncSession) -> dict:
             refs = mf.get("references") or []
 
             if existing is None:
-                db.add(Finding(
+                new_finding = Finding(
                     org_id=org_id,
                     scan_job_id=None,
                     source="msra",
@@ -501,8 +633,11 @@ async def _sync_msra_to_db(org_id: str, db: AsyncSession) -> dict:
                     status=FindingStatus.OPEN,
                     confidence="certain",
                     dedup_hash=dedup,
-                ))
+                )
+                db.add(new_finding)
                 inserted += 1
+                if sev in (FindingSeverity.CRITICAL, FindingSeverity.HIGH):
+                    newly_created_critical_high.append(new_finding)
             else:
                 # Update mutable fields (evidence, remediation, triage_status)
                 existing.evidence = evidence
@@ -522,6 +657,32 @@ async def _sync_msra_to_db(org_id: str, db: AsyncSession) -> dict:
         await db.rollback()
         logger.error("MSRA sync commit failed: %s", exc)
         return {"error": str(exc), "inserted": inserted, "updated": updated, "skipped": skipped, "errors": errors + 1}
+
+    # Notify configured channels (Slack/Jira/Teams/webhooks) for newly-created
+    # CRITICAL/HIGH findings only — never for updates to an already-synced row.
+    # Mirrors scan_worker.py's _async_notify_critical_findings payload shape.
+    if newly_created_critical_high:
+        try:
+            from app.services.notification_service import dispatch_notifications
+            for nf in newly_created_critical_high:
+                try:
+                    await dispatch_notifications(
+                        org_id=str(org_id),
+                        event_type="finding.critical",
+                        payload={
+                            "finding_id": str(nf.id),
+                            "scan_id": nf.source_scan_id or "",
+                            "org_id": str(org_id),
+                            "title": nf.title,
+                            "severity": nf.severity.value,
+                            "affected_asset": nf.affected_asset or "",
+                        },
+                        db_session=db,
+                    )
+                except Exception as exc:
+                    logger.warning("MSRA sync: dispatch_notifications failed for finding %s: %s", nf.id, exc)
+        except Exception as exc:
+            logger.warning("MSRA sync: notification dispatch setup failed: %s", exc)
 
     return {"inserted": inserted, "updated": updated, "skipped": skipped, "errors": errors}
 

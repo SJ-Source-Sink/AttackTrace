@@ -42,6 +42,14 @@ _CATEGORY_REMEDIATION: dict[str, str] = {
     "debug_info": "Disable debug/verbose error output in production — stack traces and debug endpoints can leak internal paths, versions, and logic.",
     "logs": "Remove exposed log files from the web root — they can leak internal paths, session tokens, or user data.",
     "cloud": "Restrict access to exposed cloud metadata/config endpoints and confirm they don't leak credentials or internal topology.",
+
+    # cloud.py (Cloud Discovery / cloudlist) resource-exposure categories
+    "cloud-storage-exposure": "Confirm this storage bucket/container's access policy is not allUsers/AllUsers or AllAuthenticatedUsers-readable; restrict it to explicit IAM principals and enable the provider's bucket-level public-access-block setting.",
+    "cloud-data-exposure": "Move this database/cache resource into a private subnet with no public IP, restrict its security group/firewall rules to known application hosts only, and confirm authentication is enforced (not just network-level control).",
+    "cloud-cluster-exposure": "Restrict the cluster's API/management endpoint to a private network or an allowlisted set of admin IPs, and confirm RBAC/authentication is enforced on the exposed endpoint.",
+    "cloud-admin-exposure": "Move this admin/management interface behind a VPN or bastion host rather than exposing it directly to the internet, and confirm it requires strong authentication (MFA where supported).",
+    "cloud-compute-exposure": "Confirm this compute resource genuinely needs a public IP; if not, remove it and route access through a load balancer, bastion, or VPN instead of exposing the instance directly.",
+    "cloud-exposure": "Review why this cloud resource is directly reachable from the public internet and restrict its network exposure if that wasn't intentional.",
 }
 
 # Substring-matched against a dynamic finding title (email_security.py builds

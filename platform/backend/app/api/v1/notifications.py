@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
 from app.core.security import decrypt_credential, encrypt_credential
+from app.core.ssrf_guard import SAFE_CLIENT_KWARGS, SSRFValidationError, validate_outbound_url
 from app.models.db.org import NotificationChannel
 from app.models.db.user import User
 
@@ -126,6 +127,39 @@ async def _get_channel_or_404(
     return ch
 
 
+# Which config keys hold an outbound URL for each channel type — these are
+# the fields that get SSRF-validated at create/update time (see
+# _validate_channel_urls) and again immediately before every fetch.
+_URL_FIELDS_BY_TYPE: dict[str, tuple[str, ...]] = {
+    "slack": ("webhook_url",),
+    "teams": ("webhook_url",),
+    "webhook": ("url",),
+    "jira": ("jira_url",),
+}
+
+
+def _validate_channel_urls(channel_type: str, config: dict) -> None:
+    """
+    Reject a channel create/update up front if any URL field it carries is
+    unsafe (private/reserved/loopback address, or a non-http(s) scheme) —
+    closes the SSRF hole at the point the URL is first trusted, not just at
+    send time. Missing fields are left for the existing required-field
+    checks in the test/dispatch code to report; only present, non-empty URL
+    fields are validated here.
+    """
+    for field in _URL_FIELDS_BY_TYPE.get(channel_type, ()):
+        value = config.get(field)
+        if not value:
+            continue
+        try:
+            validate_outbound_url(value)
+        except SSRFValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"error": {"code": "UNSAFE_URL", "message": f"Invalid {field}: {exc}"}},
+            )
+
+
 def _validate_events(events: list[str]) -> None:
     invalid = set(events) - VALID_EVENTS
     if invalid:
@@ -177,6 +211,7 @@ async def create_channel(
     db: AsyncSession = Depends(get_db),
 ) -> ChannelResponse:
     _validate_events(payload.events)
+    _validate_channel_urls(payload.channel_type, payload.config)
 
     config_enc = encrypt_credential(json.dumps(payload.config)) if payload.config else None
 
@@ -230,6 +265,7 @@ async def update_channel(
                 existing = {}
         # Only update keys explicitly provided (allow partial config updates)
         existing.update(payload.config)
+        _validate_channel_urls(ch.channel_type, existing)
         ch.config_enc = encrypt_credential(json.dumps(existing))
 
     db.add(ch)
@@ -275,7 +311,7 @@ async def test_channel(
             return {"success": False, "message": "Failed to decrypt channel configuration"}
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, **SAFE_CLIENT_KWARGS) as client:
             if ch.channel_type == "slack":
                 success, message = await _test_slack(client, config)
             elif ch.channel_type == "webhook":
@@ -303,13 +339,19 @@ async def _test_slack(client: httpx.AsyncClient, config: dict) -> tuple[bool, st
     if not webhook_url:
         return False, "Missing webhook_url in Slack configuration"
     try:
+        validate_outbound_url(webhook_url)
+    except SSRFValidationError as exc:
+        return False, f"Invalid webhook_url: {exc}"
+    try:
         resp = await client.post(
             webhook_url,
             json={"text": "✅ AttackTrace test notification"},
         )
         if resp.status_code == 200:
             return True, "Slack test message sent successfully"
-        return False, f"Slack returned HTTP {resp.status_code}: {resp.text[:200]}"
+        # Don't reflect arbitrary response bytes from a caller-supplied URL
+        # back to the caller (SSRF read primitive) — status code only.
+        return False, f"Slack returned HTTP {resp.status_code}"
     except httpx.RequestError as exc:
         return False, f"Failed to reach Slack: {exc}"
 
@@ -319,13 +361,19 @@ async def _test_webhook(client: httpx.AsyncClient, config: dict) -> tuple[bool, 
     if not url:
         return False, "Missing url in webhook configuration"
     try:
+        validate_outbound_url(url)
+    except SSRFValidationError as exc:
+        return False, f"Invalid url: {exc}"
+    try:
         resp = await client.post(
             url,
             json={"event": "test", "message": "AttackTrace test notification"},
         )
         if resp.status_code < 300:
             return True, f"Webhook responded with HTTP {resp.status_code}"
-        return False, f"Webhook returned HTTP {resp.status_code}: {resp.text[:200]}"
+        # Don't reflect arbitrary response bytes from a caller-supplied URL
+        # back to the caller (SSRF read primitive) — status code only.
+        return False, f"Webhook returned HTTP {resp.status_code}"
     except httpx.RequestError as exc:
         return False, f"Failed to reach webhook: {exc}"
 
@@ -337,16 +385,26 @@ async def _test_jira(client: httpx.AsyncClient, config: dict) -> tuple[bool, str
     if not jira_url or not email or not api_token:
         return False, "Missing jira_url, email, or api_token in Jira configuration"
     try:
+        validate_outbound_url(jira_url)
+    except SSRFValidationError as exc:
+        return False, f"Invalid jira_url: {exc}"
+    try:
         resp = await client.get(
             f"{jira_url}/rest/api/3/myself",
             auth=(email, api_token),
             headers={"Accept": "application/json"},
         )
         if resp.status_code == 200:
-            data = resp.json()
-            display_name = data.get("displayName", email)
+            # displayName just confirms the credentials resolved to an
+            # account — it's not arbitrary response content from a
+            # caller-chosen destination, so it's fine to surface.
+            try:
+                data = resp.json()
+                display_name = data.get("displayName", email)
+            except Exception:
+                display_name = email
             return True, f"Jira credentials valid — authenticated as {display_name}"
-        return False, f"Jira returned HTTP {resp.status_code}: {resp.text[:200]}"
+        return False, f"Jira returned HTTP {resp.status_code}"
     except httpx.RequestError as exc:
         return False, f"Failed to reach Jira: {exc}"
 
@@ -355,6 +413,10 @@ async def _test_teams(client: httpx.AsyncClient, config: dict) -> tuple[bool, st
     webhook_url = config.get("webhook_url", "")
     if not webhook_url:
         return False, "Missing webhook_url in Microsoft Teams configuration"
+    try:
+        validate_outbound_url(webhook_url)
+    except SSRFValidationError as exc:
+        return False, f"Invalid webhook_url: {exc}"
     # Adaptive Card payload for Teams incoming webhook
     card_payload = {
         "type": "message",
@@ -386,6 +448,8 @@ async def _test_teams(client: httpx.AsyncClient, config: dict) -> tuple[bool, st
         resp = await client.post(webhook_url, json=card_payload)
         if resp.status_code in (200, 202):
             return True, "Teams test message sent successfully"
-        return False, f"Teams returned HTTP {resp.status_code}: {resp.text[:200]}"
+        # Don't reflect arbitrary response bytes from a caller-supplied URL
+        # back to the caller (SSRF read primitive) — status code only.
+        return False, f"Teams returned HTTP {resp.status_code}"
     except httpx.RequestError as exc:
         return False, f"Failed to reach Teams: {exc}"

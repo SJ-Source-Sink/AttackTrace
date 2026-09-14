@@ -217,6 +217,8 @@ export const findingsApi = {
     api.post<{ deleted: number }>("/findings/bulk-delete", { finding_ids: findingIds }),
   addComment: (id: string, content: string) =>
     api.post(`/findings/${id}/comments`, { body: content }),
+  comments: (id: string) =>
+    api.get(`/findings/${id}/comments`),
   timeline: (params: Record<string, string | number | undefined>) =>
     api.get("/findings/timeline", params),
   assignees: () => api.get<{ items: { id: string; name: string; email: string; role: string }[] }>("/findings/assignees"),

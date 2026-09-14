@@ -43,6 +43,7 @@ celery_app.conf.update(
         "app.workers.scan_worker.run_scan": {"queue": "scans"},
         "app.workers.scan_worker.recover_stuck_scans": {"queue": "default"},
         "app.workers.scan_worker.triage_scan_findings": {"queue": "ai"},
+        "app.workers.scan_worker.run_ai_agent_after_scan": {"queue": "ai"},
         "app.workers.schedule_worker.check_scheduled_scans": {"queue": "default"},
         "app.workers.mobile_worker.run_mobile_scan": {"queue": "scans"},
         "app.workers.maintenance_worker.expire_stale_suppressions": {"queue": "default"},

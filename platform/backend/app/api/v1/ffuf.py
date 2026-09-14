@@ -345,6 +345,7 @@ async def _stream_ffuf(
         "started_at": datetime.now(timezone.utc).isoformat(),
         "results": [],
         "total": 0,
+        "org_id": str(org_id),
     }
 
     results: list[dict] = []
@@ -547,8 +548,12 @@ async def run_ffuf_scan(
 @router.get("/scans", summary="List ffuf scan history")
 async def list_ffuf_scans(
     current_user: Annotated[User, Depends(get_current_user)],
+    org_id: uuid.UUID = Depends(get_current_org_id),
 ) -> dict:
-    scans = sorted(_scan_history.values(), key=lambda s: s.get("started_at", ""), reverse=True)
+    scans = sorted(
+        (s for s in _scan_history.values() if s.get("org_id") == str(org_id)),
+        key=lambda s: s.get("started_at", ""), reverse=True,
+    )
     return {"items": scans, "total": len(scans)}
 
 
@@ -556,8 +561,9 @@ async def list_ffuf_scans(
 async def get_ffuf_scan(
     scan_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
+    org_id: uuid.UUID = Depends(get_current_org_id),
 ) -> dict:
     scan = _scan_history.get(scan_id)
-    if not scan:
+    if not scan or scan.get("org_id") != str(org_id):
         raise HTTPException(status_code=404, detail="Scan not found")
     return scan

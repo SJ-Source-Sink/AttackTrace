@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from app.core.dependencies import get_current_org_id, get_current_user
+from app.core.ssrf_guard import SAFE_CLIENT_KWARGS, SSRFValidationError, validate_outbound_url
 from app.models.db.user import User
 
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
@@ -81,6 +82,14 @@ async def create_webhook(
             status_code=400,
             detail=f"Invalid events: {invalid}. Valid: {sorted(VALID_EVENTS)}",
         )
+
+    # Reject an unsafe destination at registration time — SSRF guard (see
+    # app/core/ssrf_guard.py). Re-validated again at dispatch time below to
+    # catch DNS rebinding between now and delivery.
+    try:
+        validate_outbound_url(payload.url)
+    except SSRFValidationError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid webhook url: {exc}")
 
     webhook_id = str(uuid.uuid4())
     secret = payload.secret or uuid.uuid4().hex
@@ -179,6 +188,13 @@ async def test_webhook(
     finally:
         await redis.aclose()
 
+    # Re-validate at send time — the stored URL passed validation when the
+    # webhook was created, but DNS can change since then (rebinding).
+    try:
+        validate_outbound_url(webhook["url"])
+    except SSRFValidationError as exc:
+        return {"status": "failed", "error": f"Invalid webhook url: {exc}"}
+
     test_payload = {
         "event": "webhook.test",
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -188,7 +204,7 @@ async def test_webhook(
     sig = _sign_payload(webhook["secret"], body)
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, **SAFE_CLIENT_KWARGS) as client:
             resp = await client.post(
                 webhook["url"],
                 content=body,
@@ -235,9 +251,12 @@ async def dispatch_webhook_event(org_id: str, event: str, data: dict) -> None:
     }
     body = json.dumps(payload_dict).encode()
 
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with httpx.AsyncClient(timeout=5.0, **SAFE_CLIENT_KWARGS) as client:
         for webhook in webhooks_to_notify:
             try:
+                # Re-validate at dispatch time — DNS can change since the
+                # webhook was created (rebinding protection).
+                validate_outbound_url(webhook["url"])
                 sig = _sign_payload(webhook["secret"], body)
                 resp = await client.post(
                     webhook["url"],

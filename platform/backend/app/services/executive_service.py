@@ -142,7 +142,7 @@ async def _new_vs_recurring(db: AsyncSession, org_id: UUID) -> dict:
     # Among findings with a hash: those that are NOT the earliest occurrence
     # of their dedup_hash are "recurring"
     if total_with_hash == 0:
-        return {"new": no_hash, "recurring": 0}
+        return {"new": no_hash, "recurring": 0, "total": no_hash}
 
     # Use a subquery: for each (org_id, dedup_hash) pair find the minimum created_at.
     # Findings whose created_at > that minimum are recurring.
@@ -172,7 +172,8 @@ async def _new_vs_recurring(db: AsyncSession, org_id: UUID) -> dict:
     recurring = recurring_result.scalar_one()
 
     new_with_hash = total_with_hash - recurring
-    return {"new": new_with_hash + no_hash, "recurring": recurring}
+    new_count = new_with_hash + no_hash
+    return {"new": new_count, "recurring": recurring, "total": new_count + recurring}
 
 
 async def _coverage_percent(db: AsyncSession, org_id: UUID, now: datetime) -> float:

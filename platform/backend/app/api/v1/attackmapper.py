@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 
-from app.core.dependencies import get_current_user, require_tool
+from app.core.dependencies import get_current_org_id, get_current_user, require_tool
 from app.models.db.user import User
 
 router = APIRouter(prefix="/attackmapper", tags=["AttackMapper"])
@@ -153,7 +153,7 @@ def _chain_to_dict(chain) -> dict | None:
     }
 
 
-async def _stream_attackmapper(scan_id: str, req: AttackMapperRequest) -> AsyncGenerator[str, None]:
+async def _stream_attackmapper(scan_id: str, req: AttackMapperRequest, org_id: uuid.UUID) -> AsyncGenerator[str, None]:
     infra = req.infrastructure_type
     infra_label = INFRA_LABELS[infra]
 
@@ -166,6 +166,7 @@ async def _stream_attackmapper(scan_id: str, req: AttackMapperRequest) -> AsyncG
         "techniques": [],
         "attack_chain": None,
         "threat_intel": None,
+        "org_id": str(org_id),
     }
 
     yield _sse("start", {
@@ -273,6 +274,7 @@ async def _stream_attackmapper(scan_id: str, req: AttackMapperRequest) -> AsyncG
 async def run_attackmapper_scan(
     payload: AttackMapperRequest,
     current_user: Annotated[User, Depends(require_tool("attackmapper"))],
+    org_id: uuid.UUID = Depends(get_current_org_id),
 ) -> StreamingResponse:
     if not _am_available():
         raise HTTPException(
@@ -281,7 +283,7 @@ async def run_attackmapper_scan(
         )
     scan_id = str(uuid.uuid4())
     return StreamingResponse(
-        _stream_attackmapper(scan_id, payload),
+        _stream_attackmapper(scan_id, payload, org_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -294,9 +296,10 @@ async def run_attackmapper_scan(
 @router.get("/scans", summary="List AttackMapper scan history")
 async def list_attackmapper_scans(
     current_user: Annotated[User, Depends(get_current_user)],
+    org_id: uuid.UUID = Depends(get_current_org_id),
 ) -> dict:
     scans = sorted(
-        _scan_history.values(),
+        (s for s in _scan_history.values() if s.get("org_id") == str(org_id)),
         key=lambda s: s.get("started_at", ""),
         reverse=True,
     )
@@ -321,9 +324,10 @@ async def list_attackmapper_scans(
 async def get_attackmapper_scan(
     scan_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
+    org_id: uuid.UUID = Depends(get_current_org_id),
 ) -> dict:
     scan = _scan_history.get(scan_id)
-    if not scan:
+    if not scan or scan.get("org_id") != str(org_id):
         raise HTTPException(status_code=404, detail="Scan not found")
     return scan
 

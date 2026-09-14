@@ -5653,7 +5653,7 @@ async def _module_api_versioning(target: str, client: httpx.AsyncClient,
 
 # ── Main Stream ───────────────────────────────────────────────────────────────
 
-async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, ai_config: dict | None = None) -> AsyncGenerator[str, None]:
+async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, org_id: UUID, ai_config: dict | None = None) -> AsyncGenerator[str, None]:
     start_time = time.monotonic()
     findings: list[dict] = []
     counts: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
@@ -5666,7 +5666,7 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, ai_config:
     _scan_history[scan_id] = {
         "id": scan_id, "target": req.target, "modules": req.modules,
         "status": "running", "started_at": datetime.now(timezone.utc).isoformat(),
-        "findings": [], "counts": counts, "crawl": {},
+        "findings": [], "counts": counts, "crawl": {}, "org_id": str(org_id),
     }
 
     def emit(f: dict):
@@ -6081,7 +6081,7 @@ async def run_attack_suite(
     ai_config = await get_org_ai_config(org_id, db)
     scan_id = str(uuid.uuid4())
     return StreamingResponse(
-        _stream_attack_suite(scan_id, payload, ai_config=ai_config),
+        _stream_attack_suite(scan_id, payload, org_id, ai_config=ai_config),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
                  "X-Accel-Buffering": "no"},
@@ -6091,8 +6091,12 @@ async def run_attack_suite(
 @router.get("/scans")
 async def list_attack_scans(
     current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
 ) -> dict:
-    scans = sorted(_scan_history.values(), key=lambda s: s.get("started_at", ""), reverse=True)
+    scans = sorted(
+        (s for s in _scan_history.values() if s.get("org_id") == str(org_id)),
+        key=lambda s: s.get("started_at", ""), reverse=True,
+    )
     return {"items": scans, "total": len(scans)}
 
 
@@ -6100,9 +6104,10 @@ async def list_attack_scans(
 async def get_attack_scan(
     scan_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
 ) -> dict:
     scan = _scan_history.get(scan_id)
-    if not scan:
+    if not scan or scan.get("org_id") != str(org_id):
         raise HTTPException(status_code=404, detail="Scan not found")
     return scan
 
@@ -6297,10 +6302,10 @@ async def stop_attack_agent(
     org_id: UUID = Depends(get_current_org_id),
 ) -> dict:
     from app.services.attack_agent import get_run_status, stop_run
-    status_info = get_run_status(run_id)
+    status_info = await get_run_status(run_id)
     if status_info is None or status_info.get("org_id") != str(org_id):
         raise HTTPException(status_code=404, detail="Agent run not found")
-    stop_run(run_id)
+    await stop_run(run_id)
     return {"run_id": run_id, "stopping": True}
 
 
@@ -6311,7 +6316,7 @@ async def get_attack_agent_status(
     org_id: UUID = Depends(get_current_org_id),
 ) -> dict:
     from app.services.attack_agent import get_run_status
-    status_info = get_run_status(run_id)
+    status_info = await get_run_status(run_id)
     if status_info is None or status_info.get("org_id") != str(org_id):
         raise HTTPException(status_code=404, detail="Agent run not found")
     return status_info

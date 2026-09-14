@@ -38,39 +38,45 @@ def expire_stale_suppressions(self):
 
         db_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
         engine = create_engine(db_url, pool_pre_ping=True, pool_size=2, max_overflow=2)
-        Session = sessionmaker(bind=engine, expire_on_commit=False)
+        try:
+            Session = sessionmaker(bind=engine, expire_on_commit=False)
 
-        now = datetime.now(timezone.utc)
+            now = datetime.now(timezone.utc)
 
-        with Session() as session:
-            from app.models.db.finding import Finding, FindingStatus
+            with Session() as session:
+                from app.models.db.finding import Finding, FindingStatus
 
-            stmt = (
-                update(Finding)
-                .where(
-                    Finding.suppressed == True,
-                    Finding.suppressed_until != None,
-                    Finding.suppressed_until <= now,
+                stmt = (
+                    update(Finding)
+                    .where(
+                        Finding.suppressed == True,
+                        Finding.suppressed_until != None,
+                        Finding.suppressed_until <= now,
+                    )
+                    .values(
+                        suppressed=False,
+                        suppressed_until=None,
+                        suppressed_by=None,
+                        suppressed_reason=None,
+                        status=FindingStatus.OPEN,
+                        updated_at=now,
+                    )
                 )
-                .values(
-                    suppressed=False,
-                    suppressed_until=None,
-                    suppressed_by=None,
-                    suppressed_reason=None,
-                    status=FindingStatus.OPEN,
-                    updated_at=now,
-                )
-            )
-            result = session.execute(stmt)
-            session.commit()
-            count = result.rowcount
+                result = session.execute(stmt)
+                session.commit()
+                count = result.rowcount
 
-        if count > 0:
-            logger.info(f"expire_stale_suppressions: lifted suppression on {count} finding(s)")
-        else:
-            logger.debug("expire_stale_suppressions: no expired suppressions found")
-
-        engine.dispose()
+            if count > 0:
+                logger.info(f"expire_stale_suppressions: lifted suppression on {count} finding(s)")
+            else:
+                logger.debug("expire_stale_suppressions: no expired suppressions found")
+        finally:
+            # Must run even if session.execute/commit above raised (which sends
+            # control to the except block below and, via self.retry, straight
+            # out of this task) — otherwise this connection-pooled engine
+            # (pool_size=2, max_overflow=2) leaks up to 4 connections per
+            # failed attempt, and this task retries hourly forever.
+            engine.dispose()
 
     except Exception as exc:
         logger.error(f"expire_stale_suppressions failed: {exc}", exc_info=True)

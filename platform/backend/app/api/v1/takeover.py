@@ -989,6 +989,7 @@ async def _stream_takeover_scan(
         "total": total,
         "status": "running",
         "results": [],
+        "org_id": str(org_id),
     }
 
     yield f"event: start\ndata: {json.dumps({'scan_id': scan_id, 'total': total, 'message': 'Takeover scan started'})}\n\n"
@@ -1124,10 +1125,11 @@ async def list_fingerprints(
 @router.get("/history")
 async def list_scan_history(
     current_user: User = Depends(get_current_user),
+    org_id: uuid.UUID = Depends(get_current_org_id),
 ) -> dict:
     """Return recent takeover scan history (in-memory, current process only)."""
     scans = sorted(
-        _scan_history.values(),
+        (s for s in _scan_history.values() if s.get("org_id") == str(org_id)),
         key=lambda s: s.get("started_at", ""),
         reverse=True,
     )
@@ -1138,9 +1140,10 @@ async def list_scan_history(
 async def get_scan_result(
     scan_id: str,
     current_user: User = Depends(get_current_user),
+    org_id: uuid.UUID = Depends(get_current_org_id),
 ) -> dict:
     """Return full results for a specific takeover scan."""
     scan = _scan_history.get(scan_id)
-    if not scan:
+    if not scan or scan.get("org_id") != str(org_id):
         raise HTTPException(status_code=404, detail=f"Scan {scan_id} not found")
     return scan

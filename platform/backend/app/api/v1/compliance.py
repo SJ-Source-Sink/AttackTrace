@@ -12,6 +12,7 @@ existing scan evidence into the shape an auditor/compliance team can use.
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import html as _html
 import io
@@ -24,6 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.attack_mapper import CWE_TO_ATTACK, _infer_cwe_from_title
+from app.core.csv_safety import csv_safe as _csv_safe
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
 from app.models.db.finding import Finding, FindingStatus
@@ -149,17 +151,6 @@ async def _build_coverage(db: AsyncSession, org_id, framework: str) -> dict:
         "not_assessed": sum(1 for r in rows if r["state"] == "not_assessed"),
         "controls": rows,
     }
-
-
-def _csv_safe(value: str) -> str:
-    """Neutralize CSV formula injection (CWE-1236): a cell starting with
-    =, +, -, @, or a tab/CR that a spreadsheet app would interpret as a
-    formula prefix. Finding titles can originate from an untrusted scan
-    target (e.g. a git commit message), so this must not be skipped."""
-    s = str(value or "").replace("\r", " ").replace("\n", " ")
-    if s and s[0] in ("=", "+", "-", "@", "\t"):
-        return "'" + s
-    return s
 
 
 def _validate_framework(framework: str) -> str:
@@ -288,7 +279,14 @@ async def export_evidence(
     def _no_external_fetch(url: str, *args, **kwargs):
         raise ValueError(f"External resource fetching is disabled (blocked: {url})")
 
-    pdf_bytes = HTML(string=html, url_fetcher=_no_external_fetch).write_pdf()
+    # write_pdf() is a blocking, potentially slow synchronous call — offload
+    # it to a thread so it doesn't block the event loop, same pattern as
+    # report_service.py's _generate_pdf/run_in_executor.
+    def _generate_pdf() -> bytes:
+        return HTML(string=html, url_fetcher=_no_external_fetch).write_pdf()
+
+    loop = asyncio.get_event_loop()
+    pdf_bytes = await loop.run_in_executor(None, _generate_pdf)
     return StreamingResponse(
         iter([pdf_bytes]),
         media_type="application/pdf",

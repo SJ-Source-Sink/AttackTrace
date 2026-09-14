@@ -14,6 +14,7 @@ found by two different tools on the same asset collapses to one row.
 """
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
 from sqlalchemy import select
@@ -21,6 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dedup import compute_dedup_hash
 from app.models.db.finding import Finding, FindingSeverity, FindingStatus
+from app.services.notification_service import dispatch_notifications
+
+logger = logging.getLogger(__name__)
+
+_NOTIFY_SEVERITIES = (FindingSeverity.CRITICAL, FindingSeverity.HIGH)
 
 _SEVERITY_MAP: dict[str, FindingSeverity] = {
     "critical": FindingSeverity.CRITICAL,
@@ -52,6 +58,7 @@ async def ingest_findings(
     inserted = 0
     updated = 0
     skipped = 0
+    newly_created_critical_high: list[Finding] = []
 
     for f in findings:
         severity_raw = str(f.get("severity", "info")).lower()
@@ -77,7 +84,7 @@ async def ingest_findings(
             evidence = {"raw": evidence}
 
         if existing is None:
-            db.add(Finding(
+            new_finding = Finding(
                 org_id=org_id,
                 scan_job_id=None,
                 source=source,
@@ -97,8 +104,11 @@ async def ingest_findings(
                 kev_status=bool(f.get("kev_status", False)),
                 epss_score=f.get("epss_score"),
                 dedup_hash=dedup,
-            ))
+            )
+            db.add(new_finding)
             inserted += 1
+            if severity in _NOTIFY_SEVERITIES:
+                newly_created_critical_high.append(new_finding)
         else:
             # Refresh the mutable evidence trail on a rescan; don't touch
             # lifecycle fields (status/suppressed) the user may have set.
@@ -115,5 +125,39 @@ async def ingest_findings(
             if f.get("kev_status"):
                 existing.kev_status = True
             updated += 1
+
+    # Notify configured channels (Slack/Jira/Teams/webhooks) for every finding
+    # that was NEWLY created (never for updates to an already-existing row via
+    # the dedup upsert) with CRITICAL/HIGH severity. Mirrors the payload shape
+    # of scan_worker.py's _async_notify_critical_findings for the core
+    # pipeline. Flush first so the new rows have real DB-assigned ids to put
+    # in the payload; never let a notification failure break ingestion.
+    if newly_created_critical_high:
+        try:
+            await db.flush()
+            for nf in newly_created_critical_high:
+                try:
+                    await dispatch_notifications(
+                        org_id=str(org_id),
+                        event_type="finding.critical",
+                        payload={
+                            "finding_id": str(nf.id),
+                            "scan_id": source_scan_id,
+                            "org_id": str(org_id),
+                            "title": nf.title,
+                            "severity": nf.severity.value,
+                            "affected_asset": nf.affected_asset or "",
+                        },
+                        db_session=db,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"ingest_findings: dispatch_notifications failed for finding {nf.id} "
+                        f"(source={source}): {exc}"
+                    )
+        except Exception as exc:
+            logger.warning(
+                f"ingest_findings: flush before notification dispatch failed (source={source}): {exc}"
+            )
 
     return {"inserted": inserted, "updated": updated, "skipped": skipped}

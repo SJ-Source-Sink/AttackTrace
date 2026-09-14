@@ -634,18 +634,31 @@ def _persist_module_results_partial(
                         new_finding.false_positive = True
                     elif matched_rule.action == "accepted_risk":
                         new_finding.status = FindingStatus.ACCEPTED_RISK
-                db_session.add(new_finding)
             except Exception as e:
                 logger.warning(f"Partial persist finding failed [{module_name}]: {e}")
+                continue
 
-        try:
-            db_session.flush()
-        except _IntegrityError:
-            # A concurrent partial-persist or retry already wrote one of these
-            # findings. Roll back this batch and continue — findings already in
-            # the DB are counted correctly on the final persist pass.
-            db_session.rollback()
-            logger.warning(f"Partial persist [{module_name}]: dedup conflict on flush, skipping batch")
+            # Add + flush this ONE finding inside its own SAVEPOINT. This must be
+            # per-finding, not a single batch flush at the end of the loop: calling
+            # db_session.begin_nested() while OTHER finding objects from earlier in
+            # this same loop are still pending (added but not yet flushed) makes
+            # SQLAlchemy pre-flush that pending state as part of establishing the
+            # SAVEPOINT itself — i.e. BEFORE the SAVEPOINT actually exists — so a
+            # collision there would still require a full session rollback and
+            # reintroduce the exact bug this is meant to fix. Flushing immediately
+            # after each add keeps every SAVEPOINT scoped to exactly one insert.
+            try:
+                with db_session.begin_nested():
+                    db_session.add(new_finding)
+                    db_session.flush()
+            except _IntegrityError:
+                # A concurrent partial-persist or retry already wrote this exact
+                # finding. Roll back only this SAVEPOINT (this one finding-insert
+                # attempt), not the whole transaction — otherwise this would also
+                # discard the asset upserts already flushed earlier in the same
+                # db_session/transaction (new ports, resolved IPs, etc.), which a
+                # plain db_session.rollback() here used to silently wipe out.
+                logger.warning(f"Partial persist [{module_name}]: dedup conflict on flush for '{f.title}', skipping")
         logger.debug(
             f"Partial persist: {module_name} → "
             f"{len(getattr(module_result, 'findings', []))} findings"
@@ -812,15 +825,26 @@ def _persist_session_results(db_session, scan_job, attacktrace_session, org_id: 
                     new_finding.false_positive = True
                 elif matched_rule.action == "accepted_risk":
                     new_finding.status = FindingStatus.ACCEPTED_RISK
-            db_session.add(new_finding)
         except Exception as e:
             logger.error(f"Failed to persist finding '{f.title}': {e}")
+            continue
 
-    try:
-        db_session.flush()
-    except _IntegrityError:
-        db_session.rollback()
-        logger.warning("Final persist: dedup conflict on flush — duplicate findings skipped")
+        # Add + flush this ONE finding inside its own SAVEPOINT — see the matching
+        # comment in _persist_module_results_partial for why this must be done
+        # per-finding rather than batched into a single flush at the end of the
+        # loop (db_session.begin_nested() pre-flushes any OTHER pending objects
+        # before the SAVEPOINT exists, so a batched flush would still let a
+        # collision force a full-transaction rollback).
+        try:
+            with db_session.begin_nested():
+                db_session.add(new_finding)
+                db_session.flush()
+        except _IntegrityError:
+            # SAVEPOINT rollback only — a plain db_session.rollback() here would
+            # roll back the whole outer transaction, discarding the asset
+            # upserts (_upsert_asset calls above, and any from partial-persist
+            # earlier in this same db_session) that already flushed successfully.
+            logger.warning(f"Final persist: dedup conflict on flush for '{f.title}' — skipped")
 
     attacktrace_session.update_statistics()
     results_summary = {
@@ -1211,8 +1235,12 @@ def run_scan(self: Task, scan_job_id: str) -> dict:
             })
             _publish_event(r, scan_job_id, "complete", {"status": "completed"})
 
-            # Trigger AI triage
+            # Trigger AI triage (passive classification of what the scanners found)
             triage_scan_findings.delay(scan_job_id)
+
+            # Trigger active AI testing/validation (Attack Suite AI Agent) against
+            # this scan's targets — the follow-up step after passive triage.
+            run_ai_agent_after_scan.delay(scan_job_id)
 
             # Notifications: scan.completed channels (Slack, Jira, Teams, webhooks)
             try:
@@ -1312,7 +1340,13 @@ def triage_scan_findings(self, scan_job_id: str) -> dict:
         if not job:
             return {"error": "scan_not_found"}
 
-        # Resolve org-specific AI credentials (fall back to system env vars)
+        # Resolve org-specific AI credentials (fall back to system env vars).
+        # This duplicates get_org_ai_config()'s logic rather than calling it
+        # directly because this task runs in a sync Celery worker context
+        # with its own sync SQLAlchemy session — kept provider-aware in step
+        # with that function so a Qwen-configured org isn't silently skipped
+        # here just because it has no Anthropic key (it doesn't need one).
+        provider = "anthropic"
         ai_api_key = settings.ANTHROPIC_API_KEY
         ai_base_url = settings.AI_BASE_URL
         ai_model = settings.AI_MODEL
@@ -1321,19 +1355,26 @@ def triage_scan_findings(self, scan_job_id: str) -> dict:
                 sync_select(OrgCredentials).where(OrgCredentials.org_id == job.org_id)
             ).scalar_one_or_none()
             if creds_row:
-                if creds_row.anthropic_key_enc:
-                    ai_api_key = decrypt_credential(creds_row.anthropic_key_enc)
-                if creds_row.ai_base_url_enc:
-                    ai_base_url = decrypt_credential(creds_row.ai_base_url_enc)
-                if creds_row.ai_model_override_enc:
-                    ai_model = decrypt_credential(creds_row.ai_model_override_enc)
+                if creds_row.ai_provider == "qwen":
+                    provider = "qwen"
+                    ai_api_key = decrypt_credential(creds_row.qwen_api_key_enc) if creds_row.qwen_api_key_enc else None
+                    ai_base_url = decrypt_credential(creds_row.qwen_base_url_enc) if creds_row.qwen_base_url_enc else None
+                    ai_model = decrypt_credential(creds_row.qwen_model_enc) if creds_row.qwen_model_enc else None
+                else:
+                    if creds_row.anthropic_key_enc:
+                        ai_api_key = decrypt_credential(creds_row.anthropic_key_enc)
+                    if creds_row.ai_base_url_enc:
+                        ai_base_url = decrypt_credential(creds_row.ai_base_url_enc)
+                    if creds_row.ai_model_override_enc:
+                        ai_model = decrypt_credential(creds_row.ai_model_override_enc)
         except Exception as e:
             logger.warning(f"Could not load org AI credentials: {e}")
 
-        if not ai_api_key:
+        ai_ready = bool(ai_api_key) or (provider == "qwen" and bool(ai_base_url))
+        if not ai_ready:
             return {"status": "skipped", "reason": "no_api_key"}
 
-        ai_config = {"api_key": ai_api_key, "base_url": ai_base_url, "model": ai_model}
+        ai_config = {"provider": provider, "api_key": ai_api_key, "base_url": ai_base_url, "model": ai_model}
 
         org = db.get(Organization, job.org_id)
         org_context = {
@@ -1396,6 +1437,7 @@ def triage_scan_findings(self, scan_job_id: str) -> dict:
 
             finding.ai_reasoning = result.get("reasoning", "")
             finding.ai_confidence = float(result.get("confidence", 0.0))
+            finding.ai_business_impact = result.get("business_impact", "")
             finding.ai_triaged_at = datetime.now(timezone.utc)
 
             if result.get("is_false_positive"):
@@ -1406,6 +1448,155 @@ def triage_scan_findings(self, scan_job_id: str) -> dict:
 
         db.commit()
         return {"status": "completed", "triaged": triaged, "errors": errors}
+
+
+# --- Automatic post-scan active testing (Attack Suite AI Agent) ---
+
+# Bounded, provider-aware budget for the *unattended* agent run fired after
+# every scan — deliberately smaller than the interactive ceiling in
+# attack_suite.py's _AGENT_BUDGET_CEILING, since this task may run the agent
+# against several targets back-to-back in one Celery task and must finish
+# comfortably inside CELERY_TASK_SOFT_TIME_LIMIT (2h) with no human watching.
+_AUTO_AGENT_BUDGET = {
+    "anthropic": {"turns": 20, "seconds": 480},
+    "qwen": {"turns": 100, "seconds": 3600},
+}
+# Cap how many of a scan's target_domains get an automatic agent run — a scan
+# covering dozens of domains would otherwise serialize into a multi-hour task.
+_AUTO_AGENT_MAX_TARGETS = 5
+
+
+@celery_app.task(
+    name="app.workers.scan_worker.run_ai_agent_after_scan",
+    bind=True,
+    max_retries=1,
+    default_retry_delay=60,
+)
+def run_ai_agent_after_scan(self, scan_job_id: str) -> dict:
+    """Background task: automatically launch the bounded Attack Suite AI
+    Agent (active testing/validation) against each in-scope target surfaced
+    by a completed scan. This is the "second half" of the pipeline —
+    triage_scan_findings does passive AI classification of what the scanners
+    already found; this does active, tool-use follow-up testing against the
+    same assets, exactly like a manually-started agent run, just system-
+    triggered. Runs fully autonomously per the existing agent safety model
+    (scope enforcement, fixed tool envelope, bounded budget, full AuditLog
+    trail) — no additional gate is introduced here.
+    """
+    engine = _get_sync_engine()
+    SessionFactory = _get_session_factory(engine)
+
+    with SessionFactory() as db:
+        from app.models.db.scan import ScanJob
+        from app.models.db.org import OrgCredentials
+        from app.core.security import decrypt_credential
+        from sqlalchemy import select as sync_select
+
+        try:
+            _uuid = UUID(scan_job_id)
+        except ValueError:
+            logger.error(f"Invalid scan_job_id for auto-agent: {scan_job_id!r}")
+            return {"error": "invalid_scan_job_id"}
+
+        job = db.get(ScanJob, _uuid)
+        if not job:
+            return {"error": "scan_not_found"}
+
+        # Same provider-aware credential resolution as triage_scan_findings —
+        # a Qwen-configured org must not be skipped just because it has no
+        # Anthropic key (it doesn't need one).
+        provider = "anthropic"
+        ai_api_key = settings.ANTHROPIC_API_KEY
+        ai_base_url = settings.AI_BASE_URL
+        ai_model = settings.AI_MODEL
+        try:
+            creds_row = db.execute(
+                sync_select(OrgCredentials).where(OrgCredentials.org_id == job.org_id)
+            ).scalar_one_or_none()
+            if creds_row:
+                if creds_row.ai_provider == "qwen":
+                    provider = "qwen"
+                    ai_api_key = decrypt_credential(creds_row.qwen_api_key_enc) if creds_row.qwen_api_key_enc else None
+                    ai_base_url = decrypt_credential(creds_row.qwen_base_url_enc) if creds_row.qwen_base_url_enc else None
+                    ai_model = decrypt_credential(creds_row.qwen_model_enc) if creds_row.qwen_model_enc else None
+                else:
+                    if creds_row.anthropic_key_enc:
+                        ai_api_key = decrypt_credential(creds_row.anthropic_key_enc)
+                    if creds_row.ai_base_url_enc:
+                        ai_base_url = decrypt_credential(creds_row.ai_base_url_enc)
+                    if creds_row.ai_model_override_enc:
+                        ai_model = decrypt_credential(creds_row.ai_model_override_enc)
+        except Exception as e:
+            logger.warning(f"Could not load org AI credentials for auto-agent: {e}")
+
+        ai_ready = bool(ai_api_key) or (provider == "qwen" and bool(ai_base_url))
+        if not ai_ready:
+            return {"status": "skipped", "reason": "no_api_key"}
+
+        ai_config = {"provider": provider, "api_key": ai_api_key, "base_url": ai_base_url, "model": ai_model}
+        budget = _AUTO_AGENT_BUDGET.get(provider, _AUTO_AGENT_BUDGET["anthropic"])
+
+        targets = list(dict.fromkeys(job.target_domains or []))[:_AUTO_AGENT_MAX_TARGETS]
+        if not targets:
+            return {"status": "skipped", "reason": "no_targets"}
+
+        results = []
+        for target in targets:
+            try:
+                summary = asyncio.run(
+                    _run_agent_once(job.org_id, job.created_by, target, ai_config, budget)
+                )
+                results.append({"target": target, **summary})
+            except Exception as e:
+                logger.exception(f"Auto AI agent run failed for target {target} (scan {scan_job_id}): {e}")
+                results.append({"target": target, "status": "error", "error": str(e)[:500]})
+
+        logger.info(f"Auto AI agent runs for scan {scan_job_id}: {results}")
+        return {"status": "completed", "results": results}
+
+
+async def _run_agent_once(org_id, user_id, target: str, ai_config: dict, budget: dict) -> dict:
+    """Drive one attack_agent.run_agent() call to completion on its own
+    short-lived async engine — mirrors the pattern already used by
+    _async_notify_critical_findings() in this file for bridging a sync
+    Celery task into async DB/agent code without sharing the main app's
+    event-loop-bound connection pool."""
+    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession as _AsyncSession
+    from sqlalchemy.orm import sessionmaker as _sessionmaker
+    from app.services.attack_agent import run_agent
+
+    async_db_url = settings.DATABASE_URL
+    if not async_db_url.startswith("postgresql+asyncpg"):
+        async_db_url = async_db_url.replace("postgresql://", "postgresql+asyncpg://").replace(
+            "postgresql+psycopg2://", "postgresql+asyncpg://"
+        )
+    _engine = create_async_engine(async_db_url, pool_pre_ping=True, pool_size=1, max_overflow=0)
+    _AsyncSessionFactory = _sessionmaker(_engine, class_=_AsyncSession, expire_on_commit=False)
+
+    status = "unknown"
+    turns = 0
+    findings_recorded = 0
+    try:
+        async with _AsyncSessionFactory() as db:
+            async for event in run_agent(
+                db, org_id, user_id, target,
+                objective="Automated post-scan active testing and validation of newly-scanned assets.",
+                ai_config=ai_config,
+                max_turns=budget["turns"], max_seconds=budget["seconds"],
+            ):
+                data = event.get("data") or {}
+                if event["event"] == "tool_call" and data.get("tool") == "record_finding" and (data.get("result") or {}).get("recorded"):
+                    findings_recorded += 1
+                if isinstance(data.get("turns"), int):
+                    turns = data["turns"]
+                if isinstance(data.get("turn"), int):
+                    turns = data["turn"]
+                if event["event"] in ("done", "budget_exhausted", "stopped", "error"):
+                    status = event["event"]
+    finally:
+        await _engine.dispose()
+
+    return {"status": status, "turns": turns, "findings_recorded": findings_recorded}
 
 
 async def _import_and_triage(finding, asset_ctx: dict, org_context: dict, ai_config: dict | None = None) -> dict:

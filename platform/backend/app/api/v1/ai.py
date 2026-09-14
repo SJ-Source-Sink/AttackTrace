@@ -167,6 +167,7 @@ async def triage_finding_endpoint(
 
     finding.ai_reasoning = triage_result.get("reasoning", "")
     finding.ai_confidence = float(triage_result.get("confidence", 0.0))
+    finding.ai_business_impact = triage_result.get("business_impact", "")
 
     from datetime import datetime, timezone
     finding.ai_triaged_at = datetime.now(timezone.utc)

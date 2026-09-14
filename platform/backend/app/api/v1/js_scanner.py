@@ -45,10 +45,29 @@ router = APIRouter(prefix="/js-scanner", tags=["JS Scanner"])
 # Filesystem history helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def _validate_uuid(value: str, label: str) -> str:
+    if not _UUID_RE.match(value):
+        raise HTTPException(status_code=400, detail=f"Invalid {label}: must be a UUID")
+    return value
+
+
 def _history_dir(org_id: str) -> Path:
     d = Path(_get_settings().ATTACKTRACE_WORKSPACE_DIR) / "js_scanner" / org_id
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _safe_history_path(org_id: str, scan_id: str) -> Path:
+    """Build and confine the history file path to the org's history directory."""
+    _validate_uuid(scan_id, "scan_id")
+    base = _history_dir(org_id)
+    candidate = (base / f"{scan_id}.json").resolve()
+    if not candidate.is_relative_to(base.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid scan_id")
+    return candidate
 
 
 def _save_scan_result(org_id: str, record: dict) -> None:
@@ -79,9 +98,11 @@ def _load_history(org_id: str, limit: int = 50) -> list[dict]:
 
 def _load_scan(org_id: str, scan_id: str) -> dict | None:
     try:
-        path = _history_dir(org_id) / f"{scan_id}.json"
+        path = _safe_history_path(org_id, scan_id)
         if path.exists():
             return json.loads(path.read_text())
+    except HTTPException:
+        raise
     except Exception:
         pass
     return None
@@ -89,10 +110,12 @@ def _load_scan(org_id: str, scan_id: str) -> dict | None:
 
 def _delete_scan_record(org_id: str, scan_id: str) -> bool:
     try:
-        path = _history_dir(org_id) / f"{scan_id}.json"
+        path = _safe_history_path(org_id, scan_id)
         if path.exists():
             path.unlink()
             return True
+    except HTTPException:
+        raise
     except Exception:
         pass
     return False

@@ -3,7 +3,6 @@ Dashboard stats endpoint — aggregates across scans, assets, findings.
 Results are cached in Redis for 5 minutes per org to reduce DB load at scale.
 """
 
-import asyncio
 import json
 import math
 from typing import Annotated
@@ -96,27 +95,25 @@ async def get_dashboard_stats(
         .limit(7)
     )
 
-    # Run all independent DB queries in parallel
-    (
-        total_assets_r,
-        active_assets_r,
-        findings_rows_r,
-        active_scans_r,
-        total_scans_r,
-        recent_scans_r,
-    ) = await asyncio.gather(
-        db.execute(select(func.count()).where(Asset.org_id == org_id)),
-        db.execute(select(func.count()).where(Asset.org_id == org_id, Asset.is_active == True)),
-        db.execute(findings_q),
-        db.execute(
-            select(func.count()).where(
-                ScanJob.org_id == org_id,
-                ScanJob.status.in_([ScanStatus.PENDING, ScanStatus.RUNNING]),
-            )
-        ),
-        db.execute(select(func.count()).where(ScanJob.org_id == org_id)),
-        db.execute(recent_scans_q),
+    # Run these sequentially — they all share a single AsyncSession (asyncpg
+    # connection), which cannot tolerate concurrent operations. Running them
+    # via asyncio.gather() raised InterfaceError ("cannot perform operation;
+    # another operation is in progress") whenever more than one query reached
+    # the network-I/O suspension point at the same time. These are cheap
+    # indexed count/aggregate queries, so the sequential cost is small.
+    total_assets_r = await db.execute(select(func.count()).where(Asset.org_id == org_id))
+    active_assets_r = await db.execute(
+        select(func.count()).where(Asset.org_id == org_id, Asset.is_active == True)
     )
+    findings_rows_r = await db.execute(findings_q)
+    active_scans_r = await db.execute(
+        select(func.count()).where(
+            ScanJob.org_id == org_id,
+            ScanJob.status.in_([ScanStatus.PENDING, ScanStatus.RUNNING]),
+        )
+    )
+    total_scans_r = await db.execute(select(func.count()).where(ScanJob.org_id == org_id))
+    recent_scans_r = await db.execute(recent_scans_q)
 
     total_assets = total_assets_r.scalar_one()
     active_assets = active_assets_r.scalar_one()

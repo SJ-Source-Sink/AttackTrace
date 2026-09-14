@@ -155,6 +155,13 @@ class Finding(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Ticketing integration
     ticket_ref: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
 
+    # Accept-risk workflow: {reason, expires_at, approver, accepted_at, accepted_by}
+    accept_risk_info: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+
+    # AI triage: 1-2 sentence business-impact statement generated in the same
+    # triage call as ai_reasoning/ai_severity (see ai_service.py::triage_finding)
+    ai_business_impact: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     # Assignment
     assigned_to: Mapped[Optional[UUID]] = mapped_column(
         PGUUID(as_uuid=True),

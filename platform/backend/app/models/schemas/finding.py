@@ -88,7 +88,6 @@ class FindingResponse(BaseModel):
     tags: list[str] = []
     assigned_to: Optional[str] = None
     accept_risk_info: Optional[dict[str, Any]] = None
-    comments: list[dict[str, Any]] = []
 
     @classmethod
     def from_orm(cls, finding, comment_count: int = 0) -> "FindingResponse":
@@ -110,7 +109,7 @@ class FindingResponse(BaseModel):
                 "confidence": int(finding.ai_confidence * 100) if finding.ai_confidence else 0,
                 "suggested_remediation": finding.remediation or "",
                 "false_positive_likelihood": int(finding.ai_confidence * 30) if finding.ai_confidence else 0,
-                "business_impact": "",
+                "business_impact": getattr(finding, "ai_business_impact", None) or "",
             }
 
         return cls(
@@ -166,8 +165,7 @@ class FindingResponse(BaseModel):
             age_days=age_days,
             tags=[],
             assigned_to=str(finding.assigned_to) if getattr(finding, "assigned_to", None) else None,
-            accept_risk_info=None,
-            comments=[],
+            accept_risk_info=getattr(finding, "accept_risk_info", None),
         )
 
 
@@ -197,6 +195,7 @@ class FindingUpdate(BaseModel):
     ticket_ref: Optional[str] = None
     remediation: Optional[str] = None
     assigned_to: Optional[str] = None  # user UUID string or empty string to unassign
+    accept_risk_info: Optional[dict[str, Any]] = None  # {reason, expires_at?, approver}
 
     def validate_status(self) -> Optional[str]:
         valid = {"open", "in_progress", "remediated", "accepted_risk", "false_positive"}

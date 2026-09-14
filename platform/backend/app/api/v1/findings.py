@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.csv_safety import csv_safe
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
 from app.models.db.audit import AuditLog
@@ -479,23 +480,23 @@ async def export_findings(
         for f in findings:
             writer.writerow([
                 str(f.id),
-                f.title,
+                csv_safe(f.title),
                 f.severity.value,
                 f.status.value,
-                f.affected_asset or "",
+                csv_safe(f.affected_asset or ""),
                 f.cvss_score or "",
-                "|".join(f.cve or []),
+                csv_safe("|".join(f.cve or [])),
                 "yes" if getattr(f, "kev_status", False) else "no",
                 getattr(f, "epss_score", "") or "",
                 getattr(f, "risk_score", "") or "",
-                "|".join(getattr(f, "compliance_tags", None) or []),
+                csv_safe("|".join(getattr(f, "compliance_tags", None) or [])),
                 f.sla_deadline.isoformat() if getattr(f, "sla_deadline", None) else "",
                 f.ai_severity.value if getattr(f, "ai_severity", None) else "",
                 f.ai_confidence or "" if getattr(f, "ai_confidence", None) else "",
-                (f.ai_reasoning or "").replace("\n", " ") if getattr(f, "ai_reasoning", None) else "",
+                csv_safe((f.ai_reasoning or "")) if getattr(f, "ai_reasoning", None) else "",
                 "yes" if f.false_positive else "no",
                 "yes" if f.suppressed else "no",
-                f.ticket_ref or "",
+                csv_safe(f.ticket_ref or ""),
                 f.created_at.isoformat() if f.created_at else "",
             ])
         output.seek(0)
@@ -759,6 +760,17 @@ async def update_finding(
             finding.assigned_to = UUID(payload.assigned_to) if payload.assigned_to else None
         except ValueError:
             pass
+
+    if payload.accept_risk_info is not None:
+        # Server-authoritative accepted_at/accepted_by — never trust client-supplied
+        # audit fields for a "who approved this" record.
+        finding.accept_risk_info = {
+            "reason": payload.accept_risk_info.get("reason", ""),
+            "expires_at": payload.accept_risk_info.get("expires_at"),
+            "approver": payload.accept_risk_info.get("approver", ""),
+            "accepted_at": datetime.now(timezone.utc).isoformat(),
+            "accepted_by": str(current_user.id),
+        }
 
     # Recompute risk score if severity changed
     if payload.severity is not None:

@@ -164,3 +164,46 @@ class MobileFinding(Base):
 
     def __repr__(self) -> str:
         return f"<MobileFinding {self.severity} {self.title!r} in scan {self.scan_id}>"
+
+
+class MSRAScanOwnership(Base):
+    """
+    Tenant-ownership mapping for scans created via the external MSRA sidecar
+    (`app/api/v1/mobile.py`'s proxy — a *different* pipeline from the
+    self-hosted MobileScan/MobileFinding models above).
+
+    MSRA has no org/tenant concept of its own: it's a single global Flask
+    service with one global scan_id namespace (`uuid.uuid4().hex[:12]`, see
+    MSRA's own `/api/upload` handler). Without this table, any authenticated
+    org could read/modify/delete/export any other org's mobile-pentest scan
+    data by guessing or enumerating a scan_id, and the MSRA -> Finding sync
+    endpoint would silently copy every org's findings into whichever org
+    happened to call it.
+
+    Recorded once, at upload time, by `app/api/v1/mobile.py::upload_file()`.
+    Every other proxied route that takes a scan_id must check ownership here
+    before forwarding to MSRA — a scan_id with no row here belongs to no
+    known org and must be treated as not found, never defaulted to the
+    calling org.
+    """
+
+    __tablename__ = "msra_scan_ownership"
+
+    # MSRA's own scan_id (12 hex chars, e.g. "fe0397bf233a") — globally
+    # unique within MSRA, so it's also our primary key: the first org to
+    # create a given scan_id claims it exactly once.
+    msra_scan_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+    org_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<MSRAScanOwnership {self.msra_scan_id} org={self.org_id}>"

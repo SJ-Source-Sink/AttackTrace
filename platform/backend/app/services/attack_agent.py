@@ -16,8 +16,12 @@ load-bearing, not optional:
     code/shell execution.
   - a bounded budget — max tool-call turns and max wall-clock time.
   - a full audit trail — every tool call and result is written to AuditLog.
-  - a kill switch — AGENT_RUNS[run_id]["stop"], flipped by the stop endpoint
-    and checked between turns.
+  - a kill switch — a Redis-backed run record's "stop" flag (see `_run_set`/
+    `_run_get`/`_run_update` below), flipped by the stop endpoint and checked
+    between turns. Redis-backed, not an in-process dict, because this runs
+    across multiple FastAPI worker processes and Celery worker processes
+    (run_ai_agent_after_scan) — an in-memory store would be invisible across
+    processes and silently unable to stop most runs.
 
 Confidence is computed server-side from the oracle the model honestly reports
 (app.core.finding_confidence.grade_confidence), not accepted at face value —
@@ -54,10 +58,45 @@ MAX_TOOL_TURNS = 20
 MAX_WALL_SECONDS = 480
 _AGENT_MAX_TOKENS = 1536
 
-# In-memory run registry — status polling + the kill switch. Mirrors the
-# _scan_history pattern already used by every other streaming scanner in
-# this codebase (attack_suite.py, nmap.py, ffuf.py, ...).
-AGENT_RUNS: dict[str, dict] = {}
+# Run registry — status polling + the kill switch. MUST be Redis-backed, not
+# an in-process dict: the FastAPI app runs with multiple worker processes
+# (uvicorn --workers), and run_ai_agent_after_scan (app/workers/scan_worker.py)
+# launches run_agent() from a separate Celery worker process entirely — an
+# in-memory dict here would make the stop endpoint/status polling blind to
+# runs started in any other process (a confirmed, critical bug: the kill
+# switch silently no-op'd for auto-triggered runs 100% of the time). Redis
+# is shared across every process, so this is the only correct store.
+_RUN_TTL_SECONDS = 2 * 24 * 3600  # comfortably longer than the largest possible budget (Qwen: 24h)
+
+
+def _run_key(run_id: str) -> str:
+    return f"attack_agent:run:{run_id}"
+
+
+async def _run_set(run_id: str, data: dict) -> None:
+    from app.services.scan_service import _get_redis
+    r = _get_redis()
+    await r.set(_run_key(run_id), json.dumps(data), ex=_RUN_TTL_SECONDS)
+
+
+async def _run_get(run_id: str) -> Optional[dict]:
+    from app.services.scan_service import _get_redis
+    r = _get_redis()
+    raw = await r.get(_run_key(run_id))
+    if raw is None:
+        return None
+    return json.loads(raw)
+
+
+async def _run_update(run_id: str, **fields) -> None:
+    from app.services.scan_service import _get_redis
+    r = _get_redis()
+    raw = await r.get(_run_key(run_id))
+    if raw is None:
+        return
+    data = json.loads(raw)
+    data.update(fields)
+    await r.set(_run_key(run_id), json.dumps(data), ex=_RUN_TTL_SECONDS)
 
 _METADATA_MARKERS = [
     "ami-id", "instance-id", "iam/security-credentials", "computeMetadata",
@@ -424,16 +463,16 @@ def _build_system_prompt(target: str, objective: Optional[str], context: dict) -
     )
 
 
-def stop_run(run_id: str) -> bool:
-    run = AGENT_RUNS.get(run_id)
+async def stop_run(run_id: str) -> bool:
+    run = await _run_get(run_id)
     if run is None:
         return False
-    run["stop"] = True
+    await _run_update(run_id, stop=True)
     return True
 
 
-def get_run_status(run_id: str) -> Optional[dict]:
-    return AGENT_RUNS.get(run_id)
+async def get_run_status(run_id: str) -> Optional[dict]:
+    return await _run_get(run_id)
 
 
 async def run_agent(
@@ -449,14 +488,14 @@ async def run_agent(
     """Run the bounded tool-use agent loop against `target`. Yields event dicts
     of shape {"event": ..., "data": ...} for the caller to stream over SSE."""
     run_id = str(uuid.uuid4())
-    AGENT_RUNS[run_id] = {
+    await _run_set(run_id, {
         "stop": False, "status": "running", "org_id": str(org_id), "target": target,
         "started_at": datetime.now(timezone.utc).isoformat(),
-    }
+    })
     yield {"event": "start", "data": {"run_id": run_id, "target": target}}
 
     if not await _is_in_scope(db, org_id, _host_of(target)):
-        AGENT_RUNS[run_id]["status"] = "rejected"
+        await _run_update(run_id, status="rejected")
         yield {"event": "error", "data": {
             "run_id": run_id,
             "message": f"Target '{target}' is not a known asset for this organization — refusing to start (scope enforcement).",
@@ -465,11 +504,11 @@ async def run_agent(
 
     cfg = ai_config or {}
     if cfg.get("provider", "anthropic") != "qwen" and not (cfg.get("api_key") or settings.ANTHROPIC_API_KEY):
-        AGENT_RUNS[run_id]["status"] = "error"
+        await _run_update(run_id, status="error")
         yield {"event": "error", "data": {"run_id": run_id, "message": "ANTHROPIC_API_KEY is not configured"}}
         return
     if cfg.get("provider") == "qwen" and not cfg.get("base_url"):
-        AGENT_RUNS[run_id]["status"] = "error"
+        await _run_update(run_id, status="error")
         yield {"event": "error", "data": {"run_id": run_id, "message": "Qwen base_url is not configured"}}
         return
 
@@ -490,18 +529,19 @@ async def run_agent(
     findings_recorded = 0
 
     while True:
-        if AGENT_RUNS[run_id]["stop"]:
-            AGENT_RUNS[run_id]["status"] = "stopped"
+        run_state = await _run_get(run_id)
+        if run_state is None or run_state.get("stop"):
+            await _run_update(run_id, status="stopped")
             yield {"event": "stopped", "data": {"run_id": run_id, "turns": turn}}
             return
         if turn >= max_turns or (time.monotonic() - start) >= max_seconds:
-            AGENT_RUNS[run_id]["status"] = "budget_exhausted"
+            await _run_update(run_id, status="budget_exhausted")
             yield {"event": "budget_exhausted", "data": {"run_id": run_id, "turns": turn, "elapsed_seconds": round(time.monotonic() - start, 1)}}
             break
 
         turn += 1
         if await _cb_is_open():
-            AGENT_RUNS[run_id]["status"] = "error"
+            await _run_update(run_id, status="error")
             yield {"event": "error", "data": {"run_id": run_id, "message": "AI circuit breaker open — Anthropic API is currently degraded"}}
             break
         try:
@@ -509,7 +549,7 @@ async def run_agent(
             await _cb_record_success()
         except Exception as exc:
             await _cb_record_failure()
-            AGENT_RUNS[run_id]["status"] = "error"
+            await _run_update(run_id, status="error")
             yield {"event": "error", "data": {"run_id": run_id, "message": f"AI call failed: {exc}"}}
             break
 
@@ -520,13 +560,14 @@ async def run_agent(
 
         tool_calls = turn_result["tool_calls"]
         if not tool_calls:
-            AGENT_RUNS[run_id]["status"] = "completed"
+            await _run_update(run_id, status="completed")
             yield {"event": "done", "data": {"run_id": run_id, "reason": "model stopped calling tools", "turns": turn}}
             break
 
         tool_results = []
         for tc in tool_calls:
-            if AGENT_RUNS[run_id]["stop"]:
+            run_state = await _run_get(run_id)
+            if run_state is None or run_state.get("stop"):
                 break
             result = await _execute_tool(db, org_id, user_id, run_id, tc["name"], tc["input"])
             if tc["name"] == "record_finding" and result.get("recorded"):
@@ -536,14 +577,16 @@ async def run_agent(
 
         await db.commit()
 
-        if AGENT_RUNS[run_id]["stop"]:
-            AGENT_RUNS[run_id]["status"] = "stopped"
+        run_state = await _run_get(run_id)
+        if run_state is None or run_state.get("stop"):
+            await _run_update(run_id, status="stopped")
             yield {"event": "stopped", "data": {"run_id": run_id, "turns": turn}}
             return
 
         messages.extend(llm_client.build_tool_result_messages(cfg, tool_results))
 
+    final_state = await _run_get(run_id)
     yield {"event": "summary", "data": {
         "run_id": run_id, "turns": turn, "findings_recorded": findings_recorded,
-        "status": AGENT_RUNS[run_id]["status"], "elapsed_seconds": round(time.monotonic() - start, 1),
+        "status": final_state["status"] if final_state else "unknown", "elapsed_seconds": round(time.monotonic() - start, 1),
     }}

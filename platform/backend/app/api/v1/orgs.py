@@ -251,6 +251,8 @@ async def add_member(
             detail={"error": {"code": "INVALID_ROLE", "message": f"Invalid role: {payload.role}"}},
         )
 
+    await _guard_role_assignment(db, current_user.id, org_id, member_role)
+
     member = OrgMember(
         user_id=target_user.id,
         org_id=org_id,
@@ -298,8 +300,12 @@ async def update_member_role(
             detail={"error": {"code": "MEMBER_NOT_FOUND", "message": "Member not found"}},
         )
 
+    new_role = MemberRole(payload.role)
+    await _guard_role_assignment(db, current_user.id, org_id, new_role)
+    await _guard_owner_removal_or_demotion(db, current_user.id, org_id, member, new_role)
+
     before_role = member.role.value
-    member.role = MemberRole(payload.role)
+    member.role = new_role
     db.add(member)
 
     log = AuditLog(
@@ -386,11 +392,7 @@ async def remove_member(
             detail={"error": {"code": "MEMBER_NOT_FOUND", "message": "Member not found"}},
         )
 
-    if member.role == MemberRole.OWNER and str(user_id) == str(current_user.id):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": {"code": "CANNOT_REMOVE_OWNER", "message": "Owners cannot remove themselves"}},
-        )
+    await _guard_owner_removal_or_demotion(db, current_user.id, org_id, member)
 
     await db.delete(member)
 
@@ -791,7 +793,12 @@ async def update_current_org_member_role(
     member = result.scalar_one_or_none()
     if not member:
         raise HTTPException(status_code=404, detail={"error": {"code": "MEMBER_NOT_FOUND", "message": "Member not found"}})
-    member.role = MemberRole(payload.role)
+
+    new_role = MemberRole(payload.role)
+    await _guard_role_assignment(db, current_user.id, org_id, new_role)
+    await _guard_owner_removal_or_demotion(db, current_user.id, org_id, member, new_role)
+
+    member.role = new_role
     db.add(member)
     user_result = await db.execute(select(User).where(User.id == user_id))
     user = user_result.scalar_one()
@@ -825,8 +832,7 @@ async def remove_current_org_member(
     member = result.scalar_one_or_none()
     if not member:
         raise HTTPException(status_code=404, detail={"error": {"code": "MEMBER_NOT_FOUND", "message": "Member not found"}})
-    if member.role == MemberRole.OWNER and str(user_id) == str(current_user.id):
-        raise HTTPException(status_code=400, detail={"error": {"code": "CANNOT_REMOVE_OWNER", "message": "Owners cannot remove themselves"}})
+    await _guard_owner_removal_or_demotion(db, current_user.id, org_id, member)
     await db.delete(member)
     await db.flush()
 
@@ -848,7 +854,11 @@ async def invite_member_to_current_org(
     )
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail={"error": {"code": "ALREADY_MEMBER", "message": "User is already a member"}})
-    member = OrgMember(user_id=invitee.id, org_id=org_id, role=MemberRole(payload.role))
+
+    invite_role = MemberRole(payload.role)
+    await _guard_role_assignment(db, current_user.id, org_id, invite_role)
+
+    member = OrgMember(user_id=invitee.id, org_id=org_id, role=invite_role)
     db.add(member)
     await db.flush()
     return {"message": "Member added", "email": invitee.email, "role": payload.role}
@@ -1142,6 +1152,8 @@ async def create_member_direct(
     except ValueError:
         member_role = MemberRole.ANALYST
 
+    await _guard_role_assignment(db, current_user.id, org_id, member_role)
+
     user = User(
         email=payload.email.lower(),
         hashed_password=_hash_password(payload.password),
@@ -1295,12 +1307,15 @@ async def create_invite_code(
     await _require_org_role(db, current_user.id, org_id, [MemberRole.OWNER, MemberRole.ADMIN])
 
     try:
-        role = MemberRole(role).value
+        parsed_role = MemberRole(role)
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid role '{role}'. Must be one of: {', '.join(r.value for r in MemberRole)}",
         )
+
+    await _guard_role_assignment(db, current_user.id, org_id, parsed_role)
+    role = parsed_role.value
 
     # Ensure unique code
     for _ in range(10):
@@ -1459,7 +1474,7 @@ async def reset_ai_circuit_breaker(
     await _require_org_role(db, current_user.id, org_id, [MemberRole.OWNER, MemberRole.ADMIN])
     try:
         from app.services.ai_service import _cb_record_success
-        _cb_record_success()
+        await _cb_record_success()
         return {"status": "reset", "state": "closed"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1548,4 +1563,70 @@ async def _require_org_role(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"error": {"code": "INSUFFICIENT_PERMISSIONS", "message": "Insufficient permissions"}},
+        )
+
+
+async def _get_member_role(db: AsyncSession, user_id: UUID, org_id: UUID) -> Optional[MemberRole]:
+    result = await db.execute(
+        select(OrgMember).where(OrgMember.user_id == user_id, OrgMember.org_id == org_id)
+    )
+    member = result.scalar_one_or_none()
+    return member.role if member else None
+
+
+async def _count_owners(db: AsyncSession, org_id: UUID) -> int:
+    result = await db.execute(
+        select(func.count()).select_from(OrgMember).where(
+            OrgMember.org_id == org_id, OrgMember.role == MemberRole.OWNER
+        )
+    )
+    return result.scalar_one()
+
+
+async def _guard_role_assignment(
+    db: AsyncSession,
+    caller_id: UUID,
+    org_id: UUID,
+    new_role: MemberRole,
+) -> None:
+    """Granting the Owner role — to anyone, including yourself — requires the
+    caller to already BE an Owner. An Admin (or lower) must never be able to
+    self-promote or promote someone else to Owner."""
+    if new_role != MemberRole.OWNER:
+        return
+    caller_role = await _get_member_role(db, caller_id, org_id)
+    if caller_role != MemberRole.OWNER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": {"code": "INSUFFICIENT_PERMISSIONS", "message": "Only an Owner can grant the Owner role"}},
+        )
+
+
+async def _guard_owner_removal_or_demotion(
+    db: AsyncSession,
+    caller_id: UUID,
+    org_id: UUID,
+    target_member: OrgMember,
+    new_role: Optional[MemberRole] = None,
+) -> None:
+    """Removing an Owner, or changing an Owner's role to something else,
+    requires the caller to BE that same Owner — nobody else (not even
+    another Admin) may remove or demote an Owner. At least one Owner must
+    always remain on the org, so the last Owner cannot remove/demote
+    themselves either (they must promote another member to Owner first)."""
+    if target_member.role != MemberRole.OWNER:
+        return
+    if new_role == MemberRole.OWNER:
+        # Not a demotion (e.g. no-op role update) — nothing to guard here.
+        return
+    if str(target_member.user_id) != str(caller_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": {"code": "CANNOT_MODIFY_OWNER", "message": "Only the Owner can remove or demote themselves"}},
+        )
+    owner_count = await _count_owners(db, org_id)
+    if owner_count <= 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"code": "LAST_OWNER", "message": "Cannot remove or demote the last remaining Owner. Promote another member to Owner first."}},
         )

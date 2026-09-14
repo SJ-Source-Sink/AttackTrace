@@ -227,7 +227,8 @@ Respond with this exact JSON (no other text):
   "confidence": 0.0-1.0,
   "reasoning": "2-3 sentences: what you validated, why severity is correct/wrong, false-positive rationale if applicable",
   "priority_score": 1-10,
-  "recommended_action": "immediate|within_week|within_month|monitor|dismiss"
+  "recommended_action": "immediate|within_week|within_month|monitor|dismiss",
+  "business_impact": "1-2 sentences: the concrete business consequence if this is exploited (data exposed, systems affected, compliance/financial/reputational impact) — not a restatement of the technical finding"
 }}"""
 
     try:
@@ -251,6 +252,7 @@ Respond with this exact JSON (no other text):
             "reasoning": "AI triage failed to return valid JSON",
             "priority_score": 5,
             "recommended_action": "monitor",
+            "business_impact": "",
         }
     except Exception as e:
         logger.error(f"AI triage failed: {e}")
@@ -261,6 +263,7 @@ Respond with this exact JSON (no other text):
             "reasoning": f"AI triage unavailable: {str(e)}",
             "priority_score": 5,
             "recommended_action": "monitor",
+            "business_impact": "",
         }
 
 
@@ -548,6 +551,7 @@ async def bulk_triage_findings(
                 "reasoning": finding.ai_reasoning or "Previously triaged",
                 "priority_score": 5,
                 "recommended_action": "monitor",
+                "business_impact": getattr(finding, "ai_business_impact", None) or "",
             })
             continue
 

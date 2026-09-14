@@ -95,19 +95,19 @@ async def complete(ai_config: dict, system: Optional[str], messages: list[dict],
     start = time.monotonic()
     try:
         if _provider(ai_config) == "qwen":
-            client = _openai_client(ai_config)
-            full_messages = ([{"role": "system", "content": system}] if system else []) + messages
-            resp = await client.chat.completions.create(
-                model=_model(ai_config), messages=full_messages, max_tokens=max_tokens,
-            )
-            result = (resp.choices[0].message.content or "").strip()
+            async with _openai_client(ai_config) as client:
+                full_messages = ([{"role": "system", "content": system}] if system else []) + messages
+                resp = await client.chat.completions.create(
+                    model=_model(ai_config), messages=full_messages, max_tokens=max_tokens,
+                )
+                result = (resp.choices[0].message.content or "").strip()
         else:
-            client = _anthropic_client(ai_config)
-            kwargs: dict = {"model": _model(ai_config, "claude-sonnet-4-6"), "max_tokens": max_tokens, "messages": messages}
-            if system:
-                kwargs["system"] = system
-            resp = await client.messages.create(**kwargs)
-            result = resp.content[0].text.strip()
+            async with _anthropic_client(ai_config) as client:
+                kwargs: dict = {"model": _model(ai_config, "claude-sonnet-4-6"), "max_tokens": max_tokens, "messages": messages}
+                if system:
+                    kwargs["system"] = system
+                resp = await client.messages.create(**kwargs)
+                result = resp.content[0].text.strip()
     except Exception as exc:
         await _publish(ai_config, label, system, messages, None, "error", None, None, str(exc), start)
         raise
@@ -123,25 +123,25 @@ async def stream_complete(ai_config: dict, system: Optional[str], messages: list
     full_text = ""
     try:
         if _provider(ai_config) == "qwen":
-            client = _openai_client(ai_config)
-            full_messages = ([{"role": "system", "content": system}] if system else []) + messages
-            stream = await client.chat.completions.create(
-                model=_model(ai_config), messages=full_messages, max_tokens=max_tokens, stream=True,
-            )
-            async for chunk in stream:
-                delta = chunk.choices[0].delta.content if chunk.choices else None
-                if delta:
-                    full_text += delta
-                    yield delta
+            async with _openai_client(ai_config) as client:
+                full_messages = ([{"role": "system", "content": system}] if system else []) + messages
+                stream = await client.chat.completions.create(
+                    model=_model(ai_config), messages=full_messages, max_tokens=max_tokens, stream=True,
+                )
+                async for chunk in stream:
+                    delta = chunk.choices[0].delta.content if chunk.choices else None
+                    if delta:
+                        full_text += delta
+                        yield delta
         else:
-            client = _anthropic_client(ai_config)
-            kwargs: dict = {"model": _model(ai_config, "claude-sonnet-4-6"), "max_tokens": max_tokens, "messages": messages}
-            if system:
-                kwargs["system"] = system
-            async with client.messages.stream(**kwargs) as stream:
-                async for text in stream.text_stream:
-                    full_text += text
-                    yield text
+            async with _anthropic_client(ai_config) as client:
+                kwargs: dict = {"model": _model(ai_config, "claude-sonnet-4-6"), "max_tokens": max_tokens, "messages": messages}
+                if system:
+                    kwargs["system"] = system
+                async with client.messages.stream(**kwargs) as stream:
+                    async for text in stream.text_stream:
+                        full_text += text
+                        yield text
     except Exception as exc:
         await _publish(ai_config, label, system, messages, None, "error", full_text or None, None, str(exc), start)
         raise
@@ -170,39 +170,39 @@ async def chat_turn(ai_config: dict, system: Optional[str], messages: list, tool
     start = time.monotonic()
     try:
         if _provider(ai_config) == "qwen":
-            client = _openai_client(ai_config)
-            full_messages = ([{"role": "system", "content": system}] if system else []) + messages
-            resp = await client.chat.completions.create(
-                model=_model(ai_config), messages=full_messages, max_tokens=max_tokens,
-                tools=_openai_tools(tools) if tools else None,
-            )
-            msg = resp.choices[0].message
-            text = [msg.content] if msg.content else []
-            tool_calls = []
-            raw_tool_calls = []
-            for tc in (msg.tool_calls or []):
-                try:
-                    args = json.loads(tc.function.arguments or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-                tool_calls.append({"id": tc.id, "name": tc.function.name, "input": args})
-                raw_tool_calls.append({"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"}})
-            assistant_message: dict = {"role": "assistant", "content": msg.content}
-            if raw_tool_calls:
-                assistant_message["tool_calls"] = raw_tool_calls
+            async with _openai_client(ai_config) as client:
+                full_messages = ([{"role": "system", "content": system}] if system else []) + messages
+                resp = await client.chat.completions.create(
+                    model=_model(ai_config), messages=full_messages, max_tokens=max_tokens,
+                    tools=_openai_tools(tools) if tools else None,
+                )
+                msg = resp.choices[0].message
+                text = [msg.content] if msg.content else []
+                tool_calls = []
+                raw_tool_calls = []
+                for tc in (msg.tool_calls or []):
+                    try:
+                        args = json.loads(tc.function.arguments or "{}")
+                    except json.JSONDecodeError:
+                        args = {}
+                    tool_calls.append({"id": tc.id, "name": tc.function.name, "input": args})
+                    raw_tool_calls.append({"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"}})
+                assistant_message: dict = {"role": "assistant", "content": msg.content}
+                if raw_tool_calls:
+                    assistant_message["tool_calls"] = raw_tool_calls
         else:
-            client = _anthropic_client(ai_config)
-            kwargs: dict = {
-                "model": _model(ai_config, "claude-sonnet-4-6"), "max_tokens": max_tokens, "messages": messages,
-                "tools": _anthropic_tools(tools),
-            }
-            if system:
-                kwargs["system"] = system
-            resp = await client.messages.create(**kwargs)
-            content = resp.content
-            text = [b.text for b in content if b.type == "text"]
-            tool_calls = [{"id": b.id, "name": b.name, "input": b.input} for b in content if b.type == "tool_use"]
-            assistant_message = {"role": "assistant", "content": content}
+            async with _anthropic_client(ai_config) as client:
+                kwargs: dict = {
+                    "model": _model(ai_config, "claude-sonnet-4-6"), "max_tokens": max_tokens, "messages": messages,
+                    "tools": _anthropic_tools(tools),
+                }
+                if system:
+                    kwargs["system"] = system
+                resp = await client.messages.create(**kwargs)
+                content = resp.content
+                text = [b.text for b in content if b.type == "text"]
+                tool_calls = [{"id": b.id, "name": b.name, "input": b.input} for b in content if b.type == "tool_use"]
+                assistant_message = {"role": "assistant", "content": content}
     except Exception as exc:
         await _publish(ai_config, label, system, messages, tools, "error", None, None, str(exc), start)
         raise

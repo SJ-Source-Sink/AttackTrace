@@ -270,10 +270,12 @@ export function FindingDetail({ finding, onClose }: FindingDetailProps) {
                 <p className="text-xs text-zinc-300 leading-relaxed">{finding.ai_triage.reasoning}</p>
               </div>
 
-              <div>
-                <p className="text-xs text-zinc-500 mb-1">Business Impact</p>
-                <p className="text-xs text-zinc-300">{finding.ai_triage.business_impact}</p>
-              </div>
+              {finding.ai_triage.business_impact && (
+                <div>
+                  <p className="text-xs text-zinc-500 mb-1">Business Impact</p>
+                  <p className="text-xs text-zinc-300">{finding.ai_triage.business_impact}</p>
+                </div>
+              )}
             </div>
           )}
 
@@ -365,7 +367,7 @@ export function FindingDetail({ finding, onClose }: FindingDetailProps) {
           <Separator />
 
           {/* Comments */}
-          <FindingComments findingId={finding.id} comments={finding.comments} />
+          <FindingComments findingId={finding.id} />
         </div>
       </ScrollArea>
     </div>

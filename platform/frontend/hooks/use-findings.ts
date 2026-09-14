@@ -2,7 +2,14 @@
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { findingsApi } from "@/lib/api";
-import type { Finding, FindingListResponse, FindingFilters, UpdateFindingRequest } from "@/types";
+import type {
+  Finding,
+  FindingComment,
+  FindingCommentListResponse,
+  FindingListResponse,
+  FindingFilters,
+  UpdateFindingRequest,
+} from "@/types";
 import { toast } from "sonner";
 
 export const findingKeys = {
@@ -11,6 +18,7 @@ export const findingKeys = {
   list: (params: Record<string, unknown>) => [...findingKeys.lists(), params] as const,
   details: () => [...findingKeys.all, "detail"] as const,
   detail: (id: string) => [...findingKeys.details(), id] as const,
+  comments: (id: string) => [...findingKeys.detail(id), "comments"] as const,
 };
 
 function filtersToParams(
@@ -104,14 +112,29 @@ export function useDeleteFinding() {
   });
 }
 
+export function useFindingComments(findingId: string | null) {
+  return useQuery({
+    queryKey: findingKeys.comments(findingId ?? ""),
+    queryFn: () =>
+      findingsApi.comments(findingId!) as Promise<FindingCommentListResponse>,
+    enabled: !!findingId,
+  });
+}
+
 export function useAddFindingComment() {
   const queryClient = useQueryClient();
 
   return useMutation({
+    // The response here is the newly-created comment (its `.id` is the
+    // comment's id, not the finding's) — NOT a Finding, so cache
+    // invalidation must key off the `id` mutation variable (the finding
+    // id), never off any field of the response.
     mutationFn: ({ id, content }: { id: string; content: string }) =>
-      findingsApi.addComment(id, content) as Promise<Finding>,
-    onSuccess: (finding) => {
-      queryClient.invalidateQueries({ queryKey: findingKeys.detail(finding.id) });
+      findingsApi.addComment(id, content) as Promise<FindingComment>,
+    onSuccess: (_comment, { id }) => {
+      queryClient.invalidateQueries({ queryKey: findingKeys.comments(id) });
+      queryClient.invalidateQueries({ queryKey: findingKeys.detail(id) });
+      queryClient.invalidateQueries({ queryKey: findingKeys.lists() });
       toast.success("Comment added");
     },
     onError: (error: Error) => {

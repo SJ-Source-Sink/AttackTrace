@@ -315,12 +315,27 @@ export interface FindingAITriage {
   business_impact: string;
 }
 
+// Matches the real GET /findings/{id}/comments response shape
+// (app/models/schemas/finding.py::FindingCommentResponse) — comments are
+// fetched directly via that endpoint (see useFindingComments), not embedded
+// on Finding, since the API never actually populates an embedded field.
 export interface FindingComment {
   id: string;
-  author: User;
-  content: string;
+  finding_id: string;
+  user_id: string;
+  body: string;
   created_at: string;
-  updated_at?: string;
+  updated_at?: string | null;
+  user_email?: string | null;
+  user_full_name?: string | null;
+}
+
+export interface FindingCommentListResponse {
+  items: FindingComment[];
+  total: number;
+  page: number;
+  per_page: number;
+  pages: number;
 }
 
 export interface AcceptRiskInfo {
@@ -352,7 +367,6 @@ export interface Finding {
   ai_triage?: FindingAITriage;
   remediation_steps: string[];
   references: string[];
-  comments: FindingComment[];
   accept_risk_info?: AcceptRiskInfo;
   created_at: string;
   updated_at: string;
