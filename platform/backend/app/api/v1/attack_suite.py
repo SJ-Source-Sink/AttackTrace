@@ -6221,6 +6221,18 @@ async def verify_burp_test_case(
 
 # ── AI Agent mode: real tool-use, autonomous within scope ─────────────────────
 
+
+# Provider-aware budget ceilings for the autonomous agent. Claude API calls
+# cost real money per token, so that ceiling stays conservative regardless of
+# what's requested. A self-hosted model (Qwen) has no per-call cost — the
+# ceiling there is a generous backstop against a genuinely stuck/looping
+# process, not a cost control, so it's far higher.
+_AGENT_BUDGET_CEILING = {
+    "anthropic": {"turns": 40, "seconds": 900},
+    "qwen": {"turns": 500, "seconds": 24 * 3600},
+}
+
+
 class AttackAgentRunRequest(BaseModel):
     target: str
     objective: Optional[str] = None
@@ -6229,13 +6241,15 @@ class AttackAgentRunRequest(BaseModel):
 
     @field_validator("max_turns")
     @classmethod
-    def _cap_turns(cls, v: int) -> int:
-        return max(1, min(v, 40))
+    def _sanity_turns(cls, v: int) -> int:
+        # Wide sanity bound only — the real, provider-aware ceiling is applied
+        # in run_attack_agent() once the org's actual provider is known.
+        return max(1, min(v, 2000))
 
     @field_validator("max_seconds")
     @classmethod
-    def _cap_seconds(cls, v: int) -> int:
-        return max(30, min(v, 900))
+    def _sanity_seconds(cls, v: int) -> int:
+        return max(30, min(v, 7 * 24 * 3600))
 
 
 async def _stream_attack_agent(payload: AttackAgentRunRequest, org_id: UUID, user_id: UUID, ai_config: dict, db: AsyncSession) -> AsyncGenerator[str, None]:
@@ -6263,6 +6277,11 @@ async def run_attack_agent(
     """
     from app.services.ai_service import get_org_ai_config
     ai_config = await get_org_ai_config(org_id, db)
+
+    ceiling = _AGENT_BUDGET_CEILING.get(ai_config.get("provider", "anthropic"), _AGENT_BUDGET_CEILING["anthropic"])
+    payload.max_turns = min(payload.max_turns, ceiling["turns"])
+    payload.max_seconds = min(payload.max_seconds, ceiling["seconds"])
+
     return StreamingResponse(
         _stream_attack_agent(payload, org_id, current_user.id, ai_config, db),
         media_type="text/event-stream",

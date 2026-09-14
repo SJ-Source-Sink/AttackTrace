@@ -28,8 +28,8 @@ type RunStatus = "idle" | "running" | "completed" | "stopped" | "error" | "budge
 export function AttackAgentPanel({ defaultTarget }: { defaultTarget?: string }) {
   const [target, setTarget] = useState(defaultTarget ?? "");
   const [objective, setObjective] = useState("");
-  const [maxTurns, setMaxTurns] = useState(20);
-  const [maxSeconds, setMaxSeconds] = useState(480);
+  const [maxTurns, setMaxTurns] = useState(100);
+  const [maxSeconds, setMaxSeconds] = useState(3600);
   const [runId, setRunId] = useState<string | null>(null);
   const [status, setStatus] = useState<RunStatus>("idle");
   const [events, setEvents] = useState<AgentEvent[]>([]);
@@ -189,15 +189,19 @@ export function AttackAgentPanel({ defaultTarget }: { defaultTarget?: string }) 
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
               <Label className="text-xs">Max tool turns</Label>
-              <Input type="number" min={1} max={40} value={maxTurns} disabled={isRunning}
-                onChange={(e) => setMaxTurns(Math.max(1, Math.min(40, Number(e.target.value) || 1)))} />
+              <Input type="number" min={1} max={2000} value={maxTurns} disabled={isRunning}
+                onChange={(e) => setMaxTurns(Math.max(1, Math.min(2000, Number(e.target.value) || 1)))} />
             </div>
             <div className="space-y-2">
               <Label className="text-xs">Max seconds</Label>
-              <Input type="number" min={30} max={900} value={maxSeconds} disabled={isRunning}
-                onChange={(e) => setMaxSeconds(Math.max(30, Math.min(900, Number(e.target.value) || 30)))} />
+              <Input type="number" min={30} max={604800} value={maxSeconds} disabled={isRunning}
+                onChange={(e) => setMaxSeconds(Math.max(30, Math.min(604800, Number(e.target.value) || 30)))} />
             </div>
           </div>
+          <p className="text-[10px] text-zinc-500 -mt-1">
+            The server enforces its own ceiling based on your active AI provider — much higher for a
+            self-hosted model (no per-call cost) than for the Claude API.
+          </p>
 
           {!isRunning ? (
             <Button className="w-full gap-2" onClick={start}>
