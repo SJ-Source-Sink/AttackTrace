@@ -431,10 +431,10 @@ async def export_assets_html(
 ):
     from fastapi.responses import StreamingResponse
     from datetime import datetime, timezone
-    from app.services.export_service import render_assets_html
+    from app.services.export_service import render_assets_html_async
 
     assets, owner_names = await _resolve_export_assets(db, org_id, ids, asset_type, search, scan_job_id)
-    html = render_assets_html(assets, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), owner_names)
+    html = await render_assets_html_async(assets, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), owner_names)
     return StreamingResponse(
         iter([html]), media_type="text/html",
         headers={"Content-Disposition": "attachment; filename=assets.html"},
@@ -456,10 +456,10 @@ async def export_assets_pdf(
 ):
     from fastapi.responses import StreamingResponse
     from datetime import datetime, timezone
-    from app.services.export_service import render_assets_html, html_to_pdf_bytes
+    from app.services.export_service import render_assets_html_async, html_to_pdf_bytes
 
     assets, owner_names = await _resolve_export_assets(db, org_id, ids, asset_type, search, scan_job_id)
-    html = render_assets_html(assets, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), owner_names)
+    html = await render_assets_html_async(assets, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), owner_names)
     pdf_bytes = await html_to_pdf_bytes(html)
     return StreamingResponse(
         iter([pdf_bytes]), media_type="application/pdf",
