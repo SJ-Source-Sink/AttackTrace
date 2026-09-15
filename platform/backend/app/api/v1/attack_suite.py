@@ -2778,8 +2778,9 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
         except httpx.HTTPError:
             pass
 
-    # Weak secret brute force
     alg = header_data.get("alg", "").upper()
+
+    # Weak secret brute force
     if alg in ("HS256", "HS384", "HS512"):
         signing_input = f"{parts[0]}.{parts[1]}".encode()
         try:
@@ -2902,6 +2903,17 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
                 confused_token = f"{confused_header}.{parts[1]}.{confused_sig_b64}"
                 for path in ["/api/me", "/api/user", "/api/v1/auth/me", "/me", "/profile"]:
                     try:
+                        # Baseline first, same discipline as the alg:none check above —
+                        # without it, a path that returns 200 for everyone regardless
+                        # of auth would false-positive as a confirmed algorithm-confusion
+                        # bypass. Found via a 2026-09-15 audit: this check had no baseline
+                        # at all despite the file's alg:none check (which this logic was
+                        # clearly modeled on) already having been fixed to require one.
+                        rc_baseline = await client.get(
+                            target + path, headers={"Authorization": "Bearer invalid.invalid.invalid"}, timeout=8,
+                        )
+                        if rc_baseline.status_code == 200:
+                            continue  # endpoint doesn't enforce auth here — proves nothing
                         r_conf = await client.get(
                             target + path,
                             headers={"Authorization": f"Bearer {confused_token}"},
@@ -2918,12 +2930,14 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
                                 f"not an allowlist. Full authentication bypass is possible.",
                                 f"Endpoint: {target + path}\nConfused algorithm: HS256\n"
                                 f"Signed with: RSA public key from {_jwks_url}\n"
-                                f"Response: {r_conf.status_code} ({len(r_conf.content)}b)",
+                                f"Response: {r_conf.status_code} ({len(r_conf.content)}b), while a "
+                                f"garbage-token baseline to the same path was rejected (status "
+                                f"{rc_baseline.status_code}).",
                                 target + path, True,
                                 "Pin the allowed algorithm explicitly in JWT verify calls "
                                 "(e.g., PyJWT: `jwt.decode(token, key, algorithms=['RS256'])`). "
                                 "Never trust the `alg` header from the client to select verification logic.",
-                                confidence="high")
+                                confidence="high", oracle="status-flip")
                             break
                     except httpx.HTTPError:
                         pass
