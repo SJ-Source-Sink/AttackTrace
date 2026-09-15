@@ -36,7 +36,10 @@ async def check_port_live(host: str, port: int, timeout: float = 3.0) -> bool:
         return False
 
 
-async def check_endpoint_live(url: str, timeout: float = 8.0, follow_redirects: bool = True) -> dict:
+async def check_endpoint_live(
+    url: str, timeout: float = 8.0, follow_redirects: bool = True,
+    capture_body: bool = False, body_cap: int = 3000,
+) -> dict:
     """Fetch a URL and report whether it's still reachable, its current
     status/headers, and a body hash (to detect if the content changed).
 
@@ -53,18 +56,29 @@ async def check_endpoint_live(url: str, timeout: float = 8.0, follow_redirects: 
     otherwise redirect this server's own outbound request to an internal or
     private address (SSRF via redirect), and a 3xx response is more useful
     to an agent reasoning about SSRF/open-redirect than one silently followed.
+
+    capture_body defaults False (existing callers — the manual "Re-verify"
+    action and every past use of this function — keep getting exactly the
+    same shape as before, a hash/length only). The Attack Suite Agent's
+    probe_http_endpoint tool can pass True when it deliberately wants to
+    actually read a page (bounded, capped) rather than only ever see a
+    derived signal — a real gap found in a 2026-09-14 audit of what data the
+    agent's tools give the model.
     """
     try:
         async with httpx.AsyncClient(follow_redirects=follow_redirects, verify=False, timeout=timeout) as client:
             resp = await client.get(url, headers={"User-Agent": "AttackTrace-Validator/1.0"})
         body_hash = hashlib.sha256(resp.content).hexdigest()[:16]
-        return {
+        result = {
             "live": True,
             "status_code": resp.status_code,
             "headers": dict(resp.headers),
             "body_hash": body_hash,
             "body_length": len(resp.content),
         }
+        if capture_body:
+            result["body_sample"] = resp.text[:body_cap]
+        return result
     except Exception as exc:
         return {"live": False, "error": str(exc)}
 
