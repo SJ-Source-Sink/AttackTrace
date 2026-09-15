@@ -187,13 +187,28 @@ class AttackSuiteRequest(BaseModel):
 
 def _finding(module: str, test_name: str, severity: str, title: str,
              description: str, evidence: str, url: str, is_vulnerable: bool,
-             remediation: str, confidence: str = "medium") -> dict:
+             remediation: str, confidence: str = "medium",
+             oracle: Optional[str] = None) -> dict:
+    """`oracle`, when passed, names *how* this specific call site actually
+    confirmed the finding (see app.core.finding_confidence's taxonomy —
+    "differential", "status-flip", "bare-signal", etc.). When set,
+    _adapt_attack_suite_findings computes `confidence` server-side from it via
+    grade_confidence(), overriding whatever literal string this call passed —
+    the same false-positive-gate doctrine already enforced for the Attack
+    Suite AI Agent's record_finding, now available here too. `oracle` is
+    optional and most of this file's ~150 call sites don't pass one yet (a
+    2026-09-15 audit found NONE did — every module hardcoded a bare
+    confidence string with no server-side check at all); the literal
+    `confidence` argument stays the fallback for call sites that haven't
+    been migrated to report an oracle, so this is purely additive — nothing
+    already passing a confidence string breaks."""
     return {
         "id": str(uuid.uuid4()),
         "module": module,
         "test_name": test_name,
         "severity": severity,
         "confidence": confidence,
+        "oracle": oracle,
         "title": title,
         "description": description,
         "evidence": evidence,
@@ -375,6 +390,15 @@ def _responses_meaningfully_differ(r1_body: str, r2_body: str,
     if s1 and s2 and s1 != s2 and len(s1) > 20 and len(s2) > 20:
         return True
     return False
+
+
+def _idor_nonexistent_url(ep: str) -> Optional[str]:
+    """Same numeric-ID -> 999999 substitution used by the sequential-ID IDOR
+    check, extracted so the cross-account check can build its own not-found
+    baseline URL too. Returns None if `ep` has no numeric path segment to
+    substitute (nothing to build a baseline from)."""
+    substituted = re.sub(r'/(\d+)(?=[/?]|$)', '/999999', ep)
+    return substituted if substituted != ep else None
 
 
 # ── Crawler ───────────────────────────────────────────────────────────────────
@@ -1270,7 +1294,10 @@ async def _module_csrf(target: str, client: httpx.AsyncClient,
                 content='{"email":"attacker@evil.com"}',
                 headers={"Content-Type": "text/plain", "Origin": "https://evil.example.com"},
                 timeout=8)
-            if r.status_code not in (404, 405, 501):
+            # A correct 401/403 rejection must not count as a "potential bypass" —
+            # only (404, 405, 501) were excluded before, so a properly-auth-gated
+            # endpoint still fired this finding. Found via a 2026-09-15 audit.
+            if r.status_code not in (401, 403, 404, 405, 501):
                 yield _finding("csrf", "csrf_content_type_bypass", "medium",
                     f"Potential CSRF via Content-Type Bypass on {path}",
                     f"Endpoint {path} returned {r.status_code} with text/plain content-type. "
@@ -1279,7 +1306,7 @@ async def _module_csrf(target: str, client: httpx.AsyncClient,
                     url, True,
                     "Validate CSRF tokens regardless of Content-Type. "
                     "Use SameSite=Strict cookies for session management.",
-                    confidence="low")
+                    confidence="low", oracle="bare-signal")
                 break
         except httpx.HTTPError:
             pass
@@ -1516,7 +1543,7 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
                             target, True,
                             "Use parameterized queries / prepared statements. "
                             "Never display raw DB errors to users.",
-                            confidence="high")
+                            confidence="high", oracle="differential")
                         break
                 if param in hit_params:
                     break
@@ -1565,7 +1592,7 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
                             target, True,
                             "Replace string concatenation with prepared statements. "
                             "Use ORM with parameterized queries.",
-                            confidence="high")
+                            confidence="high", oracle="timing-x3")
             except httpx.TimeoutException:
                 # Timeout itself could be SLEEP(10) — but single timeout is ambiguous
                 pass
@@ -1589,6 +1616,22 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
     ]
     for path in rest_login_paths:
         url = target + path
+        # Baseline: a benign, non-malicious login attempt against this exact
+        # path first — without it, any DB-error-pattern substring already
+        # present in this endpoint's normal error response (or an unrelated
+        # app error) would false-positive as confirmed SQLi. Reuses the same
+        # DB-vendor-specific pattern list + not-in-baseline discipline the
+        # URL-param SQLi check above already uses — found via a 2026-09-15
+        # audit that this endpoint's check used the generic SQLI_ERROR_PATTERNS
+        # list (includes bare "syntax error"/"division by zero") with no
+        # baseline at all, directly contradicting this function's own
+        # docstring claim of avoiding exactly that.
+        login_baseline_body = ""
+        try:
+            baseline_r = await client.post(url, json={"email": "nonexistent-probe@example.invalid", "password": "x"}, timeout=8)
+            login_baseline_body = baseline_r.text.lower()
+        except httpx.HTTPError:
+            pass
         for payload in sqli_login_payloads[:2]:
             try:
                 r = await client.post(url, json=payload, timeout=8)
@@ -1607,19 +1650,21 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
                                 url, True,
                                 "Use parameterized queries / ORM in authentication logic. "
                                 "Never concatenate user input into SQL strings.",
-                                confidence="high")
+                                confidence="high", oracle="extracted-value")
                             break  # found on this path, move to next path
                     except Exception:
                         pass
-                if any(pat in bl for pat in SQLI_ERROR_PATTERNS):
-                    yield _finding("sqli", "sqli_error_api_login", "critical",
-                        f"SQL Injection Error in REST Login Endpoint",
-                        f"SQL error pattern detected in response to SQLi payload in {path}.",
-                        f"URL: {url}\nPayload: {payload}\nResponse: {r.text[:200]}",
-                        url, True,
-                        "Use parameterized queries in authentication logic.",
-                        confidence="high")
-                    break  # found on this path, move to next path
+                for pat in _SQLI_CONFIRMED_PATTERNS:
+                    if pat in bl and pat not in login_baseline_body:
+                        yield _finding("sqli", "sqli_error_api_login", "critical",
+                            f"SQL Injection Error in REST Login Endpoint",
+                            f"DB-vendor-specific error pattern `{pat}` appeared in response to SQLi payload "
+                            f"in {path}, and was not present in a benign-login baseline response.",
+                            f"URL: {url}\nPayload: {payload}\nResponse: {r.text[:200]}",
+                            url, True,
+                            "Use parameterized queries in authentication logic.",
+                            confidence="high", oracle="differential")
+                        break  # found on this path, move to next path
             except httpx.HTTPError:
                 pass
             await asyncio.sleep(0)
@@ -1627,20 +1672,30 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
     # ── REST API search endpoint SQLi ─────────────────────────────────────────
     for path, param in SQLI_REST_ENDPOINTS:
         url = target + path
-        for quote in ["'", "'"]:
+        # Baseline: a benign query value against this exact path first — same
+        # false-positive-elimination rationale as the login-endpoint fix above.
+        search_baseline_body = ""
+        try:
+            baseline_r = await client.get(f"{url}?{param}=probe", timeout=8)
+            search_baseline_body = baseline_r.text.lower()
+        except httpx.HTTPError:
+            pass
+        for quote in ["'", '"']:
             try:
                 r = await client.get(f"{url}?{param}={quote}", timeout=8)
                 bl = r.text.lower()
-                if any(pat in bl for pat in SQLI_ERROR_PATTERNS):
-                    yield _finding("sqli", "sqli_error_rest_search", "high",
-                        f"SQL Injection in REST Search Endpoint: {path}",
-                        f"SQL error pattern in response to `{quote}` in `{param}` parameter of {path}.",
-                        f"URL: {url}?{param}={quote}\nSnippet: {r.text[:300]}",
-                        url, True,
-                        "Use parameterized queries for all database queries. "
-                        "Sanitize and validate all search inputs.",
-                        confidence="high")
-                    return
+                for pat in _SQLI_CONFIRMED_PATTERNS:
+                    if pat in bl and pat not in search_baseline_body:
+                        yield _finding("sqli", "sqli_error_rest_search", "high",
+                            f"SQL Injection in REST Search Endpoint: {path}",
+                            f"DB-vendor-specific error pattern `{pat}` appeared in response to `{quote}` in "
+                            f"`{param}` parameter of {path}, and was not present in a benign-query baseline.",
+                            f"URL: {url}?{param}={quote}\nSnippet: {r.text[:300]}",
+                            url, True,
+                            "Use parameterized queries for all database queries. "
+                            "Sanitize and validate all search inputs.",
+                            confidence="high", oracle="differential")
+                        return
             except httpx.HTTPError:
                 pass
             await asyncio.sleep(0)
@@ -1888,8 +1943,16 @@ async def _module_idor(target: str, client: httpx.AsyncClient,
                 and len(r.content) > 100
                 and not (spa_fallback_size > 0 and abs(len(r.content) - spa_fallback_size) < 200)
                 and _responses_meaningfully_differ(orig_r.text, r.text, orig_size, len(r.content))):
+            # Title uses the path SHAPE (numeric ID normalized to a placeholder),
+            # not the raw dynamic URL — compute_dedup_hash hashes title verbatim,
+            # so a title embedding the specific discovered ID would mint a new
+            # dedup_hash every scan even for the identical underlying bug,
+            # silently piling up duplicate rows instead of updating one. Found
+            # via a 2026-09-15 audit. Full URL with the real ID is still in the
+            # description/evidence below, which aren't part of the dedup key.
+            stable_path_shape = re.sub(r'/(\d+)(?=[/?]|$)', '/{id}', ep)
             yield _finding("idor", "idor_id_increment", "high",
-                f"IDOR — Sequential ID Access: {modified}",
+                f"IDOR — Sequential ID Access: {stable_path_shape}",
                 f"Non-existent ID `999999` → {baseline_status}. "
                 f"Incremented ID returned 200 with {len(r.content)} bytes of data "
                 f"that differs from the authenticated user's own resource. "
@@ -1902,7 +1965,7 @@ async def _module_idor(target: str, client: httpx.AsyncClient,
                 "Verify resource ownership server-side on every request. "
                 "Use unpredictable UUIDs instead of sequential IDs. "
                 "Implement object-level authorization (check user owns the resource).",
-                confidence="high")
+                confidence="high", oracle="differential")
 
     # ── Cross-account IDOR with Account 2 ────────────────────────────────────
     if client2:
@@ -1916,19 +1979,49 @@ async def _module_idor(target: str, client: httpx.AsyncClient,
                         and len(r1.content) > 100 and len(r2.content) > 100):
                     if _responses_meaningfully_differ(r1.text, r2.text,
                                                       len(r1.content), len(r2.content)):
-                        # Account 2 sees different data at Account 1's URL — real IDOR
-                        yield _finding("idor", "idor_cross_account", "critical",
-                            f"IDOR Confirmed — Cross-Account Data Exposure at {ep}",
-                            f"Account 1 and Account 2 both received HTTP 200 at the same URL, "
-                            f"but with meaningfully different response bodies — Account 2 is "
-                            f"accessing Account 1's private data without authorisation.",
-                            f"Endpoint: {ep}\n"
-                            f"Account 1 response ({len(r1.content)}b): {r1.text[:200]}\n"
-                            f"Account 2 response ({len(r2.content)}b): {r2.text[:200]}",
-                            ep, True,
-                            "Implement object-level authorization checks on every request. "
-                            "Associate every DB record with its owning user and verify on read.",
-                            confidence="high")
+                        # "Differs from account 1" alone isn't proof account 2 is seeing
+                        # account 1's REAL data — two different sessions routinely differ
+                        # on a shared/public page too (a CSRF token, a "Welcome, {name}"
+                        # header, a nonce), with no IDOR involved at all. Found via a
+                        # 2026-09-15 audit as the weakest of this file's IDOR checks — the
+                        # sequential-ID check 30 lines above already anchors on a genuine
+                        # not-found baseline; this one didn't. Add the same discipline:
+                        # account 2's response at account 1's URL must ALSO differ from
+                        # account 2's own not-found baseline, proving it's real,
+                        # ID-specific content and not a template/error page that just
+                        # happens to render slightly differently per session.
+                        nonexistent_for_2 = _idor_nonexistent_url(ep)
+                        acct2_nf_differs = True
+                        if nonexistent_for_2:
+                            try:
+                                nf_r2 = await client2.get(nonexistent_for_2, timeout=8)
+                                acct2_nf_differs = (
+                                    nf_r2.status_code != 200
+                                    or _responses_meaningfully_differ(
+                                        nf_r2.text, r2.text, len(nf_r2.content), len(r2.content)
+                                    )
+                                )
+                            except httpx.HTTPError:
+                                pass  # can't confirm — fall through, still flag (conservative default)
+                        if acct2_nf_differs:
+                            # Account 2 sees different data at Account 1's URL — real IDOR
+                            # Title uses the path shape, not the raw dynamic URL — same
+                            # dedup-stability fix as the sequential-ID check above.
+                            stable_ep_shape = re.sub(r'/(\d+)(?=[/?]|$)', '/{id}', ep)
+                            yield _finding("idor", "idor_cross_account", "critical",
+                                f"IDOR Confirmed — Cross-Account Data Exposure at {stable_ep_shape}",
+                                f"Account 1 and Account 2 both received HTTP 200 at the same URL, "
+                                f"but with meaningfully different response bodies — Account 2 is "
+                                f"accessing Account 1's private data without authorisation. Account 2's "
+                                f"response also differs from its own not-found baseline, confirming this "
+                                f"is real ID-specific data and not shared template/session content.",
+                                f"Endpoint: {ep}\n"
+                                f"Account 1 response ({len(r1.content)}b): {r1.text[:200]}\n"
+                                f"Account 2 response ({len(r2.content)}b): {r2.text[:200]}",
+                                ep, True,
+                                "Implement object-level authorization checks on every request. "
+                                "Associate every DB record with its owning user and verify on read.",
+                                confidence="high", oracle="differential")
             except httpx.HTTPError:
                 pass
             await asyncio.sleep(0)
@@ -2654,6 +2747,19 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
 
     for path in ["/api/me", "/api/user", "/api/v1/auth/me", "/me", "/profile"]:
         try:
+            # Baseline: same path with an obviously-invalid (garbage, not
+            # alg:none) token. Without this, a path that returns 200 for
+            # EVERYONE regardless of auth (a public page, a "please sign in"
+            # screen over 30 bytes) would false-positive as a confirmed auth
+            # bypass — found via a 2026-09-15 detection-quality audit. Only
+            # flag when the endpoint demonstrably enforces auth normally
+            # (baseline rejected) but the alg:none token specifically got
+            # through (differential signal, not just "returned 200").
+            baseline_r = await client.get(
+                target + path, headers={"Authorization": "Bearer invalid.invalid.invalid"}, timeout=8,
+            )
+            if baseline_r.status_code in (200,):
+                continue  # endpoint doesn't enforce auth at all here — alg:none proves nothing
             r = await client.get(target + path,
                                   headers={"Authorization": f"Bearer {none_token}"}, timeout=8)
             if r.status_code == 200 and len(r.text) > 30:
@@ -2661,11 +2767,13 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
                     "JWT Algorithm 'none' Bypass — Auth Bypassed",
                     "Server accepts JWT tokens with alg:none (unsigned). "
                     "Full authentication bypass — any user can forge tokens.",
-                    f"Unsigned token accepted at {target + path}\nStatus: {r.status_code}",
+                    f"Unsigned token accepted at {target + path} (status {r.status_code}), while a "
+                    f"garbage-token baseline request to the same path was rejected (status "
+                    f"{baseline_r.status_code}) — confirms auth is normally enforced here.",
                     target + path, True,
                     "Reject tokens with alg:none. Maintain a server-side algorithm allowlist. "
                     "Use a well-tested JWT library.",
-                    confidence="high")
+                    confidence="high", oracle="status-flip")
                 break
         except httpx.HTTPError:
             pass
@@ -3921,7 +4029,9 @@ async def _module_deserialization(target: str, client: httpx.AsyncClient,
                 headers={"Content-Type": "application/xml"}),
             timeout=3.0
         )
-        if r.status_code not in (404, 405, 501):
+        # Same fix as the CSRF content-type-bypass check above: a correct
+        # 401/403 auth rejection must not count as "endpoint may accept this".
+        if r.status_code not in (401, 403, 404, 405, 501):
             yield _finding("deserialization", "xml_billion_laughs_endpoint", "high",
                 "B2B Endpoint May Accept Billion Laughs XML DoS",
                 f"POST {b2b_url} returned {r.status_code} for XML input. "
@@ -3931,7 +4041,7 @@ async def _module_deserialization(target: str, client: httpx.AsyncClient,
                 b2b_url, True,
                 "Set entity expansion limits in XML parser. "
                 "Use FEATURE_SECURE_PROCESSING in Java. Limit entity depth to 1-2 levels.",
-                confidence="low")
+                confidence="low", oracle="bare-signal")
     except asyncio.TimeoutError:
         # Timeout means the server hung processing the entity expansion
         yield _finding("deserialization", "xml_dos_confirmed", "critical",
@@ -3943,7 +4053,7 @@ async def _module_deserialization(target: str, client: httpx.AsyncClient,
             b2b_url, True,
             "Disable entity expansion in XML parser. Set expansion limit to 1. "
             "Use XMLConstants.FEATURE_SECURE_PROCESSING.",
-            confidence="high")
+            confidence="high", oracle="timing")
     except Exception:
         pass
 
@@ -5669,6 +5779,8 @@ def _adapt_attack_suite_findings(findings: list[dict]) -> list[dict]:
     "header_based_versioning") are still forwarded — ingest_findings itself
     drops anything with severity="info", which covers nearly all of them.
     """
+    from app.core.finding_confidence import grade_confidence
+
     adapted = []
     for f in findings:
         module = f.get("module", "attack_suite")
@@ -5678,6 +5790,14 @@ def _adapt_attack_suite_findings(findings: list[dict]) -> list[dict]:
         ai_note = f.get("ai_analysis")
         if ai_note:
             description = f"{description}\n\nAI deep-analysis: {ai_note}"
+        oracle = f.get("oracle")
+        # Server-side false-positive gate: when a call site reports an
+        # honest oracle, its confidence is COMPUTED from that, not accepted
+        # as whatever literal string the call site passed — same doctrine
+        # already enforced for the Attack Suite AI Agent. Call sites that
+        # haven't been migrated to report an oracle yet keep their existing
+        # literal confidence, unchanged.
+        confidence = grade_confidence(oracle) if oracle else f.get("confidence", "medium")
         adapted.append({
             "title": title,
             "description": description,
@@ -5690,9 +5810,10 @@ def _adapt_attack_suite_findings(findings: list[dict]) -> list[dict]:
                 "module": module,
                 "is_vulnerable": f.get("is_vulnerable", False),
                 "ai_analysis": ai_note,
+                "oracle": oracle,
             },
             "remediation": remediation,
-            "confidence": f.get("confidence", "medium"),
+            "confidence": confidence,
         })
     return adapted
 
