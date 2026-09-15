@@ -528,7 +528,21 @@ IDOR_REST_PATHS = [
 ]
 
 # ── MASS ASSIGNMENT VECTORS ───────────────────────────────────────────────────
-# POST body fields that may escalate privileges via mass assignment in REST APIs
+# POST/PATCH body fields that may escalate privileges or bypass business
+# rules via mass assignment / BOPLA (Broken Object Property Level
+# Authorization — the 2023 OWASP API Top 10's merge of the old "Excessive
+# Data Exposure" + "Mass Assignment" categories: the server silently applies
+# a property the client was never supposed to be able to set).
+#
+# Merged from what used to be two separately-defined MASS_ASSIGNMENT_ROLE_FIELDS
+# lists in this file — the second one silently shadowed the first (same name,
+# later assignment wins in Python), so the first list's variants
+# (admin:True, userType/type:admin, privilege/access_level) were completely
+# dead code, never actually tested. Found via a 2026-09-15 audit. Also
+# widened beyond role/admin fields specifically to cover the broader BOPLA
+# pattern research flagged as a common, high-value real-world gap: business
+# fields a server should compute/validate itself (price, balance, discount,
+# verification status) but might instead accept directly from client input.
 MASS_ASSIGNMENT_ROLE_FIELDS = [
     {"role": "admin"},
     {"role": "administrator"},
@@ -539,6 +553,15 @@ MASS_ASSIGNMENT_ROLE_FIELDS = [
     {"type": "admin"},
     {"privilege": 1},
     {"access_level": 99},
+    {"roles": ["admin"]},
+    {"permissions": ["admin"]},
+    {"tier": "premium"},
+    {"subscription": "deluxe"},
+    {"is_verified": True},
+    {"verified": True},
+    {"price": 0},
+    {"balance": 999999},
+    {"discount_percent": 100},
 ]
 
 # ── COMMON SENSITIVE PATHS ────────────────────────────────────────────────────
@@ -799,18 +822,9 @@ DESERIALIZATION_PATHS = [
     "/api/restore", "/restore", "/api/backup/restore",
 ]
 
-# ── Mass Assignment / Admin Registration ───────────────────────────────────────
-MASS_ASSIGNMENT_ROLE_FIELDS = [
-    {"role": "admin"},
-    {"role": "administrator"},
-    {"isAdmin": True},
-    {"is_admin": True},
-    {"admin": True},
-    {"roles": ["admin"]},
-    {"permissions": ["admin"]},
-    {"tier": "premium"},
-    {"subscription": "deluxe"},
-]
+# Mass Assignment / Admin Registration — MASS_ASSIGNMENT_ROLE_FIELDS lives at
+# the top of this file now (merged with what used to be a duplicate,
+# silently-shadowing definition here — see that definition's comment).
 
 # ── Business Logic Attacks ─────────────────────────────────────────────────────
 # Juice Shop specific + general business logic

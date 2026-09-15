@@ -2141,8 +2141,15 @@ async def _module_privilege(target: str, client: httpx.AsyncClient,
             pass
         await asyncio.sleep(0)
 
-    # ── Mass assignment via REST API (role field injection) ──────────────────
-    # Try injecting role/admin fields into user registration and profile endpoints
+    # ── Mass assignment / BOPLA via REST API (over-permissive field injection) ──
+    # Try injecting role/admin/business-logic fields into registration and
+    # profile-update endpoints — MASS_ASSIGNMENT_ROLE_FIELDS now covers both
+    # the classic privilege-escalation shape (role/isAdmin/permissions) and
+    # the broader BOPLA pattern (price/balance/verified) the 2023 OWASP API
+    # Top 10 folded mass assignment into (2026-09-15 research pass).
+    # Bumped from [:4] to [:10] now that the field list itself was widened —
+    # keeping the old slice would have silently left most of the new fields
+    # untested.
     mass_assign_endpoints = [
         (f"{target}/api/Users", "POST"),
         (f"{target}/api/users", "POST"),
@@ -2152,7 +2159,7 @@ async def _module_privilege(target: str, client: httpx.AsyncClient,
         (f"{target}/api/account", "PATCH"),
     ]
     for url, method in mass_assign_endpoints:
-        for payload in MASS_ASSIGNMENT_ROLE_FIELDS[:4]:
+        for payload in MASS_ASSIGNMENT_ROLE_FIELDS[:10]:
             try:
                 if method == "POST":
                     # For registration: include required fields + privilege escalation field
@@ -2171,19 +2178,51 @@ async def _module_privilege(target: str, client: httpx.AsyncClient,
                         resp_str = json.dumps(data)
                         injected_key = list(payload.keys())[0]
                         injected_val = list(payload.values())[0]
-                        # Check if the injected role/admin field appears in the response
+                        # Check if the injected field appears in the write response
                         if (injected_key in resp_str and
                                 str(injected_val).lower() in resp_str.lower()):
+                            # An echo in the WRITE response doesn't prove the server
+                            # actually applied/persisted it — some APIs blindly echo
+                            # the submitted JSON back as a request confirmation
+                            # regardless of whether unknown fields were processed.
+                            # For PATCH-style endpoints (a stable, re-fetchable
+                            # resource URL), confirm via an independent GET — real
+                            # BOPLA verification, and meaningfully stronger evidence
+                            # than trusting the write response alone. POST
+                            # (registration) has no easy read-back path here (the
+                            # new resource's own URL isn't known), so that path
+                            # keeps the weaker echo-only oracle.
+                            confirmed_by_readback = False
+                            if method == "PATCH":
+                                try:
+                                    readback = await client.get(url, timeout=8)
+                                    if readback.status_code == 200:
+                                        rb_str = json.dumps(readback.json())
+                                        confirmed_by_readback = (
+                                            injected_key in rb_str
+                                            and str(injected_val).lower() in rb_str.lower()
+                                        )
+                                except Exception:
+                                    pass
+                            oracle = "extracted-value" if confirmed_by_readback else "reflected"
+                            evidence = f"Payload: {json.dumps(payload)}\nWrite response: {resp_str[:300]}"
+                            if method == "PATCH":
+                                evidence += f"\nConfirmed via independent GET read-back: {confirmed_by_readback}"
                             yield _finding("privilege", "mass_assignment_role", "critical",
                                 f"Mass Assignment — Privilege Escalation via '{injected_key}'",
-                                f"{method} {url} accepted `{injected_key}={injected_val}` and "
-                                f"returned it in the response. Attacker can register as admin "
-                                f"or escalate an existing account.",
-                                f"Payload: {json.dumps(payload)}\nResponse: {resp_str[:300]}",
+                                f"{method} {url} accepted `{injected_key}={injected_val}`"
+                                + (" and it was independently confirmed persisted via a follow-up GET"
+                                   if confirmed_by_readback else
+                                   " and echoed it in the write response (not independently confirmed "
+                                   "as persisted)")
+                                + ". Attacker can register as admin, escalate an existing account, or "
+                                "tamper with a business-logic field the server should compute itself.",
+                                evidence,
                                 url, True,
                                 "Use an explicit allowlist of writeable fields (allowlist approach). "
-                                "Never expose role/admin fields in user-facing APIs.",
-                                confidence="high")
+                                "Never let client-supplied JSON set role/admin/business-computed fields "
+                                "directly onto the model.",
+                                confidence="high", oracle=oracle)
                             break
                     except Exception:
                         pass
