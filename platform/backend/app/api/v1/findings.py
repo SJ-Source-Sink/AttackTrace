@@ -439,7 +439,7 @@ async def kev_summary(
 
 @router.get(
     "/export",
-    summary="Export findings as CSV or JSON",
+    summary="Export findings as CSV, JSON, HTML, or PDF",
 )
 async def export_findings(
     current_user: Annotated[User, Depends(get_current_user)],
@@ -449,11 +449,21 @@ async def export_findings(
     scan_job_id: Optional[str] = None,
     severity: Optional[str] = None,
     finding_status: Optional[str] = None,
+    finding_ids: Optional[str] = None,  # comma-separated finding UUIDs — "export selected"
 ) -> Any:
     from fastapi.responses import StreamingResponse
     import csv, io
 
     query = select(Finding).where(Finding.org_id == org_id)
+    if finding_ids:
+        try:
+            id_list = [UUID(i.strip()) for i in finding_ids.split(",") if i.strip()]
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": {"code": "INVALID_UUID", "message": "One or more finding_ids are not valid UUIDs"}},
+            )
+        query = query.where(Finding.id.in_(id_list))
     if scan_job_id:
         try:
             _export_scan_uuid = UUID(scan_job_id)
@@ -471,6 +481,21 @@ async def export_findings(
     # Hard cap to prevent OOM — export at most 10k findings at once
     result = await db.execute(query.order_by(Finding.created_at.desc()).limit(10_000))
     findings = result.scalars().all()
+
+    if fmt in ("html", "pdf"):
+        from app.services.export_service import render_findings_html, html_to_pdf_bytes
+
+        html = render_findings_html(findings, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
+        if fmt == "html":
+            return StreamingResponse(
+                iter([html]), media_type="text/html",
+                headers={"Content-Disposition": "attachment; filename=findings.html"},
+            )
+        pdf_bytes = await html_to_pdf_bytes(html)
+        return StreamingResponse(
+            iter([pdf_bytes]), media_type="application/pdf",
+            headers={"Content-Disposition": "attachment; filename=findings.pdf"},
+        )
 
     if fmt == "csv":
         output = io.StringIO()

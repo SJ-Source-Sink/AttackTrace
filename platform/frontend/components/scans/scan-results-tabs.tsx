@@ -11,8 +11,9 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/shared/loading-skeleton";
 import { useAssets } from "@/hooks/use-assets";
 import { useFindings } from "@/hooks/use-findings";
-import { aiApi, reportsApi, scansApi } from "@/lib/api";
+import { aiApi, reportsApi, scansApi, assetsApi, findingsApi } from "@/lib/api";
 import { ScanDiffTab } from "@/components/scans/scan-diff-tab";
+import { ExportMenu } from "@/components/shared/export-menu";
 import type { ScanDiff } from "@/types";
 import { toast } from "sonner";
 
@@ -133,6 +134,22 @@ function AssetsTab({ scanId }: { scanId: string }) {
 
   return (
     <div className="space-y-3">
+      <div className="flex justify-end">
+        <ExportMenu
+          label="Export"
+          onExport={async (format) => {
+            const filename = `scan-assets.${format}`;
+            try {
+              if (format === "csv") await assetsApi.exportCsv(undefined, filename, { scan_job_id: scanId });
+              else if (format === "html") await assetsApi.exportHtml(undefined, filename, { scan_job_id: scanId });
+              else await assetsApi.exportPdf(undefined, filename, { scan_job_id: scanId });
+              toast.success("Export downloaded");
+            } catch {
+              toast.error("Export failed");
+            }
+          }}
+        />
+      </div>
       <div className="rounded-lg border border-zinc-800 overflow-hidden">
         <table className="w-full text-sm">
           <thead>
@@ -309,6 +326,21 @@ function FindingsTab({ scanId }: { scanId: string }) {
             </select>
           </div>
         )}
+
+        <ExportMenu
+          label="Export"
+          onExport={async (format) => {
+            const filename = `scan-findings.${format}`;
+            try {
+              if (format === "csv") await findingsApi.exportCsv(undefined, filename, { scan_job_id: scanId });
+              else if (format === "html") await findingsApi.exportHtml(undefined, filename, { scan_job_id: scanId });
+              else await findingsApi.exportPdf(undefined, filename, { scan_job_id: scanId });
+              toast.success("Export downloaded");
+            } catch {
+              toast.error("Export failed");
+            }
+          }}
+        />
       </div>
 
       <div className="rounded-lg border border-zinc-800 overflow-hidden">

@@ -317,21 +317,14 @@ async def bulk_assign_assets(
     return {"updated": len(assets), "not_found": len(uuids) - len(assets)}
 
 
-@router.get(
-    "/export/csv",
-    summary="Export assets as CSV",
-)
-async def export_assets_csv(
-    current_user: Annotated[User, Depends(get_current_user)],
-    org_id: UUID = Depends(get_current_org_id),
-    db: AsyncSession = Depends(get_db),
-    ids: Optional[str] = None,  # comma-separated asset UUIDs; omit to export all filtered/visible assets
-    asset_type: Optional[str] = None,
-    search: Optional[str] = None,
-):
-    from fastapi.responses import StreamingResponse
-    import csv, io
-
+async def _resolve_export_assets(
+    db: AsyncSession, org_id: UUID, ids: Optional[str], asset_type: Optional[str], search: Optional[str],
+    scan_job_id: Optional[str] = None,
+) -> tuple[list[Asset], dict]:
+    """Shared filter/fetch logic for every assets export format (csv/html/pdf)
+    — same filters, same 10k cap, same owner-name resolution, so the three
+    formats can never silently drift apart on what "the current export"
+    actually includes."""
     query = select(Asset).where(Asset.org_id == org_id)
 
     if ids:
@@ -356,9 +349,18 @@ async def export_assets_csv(
     if search:
         query = query.where(Asset.value.ilike(f"%{search}%"))
 
+    if scan_job_id:
+        try:
+            query = query.where(Asset.scan_job_id == UUID(scan_job_id))
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": {"code": "INVALID_UUID", "message": "Invalid scan_job_id"}},
+            )
+
     # Hard cap to prevent OOM — export at most 10k assets at once
     result = await db.execute(query.order_by(Asset.last_seen.desc()).limit(10_000))
-    assets = result.scalars().all()
+    assets = list(result.scalars().all())
 
     # Resolve owner names for the export in one query
     owner_ids = {a.owner_user_id for a in assets if a.owner_user_id}
@@ -366,6 +368,27 @@ async def export_assets_csv(
     if owner_ids:
         owner_rows = await db.execute(select(User.id, User.full_name, User.email).where(User.id.in_(owner_ids)))
         owner_names = {r[0]: (r[1] or r[2]) for r in owner_rows.all()}
+
+    return assets, owner_names
+
+
+@router.get(
+    "/export/csv",
+    summary="Export assets as CSV",
+)
+async def export_assets_csv(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+    ids: Optional[str] = None,  # comma-separated asset UUIDs; omit to export all filtered/visible assets
+    asset_type: Optional[str] = None,
+    search: Optional[str] = None,
+    scan_job_id: Optional[str] = None,
+):
+    from fastapi.responses import StreamingResponse
+    import csv, io
+
+    assets, owner_names = await _resolve_export_assets(db, org_id, ids, asset_type, search, scan_job_id)
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -390,6 +413,57 @@ async def export_assets_csv(
         iter([output.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=assets.csv"},
+    )
+
+
+@router.get(
+    "/export/html",
+    summary="Export assets as a printable HTML table",
+)
+async def export_assets_html(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+    ids: Optional[str] = None,
+    asset_type: Optional[str] = None,
+    search: Optional[str] = None,
+    scan_job_id: Optional[str] = None,
+):
+    from fastapi.responses import StreamingResponse
+    from datetime import datetime, timezone
+    from app.services.export_service import render_assets_html
+
+    assets, owner_names = await _resolve_export_assets(db, org_id, ids, asset_type, search, scan_job_id)
+    html = render_assets_html(assets, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), owner_names)
+    return StreamingResponse(
+        iter([html]), media_type="text/html",
+        headers={"Content-Disposition": "attachment; filename=assets.html"},
+    )
+
+
+@router.get(
+    "/export/pdf",
+    summary="Export assets as PDF",
+)
+async def export_assets_pdf(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+    ids: Optional[str] = None,
+    asset_type: Optional[str] = None,
+    search: Optional[str] = None,
+    scan_job_id: Optional[str] = None,
+):
+    from fastapi.responses import StreamingResponse
+    from datetime import datetime, timezone
+    from app.services.export_service import render_assets_html, html_to_pdf_bytes
+
+    assets, owner_names = await _resolve_export_assets(db, org_id, ids, asset_type, search, scan_job_id)
+    html = render_assets_html(assets, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), owner_names)
+    pdf_bytes = await html_to_pdf_bytes(html)
+    return StreamingResponse(
+        iter([pdf_bytes]), media_type="application/pdf",
+        headers={"Content-Disposition": "attachment; filename=assets.pdf"},
     )
 
 

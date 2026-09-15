@@ -15,6 +15,13 @@ import {
 } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/shared/empty-state";
 import { FindingRow } from "@/components/findings/finding-row";
+import { ExportMenu, type ExportFormat } from "@/components/shared/export-menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
@@ -22,8 +29,8 @@ import { useFindings, findingKeys } from "@/hooks/use-findings";
 import { useCreateFinding } from "@/hooks/use-findings";
 import { toast } from "sonner";
 import type { FindingFilters, FindingSeverity, FindingStatus } from "@/types";
-import { API_BASE } from "@/lib/api";
-import { getAccessToken, fetchWithAuth } from "@/lib/auth";
+import { API_BASE, findingsApi } from "@/lib/api";
+import { fetchWithAuth } from "@/lib/auth";
 
 const SEVERITIES: FindingSeverity[] = ["critical", "high", "medium", "low", "info"];
 const STATUSES: FindingStatus[] = ["open", "in_progress", "remediated", "accepted_risk", "false_positive"];
@@ -2344,32 +2351,27 @@ export default function FindingsPage() {
     }
   };
 
-  const handleExportSelected = async () => {
+  const handleExportSelected = async (format: ExportFormat) => {
     if (selectedIds.size === 0) return;
     try {
-      const ids = Array.from(selectedIds).join(",");
-      const url = `${API_BASE}/findings/export?fmt=csv&finding_ids=${encodeURIComponent(ids)}`;
-      const resp = await fetchWithAuth(url);
-      if (!resp.ok) { toast.error("Export failed"); return; }
-      const blob = await resp.blob();
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = "findings-selected.csv";
-      a.click();
+      const ids = Array.from(selectedIds);
+      const filename = `findings-selected.${format}`;
+      if (format === "csv") await findingsApi.exportCsv(ids, filename);
+      else if (format === "html") await findingsApi.exportHtml(ids, filename);
+      else await findingsApi.exportPdf(ids, filename);
+      toast.success(`Export downloaded (${ids.length} finding${ids.length === 1 ? "" : "s"})`);
     } catch {
       toast.error("Export failed");
     }
   };
 
-  const handleExportAll = async () => {
+  const handleExportAll = async (format: ExportFormat) => {
     try {
-      const resp = await fetchWithAuth(`${API_BASE}/findings/export?fmt=csv`);
-      if (!resp.ok) { toast.error("Export failed"); return; }
-      const blob = await resp.blob();
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = "findings-all.csv";
-      a.click();
+      const filename = `findings-all.${format}`;
+      if (format === "csv") await findingsApi.exportCsv(undefined, filename);
+      else if (format === "html") await findingsApi.exportHtml(undefined, filename);
+      else await findingsApi.exportPdf(undefined, filename);
+      toast.success("Export downloaded");
     } catch {
       toast.error("Export failed");
     }
@@ -2569,16 +2571,8 @@ export default function FindingsPage() {
                 </button>
               )}
             </div>
-            {/* Export All CSV */}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleExportAll}
-              className="gap-1.5 border-zinc-700 text-zinc-300 hover:text-zinc-100"
-            >
-              <Download className="h-3.5 w-3.5" />
-              Export CSV
-            </Button>
+            {/* Export All */}
+            <ExportMenu label="Export" onExport={handleExportAll} />
             <Button
               onClick={() => setDrawerOpen(true)}
               className="bg-orange-600 hover:bg-orange-500 text-white gap-1.5"
@@ -2762,14 +2756,22 @@ export default function FindingsPage() {
           >
             Mark as Accepted Risk
           </button>
-          <button
-            onClick={handleExportSelected}
-            disabled={bulkLoading}
-            className="px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-700 hover:bg-zinc-600 text-zinc-200 disabled:opacity-50 transition-colors flex items-center gap-1"
-          >
-            <Download className="h-3.5 w-3.5" />
-            Export Selected (CSV)
-          </button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                disabled={bulkLoading}
+                className="px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-700 hover:bg-zinc-600 text-zinc-200 disabled:opacity-50 transition-colors flex items-center gap-1"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Export Selected
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-32">
+              <DropdownMenuItem onClick={() => handleExportSelected("csv")} className="cursor-pointer">CSV</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => handleExportSelected("html")} className="cursor-pointer">HTML</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => handleExportSelected("pdf")} className="cursor-pointer">PDF</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <div className="w-px h-5 bg-zinc-600" />
           <button
             onClick={() => setShowBulkDeleteConfirm(true)}

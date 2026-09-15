@@ -9,11 +9,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/shared/page-header";
 import { EmptyState } from "@/components/shared/empty-state";
+import { ExportMenu } from "@/components/shared/export-menu";
 import { AssetTable } from "@/components/assets/asset-table";
 import { AssetFilterPanel } from "@/components/assets/asset-filters";
 import { NLSearchBar } from "@/components/assets/nl-search-bar";
 import { useAssets } from "@/hooks/use-assets";
 import { assetsApi } from "@/lib/api";
+import { toast } from "sonner";
 import type { AssetFilters, AssetType } from "@/types";
 
 interface SurfaceDiff {
@@ -143,7 +145,22 @@ export default function AssetsPage() {
       <PageHeader
         title="Asset Inventory"
         description={`${total.toLocaleString()} assets discovered`}
-      />
+      >
+        <ExportMenu
+          label="Export"
+          onExport={async (format) => {
+            const filename = `assets-all.${format}`;
+            try {
+              if (format === "csv") await assetsApi.exportCsv(undefined, filename);
+              else if (format === "html") await assetsApi.exportHtml(undefined, filename);
+              else await assetsApi.exportPdf(undefined, filename);
+              toast.success("Export downloaded");
+            } catch {
+              toast.error("Export failed");
+            }
+          }}
+        />
+      </PageHeader>
 
       <SurfaceChangesCard />
 

@@ -61,6 +61,38 @@ function buildUrl(path: string, params?: Record<string, string | number | boolea
   return url.toString();
 }
 
+/** Authenticated file download — fetches with JWT then triggers the browser's
+ * save-as dialog. Shared by every CSV/HTML/PDF export button (findings,
+ * assets) so they all get the same auth/error handling instead of each page
+ * re-implementing this inline. */
+async function downloadAuthenticatedFile(
+  path: string,
+  params: Record<string, string | number | boolean | string[] | undefined> | undefined,
+  filename: string,
+): Promise<void> {
+  const token = getAccessToken();
+  const url = buildUrl(path, params);
+  const res = await fetch(url, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => `HTTP ${res.status}`);
+    throw new ApiError(res.status, detail);
+  }
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = objectUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 // Promise-based refresh: all concurrent 401s await the same promise so only
 // one refresh request fires regardless of how many requests were in-flight.
 let refreshPromise: Promise<string | null> | null = null;
@@ -197,30 +229,15 @@ export const assetsApi = {
     api.post("/assets/bulk/tag", { ids, tags }),
   bulkAssign: (ids: string[], owner: string) =>
     api.post("/assets/bulk/assign", { ids, owner }),
-  /** Authenticated CSV download — fetches with JWT then triggers browser save-as dialog */
-  exportCsv: async (ids?: string[], filename = "assets.csv"): Promise<void> => {
-    const token = getAccessToken();
-    const url = buildUrl("/assets/export/csv", ids?.length ? { ids: ids.join(",") } : undefined);
-    const res = await fetch(url, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => `HTTP ${res.status}`);
-      throw new ApiError(res.status, detail);
-    }
-    const blob = await res.blob();
-    const objectUrl = URL.createObjectURL(blob);
-    try {
-      const a = document.createElement("a");
-      a.href = objectUrl;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-    } finally {
-      URL.revokeObjectURL(objectUrl);
-    }
-  },
+  /** Authenticated CSV download — fetches with JWT then triggers browser save-as dialog.
+   * `extra` can carry additional server-side filters (e.g. scan_job_id to export just
+   * one scan's discovered assets from the scan-detail page). */
+  exportCsv: async (ids?: string[], filename = "assets.csv", extra?: { scan_job_id?: string }): Promise<void> =>
+    downloadAuthenticatedFile("/assets/export/csv", { ids: ids?.length ? ids.join(",") : undefined, ...extra }, filename),
+  exportHtml: async (ids?: string[], filename = "assets.html", extra?: { scan_job_id?: string }): Promise<void> =>
+    downloadAuthenticatedFile("/assets/export/html", { ids: ids?.length ? ids.join(",") : undefined, ...extra }, filename),
+  exportPdf: async (ids?: string[], filename = "assets.pdf", extra?: { scan_job_id?: string }): Promise<void> =>
+    downloadAuthenticatedFile("/assets/export/pdf", { ids: ids?.length ? ids.join(",") : undefined, ...extra }, filename),
   surfaceDiff: () => api.get("/assets/surface-diff/recent"),
 };
 
@@ -251,6 +268,12 @@ export const findingsApi = {
     api.post<{ finding_id: string; confidence: string; checked: string; still_live?: boolean; stale?: boolean }>(
       `/findings/${id}/revalidate`, {},
     ),
+  exportCsv: async (findingIds?: string[], filename = "findings.csv", extra?: { scan_job_id?: string }): Promise<void> =>
+    downloadAuthenticatedFile("/findings/export", { fmt: "csv", finding_ids: findingIds?.length ? findingIds.join(",") : undefined, ...extra }, filename),
+  exportHtml: async (findingIds?: string[], filename = "findings.html", extra?: { scan_job_id?: string }): Promise<void> =>
+    downloadAuthenticatedFile("/findings/export", { fmt: "html", finding_ids: findingIds?.length ? findingIds.join(",") : undefined, ...extra }, filename),
+  exportPdf: async (findingIds?: string[], filename = "findings.pdf", extra?: { scan_job_id?: string }): Promise<void> =>
+    downloadAuthenticatedFile("/findings/export", { fmt: "pdf", finding_ids: findingIds?.length ? findingIds.join(",") : undefined, ...extra }, filename),
 };
 
 /** Extract a clean, user-facing message from a failed report-download response.

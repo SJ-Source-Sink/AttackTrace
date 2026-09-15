@@ -84,15 +84,3 @@ export function useBulkAssignAssets() {
   });
 }
 
-export function useExportAssetsCsv() {
-  return useMutation({
-    mutationFn: ({ ids }: { ids?: string[] }) => assetsApi.exportCsv(ids),
-    onSuccess: (_data, variables) => {
-      const count = variables.ids?.length;
-      toast.success(count ? `Export downloaded (${count} asset${count === 1 ? "" : "s"})` : "Export downloaded");
-    },
-    onError: (error: Error) => {
-      toast.error(`Failed to export assets: ${error.message}`);
-    },
-  });
-}

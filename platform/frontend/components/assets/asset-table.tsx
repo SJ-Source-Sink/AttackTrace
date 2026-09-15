@@ -54,8 +54,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { formatDate, riskScoreBarColor } from "@/lib/utils";
-import { findingsApi } from "@/lib/api";
-import { useBulkTagAssets, useBulkAssignAssets, useExportAssetsCsv } from "@/hooks/use-assets";
+import { findingsApi, assetsApi } from "@/lib/api";
+import { useBulkTagAssets, useBulkAssignAssets } from "@/hooks/use-assets";
+import { ExportMenu } from "@/components/shared/export-menu";
+import { toast } from "sonner";
 import type { Asset, AssetType } from "@/types";
 
 const stripProtocol = (val: string) => val.replace(/^https?:\/\//, "");
@@ -253,7 +255,6 @@ export function AssetTable({
   const [rowSelection, setRowSelection] = useState<Record<string, boolean>>({});
   const [screenshotModal, setScreenshotModal] = useState<{ url: string; value: string } | null>(null);
   const [tagDialogOpen, setTagDialogOpen] = useState(false);
-  const exportCsv = useExportAssetsCsv();
 
   const columns: ColumnDef<Asset>[] = [
     {
@@ -498,20 +499,21 @@ export function AssetTable({
                 Check Takeover ({selectedTakeoverAssets.length})
               </Button>
             )}
-            <Button
-              variant="outline"
+            <ExportMenu
+              label="Export"
               size="sm"
-              className="h-7 text-xs gap-1"
-              disabled={exportCsv.isPending}
-              onClick={() => exportCsv.mutate({ ids: selectedIds })}
-            >
-              {exportCsv.isPending ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <Download className="h-3 w-3" />
-              )}
-              Export CSV
-            </Button>
+              onExport={async (format) => {
+                const filename = `assets-selected.${format}`;
+                try {
+                  if (format === "csv") await assetsApi.exportCsv(selectedIds, filename);
+                  else if (format === "html") await assetsApi.exportHtml(selectedIds, filename);
+                  else await assetsApi.exportPdf(selectedIds, filename);
+                  toast.success(`Export downloaded (${selectedIds.length} asset${selectedIds.length === 1 ? "" : "s"})`);
+                } catch {
+                  toast.error("Export failed");
+                }
+              }}
+            />
           </div>
         </div>
       )}
