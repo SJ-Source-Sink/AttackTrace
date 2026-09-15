@@ -1076,7 +1076,8 @@ async def _module_headers(target: str, client: httpx.AsyncClient) -> AsyncGenera
         for condition, test_name, severity, title, desc, rem in checks:
             if condition:
                 yield _finding("headers", test_name, severity, title, desc,
-                               f"Response headers: {dict(list(h.items())[:10])}", target, True, rem)
+                               f"Response headers: {dict(list(h.items())[:10])}", target, True, rem,
+                               oracle="bare-signal")
 
         server = h.get("server", "")
         if server and any(c.isdigit() for c in server):
@@ -1084,21 +1085,24 @@ async def _module_headers(target: str, client: httpx.AsyncClient) -> AsyncGenera
                 "Server Version Disclosure",
                 f"Server header reveals software version, aiding fingerprinting.",
                 f"Server: {server}", target, True,
-                "Configure server to suppress version in the Server header.")
+                "Configure server to suppress version in the Server header.",
+                oracle="bare-signal")
 
         if "x-powered-by" in h:
             yield _finding("headers", "x_powered_by", "low",
                 "X-Powered-By Technology Disclosure",
                 f"Reveals backend technology: {h['x-powered-by']}",
                 f"X-Powered-By: {h['x-powered-by']}", target, True,
-                "Remove X-Powered-By header from all responses.")
+                "Remove X-Powered-By header from all responses.",
+                oracle="bare-signal")
 
         acao = h.get("access-control-allow-origin", "")
         if acao == "*" and h.get("access-control-allow-credentials", "").lower() == "true":
             yield _finding("headers", "cors_wildcard_creds", "high",
                 "CORS Wildcard with Credentials",
                 "ACAO: * combined with Allow-Credentials: true allows cross-origin credential theft.",
-                f"ACAO: {acao}", target, True, "Specify explicit trusted origins.")
+                f"ACAO: {acao}", target, True, "Specify explicit trusted origins.",
+                oracle="bare-signal")
 
     except httpx.HTTPError as e:
         pass
@@ -1151,7 +1155,7 @@ async def _module_cors(target: str, client: httpx.AsyncClient) -> AsyncGenerator
                         url, True,
                         "Replace ACAO: * with an explicit origin allowlist. "
                         "Never use wildcard CORS on data-returning API endpoints.",
-                        confidence="high")
+                        confidence="high", oracle="bare-signal")
                     break
         except httpx.HTTPError:
             pass
@@ -1219,7 +1223,7 @@ async def _module_cors(target: str, client: httpx.AsyncClient) -> AsyncGenerator
                             url, True,
                             "Validate Origin against an explicit allowlist. Never dynamically "
                             "reflect the Origin header. Never combine wildcard with credentials.",
-                            confidence="high")
+                            confidence="high", oracle="differential")
                     else:
                         yield _finding("cors", f"cors_reflected_{technique[:15]}", "high",
                             f"CORS Reflected Origin Bypass — {technique}",
@@ -1230,7 +1234,7 @@ async def _module_cors(target: str, client: httpx.AsyncClient) -> AsyncGenerator
                             url, True,
                             "Validate Origin against an explicit allowlist. "
                             "Never dynamically reflect the request Origin.",
-                            confidence="medium")
+                            confidence="medium", oracle="differential")
                     return
 
             except httpx.HTTPError:
@@ -1259,7 +1263,7 @@ async def _module_csrf(target: str, client: httpx.AsyncClient,
                     target, True,
                     "Change SameSite to 'Lax' or 'Strict'. Add a CSRF token to all "
                     "state-changing requests.",
-                    confidence="medium")
+                    confidence="medium", oracle="bare-signal")
                 break
     except httpx.HTTPError:
         pass
@@ -1282,7 +1286,7 @@ async def _module_csrf(target: str, client: httpx.AsyncClient,
                 f"Form action: {action}\nMethod: POST\nInputs: {inputs}",
                 action, True,
                 "Add a CSRF token to all state-changing forms. Validate server-side.",
-                confidence="medium")
+                confidence="medium", oracle="bare-signal")
 
     # Test sensitive endpoints for CSRF via content-type bypass
     parsed = urlparse(target)
@@ -1366,7 +1370,7 @@ async def _module_xss(target: str, client: httpx.AsyncClient,
                         test_url, True,
                         "HTML-encode all user-supplied input before reflection. "
                         "Implement a strict Content-Security-Policy.",
-                        confidence="high")
+                        confidence="high", oracle="reflected")
                     continue
 
         except httpx.HTTPError:
@@ -1391,7 +1395,7 @@ async def _module_xss(target: str, client: httpx.AsyncClient,
                                     f"URL: {test_url2}\nUnescaped reflection confirmed.",
                                     test_url2, True,
                                     "HTML-encode all user-supplied input before reflection.",
-                                    confidence="high")
+                                    confidence="high", oracle="reflected")
                                 break
                 except httpx.HTTPError:
                     pass
@@ -1432,7 +1436,7 @@ async def _module_xss(target: str, client: httpx.AsyncClient,
                     action, True,
                     "HTML-encode all output from user-supplied data. "
                     "Validate and sanitise all form inputs server-side.",
-                    confidence="high")
+                    confidence="high", oracle="reflected")
             else:
                 # Try fetching the action URL again (stored XSS shows on read)
                 get_r = await client.get(action, timeout=8)
@@ -1444,7 +1448,7 @@ async def _module_xss(target: str, client: httpx.AsyncClient,
                         f"Form: {action}\nPayload: {payload[:80]}\nCanary confirmed on GET: yes",
                         action, True,
                         "HTML-encode all output. Sanitise before storing in database.",
-                        confidence="high")
+                        confidence="high", oracle="two-signal")
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
@@ -1463,7 +1467,7 @@ async def _module_xss(target: str, client: httpx.AsyncClient,
                 target, True,
                 "Avoid dangerous DOM sinks. Use DOMPurify before innerHTML assignments. "
                 "Use textContent instead of innerHTML for plain-text data.",
-                confidence="medium")
+                confidence="medium", oracle="bare-signal")
     except httpx.HTTPError:
         pass
 
@@ -1746,7 +1750,7 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
                     url, True,
                     "Use parameterized queries / ORM. Never concatenate user input into SQL. "
                     "Disable SQL error messages in production.",
-                    confidence="high")
+                    confidence="high", oracle="extracted-value")
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
@@ -1776,7 +1780,7 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
                         url, True,
                         "Use parameterized queries. Apply bcrypt/Argon2 password hashing. "
                         "Never expose password hashes in API responses.",
-                        confidence="high")
+                        confidence="high", oracle="extracted-value")
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
@@ -1795,17 +1799,33 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
         sqli_payload = "admin'--"
         form_data = {inp: sqli_payload if inp in user_fields else "test123"
                      for inp in inputs}
+        benign_data = {inp: "nonexistent-probe" if inp in user_fields else "test123"
+                       for inp in inputs}
+        # Baseline: a benign, non-malicious login attempt against this exact
+        # form first — same false-positive-elimination rationale as the REST
+        # login/search endpoint checks above. Without it, a generic app error
+        # page (which SQLI_ERROR_PATTERNS' broad terms like "syntax error"
+        # can match even outside a DB context) would false-positive.
+        form_baseline_body = ""
+        try:
+            baseline_r = await client.post(form["action"], data=benign_data, timeout=8)
+            form_baseline_body = baseline_r.text.lower()
+        except httpx.HTTPError:
+            pass
         try:
             r = await client.post(form["action"], data=form_data, timeout=8)
             bl = r.text.lower()
-            if any(pat in bl for pat in SQLI_ERROR_PATTERNS):
-                yield _finding("sqli", "error_sqli_login", "critical",
-                    "SQL Injection in Login Form",
-                    f"SQL error string in response to `admin'--` in login form.",
-                    f"Form: {form['action']}\nResponse: {r.text[:200]}",
-                    form["action"], True,
-                    "Use parameterized queries in authentication logic.",
-                    confidence="high")
+            for pat in _SQLI_CONFIRMED_PATTERNS:
+                if pat in bl and pat not in form_baseline_body:
+                    yield _finding("sqli", "error_sqli_login", "critical",
+                        "SQL Injection in Login Form",
+                        f"DB-vendor-specific error pattern `{pat}` appeared in response to "
+                        f"`admin'--` in login form, and was not present in a benign-login baseline.",
+                        f"Form: {form['action']}\nResponse: {r.text[:200]}",
+                        form["action"], True,
+                        "Use parameterized queries in authentication logic.",
+                        confidence="high", oracle="differential")
+                    break
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
@@ -1842,7 +1862,7 @@ async def _module_ssrf(target: str, client: httpx.AsyncClient) -> AsyncGenerator
                         "Implement strict outbound URL allowlisting (allowlist > blocklist). "
                         "Block 169.254.0.0/16 and 100.100.100.200 at network level. "
                         "Enforce IMDSv2 (token-required) on AWS instances.",
-                        confidence="high")
+                        confidence="high", oracle="extracted-value")
                     return
             except httpx.ConnectError:
                 # ConnectError means the server tried to connect — but we can't confirm
@@ -1868,7 +1888,7 @@ async def _module_ssrf(target: str, client: httpx.AsyncClient) -> AsyncGenerator
                     test_url, True,
                     "Validate redirect destinations against an allowlist. "
                     "Never follow redirects to internal/private IP ranges.",
-                    confidence="high")
+                    confidence="high", oracle="extracted-value")
         except (httpx.HTTPError, httpx.TimeoutException):
             pass
         await asyncio.sleep(0)
@@ -2059,7 +2079,7 @@ async def _module_idor(target: str, client: httpx.AsyncClient,
                                         url, True,
                                         "Require authentication on all resource list endpoints. "
                                         "Scope queries to the authenticated user's own records only.",
-                                        confidence="high")
+                                        confidence="high", oracle="extracted-value")
                                     break
                             elif isinstance(inner, dict):
                                 sensitive = [k for k in inner.keys() if k in
@@ -2071,7 +2091,7 @@ async def _module_idor(target: str, client: httpx.AsyncClient,
                                         f"URL: {url}\nObject: {str(inner)[:300]}",
                                         url, True,
                                         "Verify resource ownership on every request. Use UUIDs over sequential IDs.",
-                                        confidence="medium")
+                                        confidence="medium", oracle="bare-signal")
                                     break
                     except Exception:
                         pass
@@ -2099,7 +2119,7 @@ async def _module_idor(target: str, client: httpx.AsyncClient,
                                 f"URL: {test_url}\nData keys: {list(data.keys())[:10]}",
                                 test_url, True,
                                 "Verify ownership before returning object data.",
-                                confidence="medium")
+                                confidence="medium", oracle="bare-signal")
                             break
                     except Exception:
                         pass
@@ -2136,7 +2156,7 @@ async def _module_privilege(target: str, client: httpx.AsyncClient,
                         url, True,
                         f"Require authentication and admin role for {path}. "
                         f"Add IP allowlisting for admin interfaces.",
-                        confidence="high")
+                        confidence="high", oracle="bare-signal")
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
@@ -2264,7 +2284,7 @@ async def _module_account_takeover(target: str, client: httpx.AsyncClient,
                             url, True,
                             "Hardcode the application domain for password reset emails. "
                             "Never use Host/X-Forwarded-Host headers to build reset URLs.",
-                            confidence="medium")
+                            confidence="medium", oracle="bare-signal")
                         break
             except httpx.HTTPError:
                 pass
@@ -2289,7 +2309,7 @@ async def _module_account_takeover(target: str, client: httpx.AsyncClient,
                     url, True,
                     "Require current password confirmation for email changes. "
                     "Send verification to both old and new email addresses.",
-                    confidence="medium")
+                    confidence="medium", oracle="bare-signal")
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
@@ -2355,7 +2375,7 @@ async def _module_cache(target: str, client: httpx.AsyncClient) -> AsyncGenerato
                     f"Add `{header}` to your cache key configuration. "
                     f"Strip unrecognised/untrusted headers at the CDN/proxy layer. "
                     f"Validate Host header before using in response generation.",
-                    confidence="high")
+                    confidence="high", oracle="two-signal")
                 return
             elif "hit" in cache_status and canary in body:
                 # Header reflected + cache HIT signal — likely but not fully confirmed
@@ -2368,7 +2388,7 @@ async def _module_cache(target: str, client: httpx.AsyncClient) -> AsyncGenerato
                     f"Canary in response: yes\nCache-Status: {cache_status}",
                     target, True,
                     f"Add `{header}` to your CDN cache key. Strip unkeyed headers before caching.",
-                    confidence="medium")
+                    confidence="medium", oracle="differential")
                 return
 
         except httpx.HTTPError:
@@ -2437,7 +2457,7 @@ async def _module_race(target: str, client: httpx.AsyncClient) -> AsyncGenerator
                 url, True,
                 "Use database-level atomic operations (SELECT FOR UPDATE, Redis SETNX). "
                 "Implement idempotency keys. Use distributed locking for state changes.",
-                confidence="high")
+                confidence="high", oracle="differential")
 
 
 # ── Module: Business Logic ────────────────────────────────────────────────────
@@ -2467,7 +2487,7 @@ async def _module_business(target: str, client: httpx.AsyncClient,
                                     url, True,
                                     f"Server-side validate {test['field']} is positive. "
                                     f"Never trust client-supplied price/quantity.",
-                                    confidence="high")
+                                    confidence="high", oracle="extracted-value")
                     except Exception:
                         pass
             except httpx.HTTPError:
@@ -2493,7 +2513,7 @@ async def _module_business(target: str, client: httpx.AsyncClient,
                                 form["action"], True,
                                 "Never trust client-supplied price/quantity. "
                                 "Always calculate totals server-side from the product catalog.",
-                                confidence="medium")
+                                confidence="medium", oracle="bare-signal")
                     except httpx.HTTPError:
                         pass
 
@@ -2517,7 +2537,7 @@ async def _module_business(target: str, client: httpx.AsyncClient,
                             url, True,
                             "Validate quantity on server-side: reject values <= 0. "
                             "Apply business rule checks before processing payment.",
-                            confidence="medium")
+                            confidence="medium", oracle="bare-signal")
                 except Exception:
                     pass
         except httpx.HTTPError:
@@ -2536,7 +2556,7 @@ async def _module_business(target: str, client: httpx.AsyncClient,
                 f"URL: {feedback_url}\nPayload: {{rating: 0}}\nStatus: {r.status_code}",
                 feedback_url, True,
                 "Validate rating range server-side (1 <= rating <= 5). Never trust client-side validation alone.",
-                confidence="high")
+                confidence="high", oracle="bare-signal")
     except httpx.HTTPError:
         pass
 
@@ -2561,7 +2581,7 @@ async def _module_business(target: str, client: httpx.AsyncClient,
                         register_url, True,
                         "Use a DTO/allowlist — only accept expected fields (email, password). "
                         "Explicitly exclude role, isAdmin, and privilege fields from user registration.",
-                        confidence="high")
+                        confidence="high", oracle="reflected")
             except Exception:
                 pass
     except httpx.HTTPError:
@@ -2594,7 +2614,7 @@ async def _module_graphql(target: str, client: httpx.AsyncClient) -> AsyncGenera
                             url, True,
                             "Disable introspection in production (`introspection: false` in server config). "
                             "Implement query depth limiting, complexity analysis, and persisted queries.",
-                            confidence="high")
+                            confidence="high", oracle="extracted-value")
 
                     # ── Batch query abuse ─────────────────────────────────────
                     yield _probe("graphql", "POST", url, note="batch query abuse test")
@@ -2610,7 +2630,7 @@ async def _module_graphql(target: str, client: httpx.AsyncClient) -> AsyncGenera
                             f"Batch response: {rb.text[:200]}", url, True,
                             "Disable query batching or limit batch size to ≤5. "
                             "Implement per-user query rate limiting at the resolver level.",
-                            confidence="high")
+                            confidence="high", oracle="extracted-value")
 
                     # ── Unauthenticated data access ───────────────────────────
                     for query in GRAPHQL_AUTH_BYPASS_QUERIES:
@@ -2625,7 +2645,7 @@ async def _module_graphql(target: str, client: httpx.AsyncClient) -> AsyncGenera
                                     f"Query returned user data without authentication: {query[:80]}",
                                     f"Response: {rq.text[:300]}", url, True,
                                     "Implement authentication checks on all sensitive GraphQL resolvers.",
-                                    confidence="high")
+                                    confidence="high", oracle="extracted-value")
                                 break
 
                     # ── Field suggestion / typo disclosure ────────────────────
@@ -2654,7 +2674,7 @@ async def _module_graphql(target: str, client: httpx.AsyncClient) -> AsyncGenera
                                 "Disable field suggestions in production (`suggestions: false`). "
                                 "In Apollo Server: `new ApolloServer({ introspection: false })` "
                                 "also disables suggestions. For GraphQL Yoga, set `maskedErrors`.",
-                                confidence="high")
+                                confidence="high", oracle="error-string")
                     except (httpx.HTTPError, Exception):
                         pass
 
@@ -2684,7 +2704,7 @@ async def _module_graphql(target: str, client: httpx.AsyncClient) -> AsyncGenera
                                 url, True,
                                 "Implement query depth limiting (max depth 5-7 for most APIs). "
                                 "Also implement query complexity analysis to cap total resolver calls.",
-                                confidence="medium")
+                                confidence="medium", oracle="timing")
                     except (httpx.HTTPError, asyncio.TimeoutError):
                         pass
 
@@ -2713,7 +2733,7 @@ async def _module_graphql(target: str, client: httpx.AsyncClient) -> AsyncGenera
                                 url, True,
                                 "Implement query complexity analysis that counts aliases. "
                                 "Reject queries above a complexity threshold (e.g., 1000 complexity units).",
-                                confidence="medium")
+                                confidence="medium", oracle="bare-signal")
                     except (httpx.HTTPError, Exception):
                         pass
 
@@ -2744,7 +2764,7 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
             "No JWT Token Provided",
             "Supply an Authorization: Bearer <token> header to enable JWT analysis.",
             "", target, False, "Provide JWT in auth_headers for JWT module to run.",
-            confidence="high")
+            confidence="high", oracle="bare-signal")
         return
 
     parts = token.split(".")
@@ -2767,7 +2787,7 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
         f"Header: {json.dumps(header_data)}\nClaims: {json.dumps(payload_data)}",
         target, False,
         "Minimize sensitive data in JWT payloads. Use opaque tokens for sensitive data.",
-        confidence="high")
+        confidence="high", oracle="bare-signal")
 
     # Check expiry
     exp = payload_data.get("exp")
@@ -2776,7 +2796,8 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
             "JWT Token is Expired",
             f"Token expired at {datetime.fromtimestamp(exp).isoformat()}. "
             f"Server should reject this but may not.",
-            f"exp: {exp}", target, False, "Verify expiry enforcement server-side.", confidence="low")
+            f"exp: {exp}", target, False, "Verify expiry enforcement server-side.",
+            confidence="low", oracle="bare-signal")
 
     # alg:none bypass
     none_header = base64.urlsafe_b64encode(
@@ -2841,7 +2862,7 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
                     target, True,
                     "Use a cryptographically random secret of ≥256 bits. "
                     "Rotate the secret immediately and invalidate all existing tokens.",
-                    confidence="high")
+                    confidence="high", oracle="extracted-value")
                 return
 
         # kid path traversal
@@ -2860,6 +2881,15 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
                 new_token = f"{new_header}.{parts[1]}.{new_sig}"
                 for path in ["/api/me", "/api/user"]:
                     try:
+                        # Baseline first — same discipline as the alg:none/RS256-confusion
+                        # checks above. Without it, a path that returns 200 for everyone
+                        # regardless of auth would false-positive as a confirmed kid
+                        # path-traversal bypass.
+                        kid_baseline_r = await client.get(
+                            target + path, headers={"Authorization": "Bearer invalid.invalid.invalid"}, timeout=8,
+                        )
+                        if kid_baseline_r.status_code == 200:
+                            continue  # endpoint doesn't enforce auth here — proves nothing
                         r = await client.get(target + path,
                                               headers={"Authorization": f"Bearer {new_token}"},
                                               timeout=8)
@@ -2868,11 +2898,13 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
                                 "JWT 'kid' Path Traversal",
                                 f"Server accepted JWT with kid={kid_payload}. "
                                 f"Attacker can control the key used for signature verification.",
-                                f"kid: {kid_payload}\nPath: {target + path}\nStatus: 200",
+                                f"kid: {kid_payload}\nPath: {target + path}\nStatus: 200, while a "
+                                f"garbage-token baseline to the same path was rejected (status "
+                                f"{kid_baseline_r.status_code}).",
                                 target + path, True,
                                 "Validate kid values against an allowlist. "
                                 "Never use kid values as file system paths.",
-                                confidence="medium")
+                                confidence="medium", oracle="status-flip")
                     except httpx.HTTPError:
                         pass
 
@@ -2904,7 +2936,7 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
                                 target + jwks_path, False,
                                 "Explicitly pin allowed algorithms in JWT verification (e.g., `algorithms=['RS256']`). "
                                 "Never allow the `alg` header to determine which algorithm to use for verification.",
-                                confidence="medium")
+                                confidence="medium", oracle="bare-signal")
                             # Try RS256→HS256 confusion: sign with public key as HMAC secret
                             try:
                                 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicNumbers
@@ -3002,7 +3034,7 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
                 "Validate `jku` and `x5u` values against an explicit allowlist of trusted JWKS URLs. "
                 "Reject any JWT whose `jku`/`x5u` does not match the server's registered key endpoint. "
                 "Never fetch JWK Sets from URLs embedded in untrusted JWT headers.",
-                confidence="medium")
+                confidence="medium", oracle="bare-signal")
 
     # Test expired token acceptance
     if exp and exp < time.time():
@@ -3019,7 +3051,7 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
                         target + path, True,
                         "Enforce JWT expiry (`exp` claim) on every request. "
                         "Implement token refresh flows with short-lived access tokens.",
-                        confidence="high")
+                        confidence="high", oracle="status-flip")
                     break
             except httpx.HTTPError:
                 pass
@@ -3046,6 +3078,17 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
                     test_endpoints = ["/rest/user/whoami", "/api/me", "/api/user", "/api/Users"]
                     for ep in test_endpoints[:2]:
                         try:
+                            # Baseline first — same discipline as the alg_none_bypass check
+                            # above. Without it, a path that returns 200 for everyone
+                            # regardless of auth would false-positive as a confirmed bypass.
+                            # This block tests a separately-sourced token (the live client's
+                            # own Authorization header, not the auth_headers param), so it's
+                            # kept rather than merged into the earlier check.
+                            none2_baseline_r = await client.get(
+                                target + ep, headers={"Authorization": "Bearer invalid.invalid.invalid"}, timeout=8,
+                            )
+                            if none2_baseline_r.status_code == 200:
+                                continue  # endpoint doesn't enforce auth here — proves nothing
                             r = await client.get(target + ep,
                                 headers={"Authorization": f"Bearer {forged_token}"},
                                 timeout=8)
@@ -3063,7 +3106,7 @@ async def _module_jwt(target: str, client: httpx.AsyncClient,
                                             target + ep, True,
                                             "Explicitly whitelist allowed algorithms server-side (HS256, RS256). "
                                             "Reject tokens with alg:none. Use a JWT library that disallows none by default.",
-                                            confidence="high")
+                                            confidence="high", oracle="status-flip")
                                         break
                                 except Exception:
                                     pass
@@ -3092,7 +3135,7 @@ async def _module_redirect(target: str, client: httpx.AsyncClient) -> AsyncGener
                         test_url, True,
                         "Validate redirect targets against an allowlist. "
                         "Reject absolute URLs or URLs with different origins.",
-                        confidence="high")
+                        confidence="high", oracle="redirect-location")
                     return
             except httpx.HTTPError:
                 pass
@@ -3137,7 +3180,7 @@ async def _module_auth_bypass(target: str, client: httpx.AsyncClient,
                     url, True,
                     f"Block access to {path} in your web server configuration. "
                     f"Remove sensitive files from the webroot.",
-                    confidence="high")
+                    confidence="high", oracle="extracted-value")
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
@@ -3165,7 +3208,7 @@ async def _module_auth_bypass(target: str, client: httpx.AsyncClient,
                         url, True,
                         f"Restrict {path} to internal networks or authenticated admin users. "
                         f"Add firewall rules to block public access to monitoring endpoints.",
-                        confidence="high")
+                        confidence="high", oracle="extracted-value")
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
@@ -3189,7 +3232,7 @@ async def _module_auth_bypass(target: str, client: httpx.AsyncClient,
                         f"URL: {url}\nSnippet: {body[:300]}",
                         url, True,
                         "Disable directory listing in web server config. Add index.html to all directories.",
-                        confidence="high")
+                        confidence="high", oracle="extracted-value")
                 # Look for downloadable sensitive file links
                 elif any(ext in body.lower() for ext in [".md\"", ".pdf\"", ".sql\"", ".bak\"", ".zip\""]):
                     yield _finding("auth_bypass", "file_download_exposure", "high",
@@ -3198,7 +3241,7 @@ async def _module_auth_bypass(target: str, client: httpx.AsyncClient,
                         f"URL: {url}\nSnippet: {body[:300]}",
                         url, True,
                         "Restrict access to file directories. Move sensitive files outside webroot.",
-                        confidence="medium")
+                        confidence="medium", oracle="bare-signal")
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
@@ -3226,7 +3269,7 @@ async def _module_auth_bypass(target: str, client: httpx.AsyncClient,
                         url, True,
                         "Never use X-Forwarded-For for access control. "
                         "Use authentication tokens and server-side session validation.",
-                        confidence="high")
+                        confidence="high", oracle="differential")
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
@@ -3257,7 +3300,7 @@ async def _module_auth_bypass(target: str, client: httpx.AsyncClient,
                             url, True,
                             f"Strip {bypass_header} headers at the edge before routing to application servers. "
                             f"Do not use URL headers for access control decisions.",
-                            confidence="medium")
+                            confidence="medium", oracle="differential")
                         break
             except httpx.HTTPError:
                 pass
@@ -3294,7 +3337,7 @@ async def _module_auth_bypass(target: str, client: httpx.AsyncClient,
                         url, True,
                         "Normalize URL paths before applying access controls. "
                         "Apply auth middleware after path normalization, not before.",
-                        confidence="medium")
+                        confidence="medium", oracle="differential")
                     break
         except httpx.HTTPError:
             pass
@@ -3332,7 +3375,7 @@ async def _module_takeover(target: str, client: httpx.AsyncClient) -> AsyncGener
                     target, True,
                     f"Claim or decommission the unclaimed {service} resource. "
                     f"Remove CNAME records pointing to unclaimed services.",
-                    confidence="high")
+                    confidence="high", oracle="bare-signal")
                 return
     except httpx.HTTPError:
         pass
@@ -3364,7 +3407,7 @@ async def _module_nosql(target: str, client: httpx.AsyncClient,
                                 url, True,
                                 "Validate and sanitize all inputs. Use allowlists for query params. "
                                 "Disable MongoDB operator injection with schema validation.",
-                                confidence="medium")
+                                confidence="medium", oracle="bare-signal")
                             break
                     except Exception:
                         pass
@@ -3395,7 +3438,7 @@ async def _module_nosql(target: str, client: httpx.AsyncClient,
                                 url, True,
                                 "Use MongoDB schema validation to reject operator objects in string fields. "
                                 "Never pass raw request body objects directly to database queries.",
-                                confidence="high")
+                                confidence="high", oracle="extracted-value")
                             break
                     except Exception:
                         pass
@@ -3423,7 +3466,7 @@ async def _module_nosql(target: str, client: httpx.AsyncClient,
                         f"Form: {form['action']}\nField: {field}\nStatus: {r.status_code}",
                         form["action"], False,
                         "Validate all form inputs server-side. Reject operator-like strings in string fields.",
-                        confidence="low")
+                        confidence="low", oracle="bare-signal")
             except httpx.HTTPError:
                 pass
         await asyncio.sleep(0)
@@ -3483,7 +3526,7 @@ async def _module_ssti(target: str, client: httpx.AsyncClient,
                         target, True,
                         "Never pass user-supplied data to template rendering functions. "
                         "Use sandboxed template environments. Treat all user input as literals.",
-                        confidence="high")
+                        confidence="high", oracle="extracted-value")
                     return
             except httpx.HTTPError:
                 pass
@@ -3523,7 +3566,7 @@ async def _module_ssti(target: str, client: httpx.AsyncClient,
                             action, True,
                             "Never render user input via template engines. "
                             "Use SandboxedEnvironment (Jinja2) or equivalent.",
-                            confidence="high")
+                            confidence="high", oracle="extracted-value")
                         return
                 except httpx.HTTPError:
                     pass
@@ -3582,7 +3625,7 @@ async def _module_xxe(target: str, client: httpx.AsyncClient) -> AsyncGenerator[
                         "Disable external entity processing in XML parsers. "
                         "Use XMLConstants.FEATURE_SECURE_PROCESSING in Java. "
                         "Set libxml_disable_entity_loader(true) in PHP.",
-                        confidence="high")
+                        confidence="high", oracle="extracted-value")
                     break
                 # Check for SSRF via XXE
                 if any(ind in body for ind in ["ami-id", "instance-id", "computeMetadata"]):
@@ -3592,7 +3635,7 @@ async def _module_xxe(target: str, client: httpx.AsyncClient) -> AsyncGenerator[
                         f"Endpoint: {url}\nEvidence: cloud metadata in response",
                         url, True,
                         "Disable external entities. Block access to internal metadata endpoints.",
-                        confidence="high")
+                        confidence="high", oracle="extracted-value")
                 # Check for XML parsing error (server accepts XML)
                 if r.status_code != 404 and any(ind in body.lower() for ind in
                         ["xml", "entity", "parsing", "malformed", "syntax error"]):
@@ -3604,7 +3647,7 @@ async def _module_xxe(target: str, client: httpx.AsyncClient) -> AsyncGenerator[
                         url, True,
                         "Configure XML parser to disallow DOCTYPE declarations and external entities. "
                         "Validate and sanitize all XML input.",
-                        confidence="low")
+                        confidence="low", oracle="bare-signal")
                     break
             except httpx.HTTPError:
                 pass
@@ -3627,7 +3670,7 @@ async def _module_xxe(target: str, client: httpx.AsyncClient) -> AsyncGenerator[
                     f"Endpoint: {juiceshop_b2b}\nEvidence: {body[:300]}",
                     juiceshop_b2b, True,
                     "Disable external XML entity processing on the order ingestion endpoint.",
-                    confidence="high")
+                    confidence="high", oracle="extracted-value")
             elif r.status_code in (200, 201, 400):
                 yield _finding("xxe", "xxe_b2b_accepts_xml", "info",
                     "B2B XML Endpoint Active — Test Manually for XXE",
@@ -3636,7 +3679,7 @@ async def _module_xxe(target: str, client: httpx.AsyncClient) -> AsyncGenerator[
                     f"Endpoint: {juiceshop_b2b}\nStatus: {r.status_code}",
                     juiceshop_b2b, False,
                     "Audit XML parsing configuration for external entity handling.",
-                    confidence="low")
+                    confidence="low", oracle="bare-signal")
     except httpx.HTTPError:
         pass
 
@@ -3671,7 +3714,7 @@ async def _module_file_upload(target: str, client: httpx.AsyncClient,
                     f"Endpoint: {url}\nFile size: 150 KB\nStatus: {r.status_code}",
                     url, True,
                     "Enforce file size limits server-side. Reject files exceeding the allowed size.",
-                    confidence="medium")
+                    confidence="medium", oracle="bare-signal")
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
@@ -3689,7 +3732,7 @@ async def _module_file_upload(target: str, client: httpx.AsyncClient,
                     url, True,
                     "Validate file type by content (magic bytes), not just extension or MIME type. "
                     "Use a file type allowlist enforced server-side.",
-                    confidence="medium")
+                    confidence="medium", oracle="bare-signal")
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
@@ -3711,7 +3754,7 @@ async def _module_file_upload(target: str, client: httpx.AsyncClient,
                     url, True,
                     "Sanitize SVG uploads. Disable XML external entities before processing uploads. "
                     "Use server-side SVG sanitization library.",
-                    confidence="high")
+                    confidence="high", oracle="extracted-value")
         except (httpx.HTTPError, Exception):
             pass
         await asyncio.sleep(0)
@@ -3729,7 +3772,7 @@ async def _module_file_upload(target: str, client: httpx.AsyncClient,
                     url, True,
                     "Sanitize file names server-side. Strip null bytes before processing. "
                     "Never execute uploaded files.",
-                    confidence="high")
+                    confidence="high", oracle="extracted-value")
         except (httpx.HTTPError, Exception):
             pass
         await asyncio.sleep(0)
@@ -3784,7 +3827,7 @@ async def _module_broken_auth(target: str, client: httpx.AsyncClient) -> AsyncGe
                             url, True,
                             "Enforce strong password policy. Rotate all default credentials. "
                             "Implement account lockout after failed attempts.",
-                            confidence="high")
+                            confidence="high", oracle="extracted-value")
                         break  # found one set, move on
                 except Exception:
                     pass
@@ -3813,7 +3856,7 @@ async def _module_broken_auth(target: str, client: httpx.AsyncClient) -> AsyncGe
             url, True,
             "Implement account lockout or exponential backoff after N failed attempts. "
             "Use CAPTCHA for login endpoints. Consider IP-based rate limiting.",
-            confidence="medium")
+            confidence="medium", oracle="bare-signal")
 
     # Test password reset — verify link expiry
     reset_paths = ["/forgot-password", "/api/forgot-password", "/rest/user/reset-password"]
@@ -3830,7 +3873,7 @@ async def _module_broken_auth(target: str, client: httpx.AsyncClient) -> AsyncGe
                     reset_url, False,
                     "Ensure reset tokens: (1) expire within 15 minutes, (2) are invalidated after use, "
                     "(3) are cryptographically random, (4) sent only to the registered email.",
-                    confidence="low")
+                    confidence="low", oracle="bare-signal")
                 break
         except httpx.HTTPError:
             pass
@@ -3866,7 +3909,7 @@ async def _module_info_disclosure(target: str, client: httpx.AsyncClient,
                             url, True,
                             "Remove the /ftp directory from web root or restrict access. "
                             "Never store sensitive documents in publicly accessible directories.",
-                            confidence="high")
+                            confidence="high", oracle="extracted-value")
                     continue
 
                 # Check for specific sensitive file indicators
@@ -3879,7 +3922,7 @@ async def _module_info_disclosure(target: str, client: httpx.AsyncClient,
                         url, True,
                         "Remove backup files from the web root. Use .gitignore and deployment pipelines "
                         "to ensure backup files are never deployed.",
-                        confidence="high")
+                        confidence="high", oracle="bare-signal")
                     continue
 
                 if path == "/.env" or "/.env." in path:
@@ -3895,7 +3938,7 @@ async def _module_info_disclosure(target: str, client: httpx.AsyncClient,
                         url, True,
                         "Never commit or deploy .env files to web-accessible directories. "
                         "Use environment variables injected at runtime via secrets management.",
-                        confidence="high")
+                        confidence="high", oracle="extracted-value" if sensitive_keys else "bare-signal")
                     continue
 
                 if path in ("/.git/config", "/.git/HEAD", "/.git/COMMIT_EDITMSG"):
@@ -3907,7 +3950,7 @@ async def _module_info_disclosure(target: str, client: httpx.AsyncClient,
                         url, True,
                         "Block access to the .git directory via web server config. "
                         "Add `deny all` for /.git/ in nginx/Apache.",
-                        confidence="high")
+                        confidence="high", oracle="bare-signal")
                     continue
 
                 if path in ("/access.log", "/error.log", "/logs/access.log") or "access.log" in path:
@@ -3919,7 +3962,7 @@ async def _module_info_disclosure(target: str, client: httpx.AsyncClient,
                             f"URL: {url}\nPreview: {body[:300]}",
                             url, True,
                             "Store logs outside the web root. Restrict access to log files.",
-                            confidence="high")
+                            confidence="high", oracle="extracted-value")
                     continue
 
                 if path == "/robots.txt":
@@ -3935,7 +3978,7 @@ async def _module_info_disclosure(target: str, client: httpx.AsyncClient,
                             url, False,
                             "Review all Disallowed paths in robots.txt for sensitive content. "
                             "robots.txt is public — do not use it to hide sensitive endpoints.",
-                            confidence="low")
+                            confidence="low", oracle="bare-signal")
                     continue
 
                 if path == "/.well-known/security.txt":
@@ -3945,7 +3988,7 @@ async def _module_info_disclosure(target: str, client: httpx.AsyncClient,
                         f"URL: {url}\nContent: {body[:200]}",
                         url, False,
                         "Good security practice. Ensure the contact information is current.",
-                        confidence="low")
+                        confidence="low", oracle="bare-signal")
                     continue
 
                 # Generic: sensitive file accessible
@@ -3958,7 +4001,7 @@ async def _module_info_disclosure(target: str, client: httpx.AsyncClient,
                         url, True,
                         "Remove sensitive files from the web root. Use deployment pipelines "
                         "to prevent secrets and config files from being deployed publicly.",
-                        confidence="medium")
+                        confidence="medium", oracle="extracted-value")
 
             elif r.status_code == 403:
                 # 403 means the file exists but is blocked — still worth noting for critical paths
@@ -3971,7 +4014,7 @@ async def _module_info_disclosure(target: str, client: httpx.AsyncClient,
                         url, False,
                         "Ensure the block cannot be bypassed. Test with X-Original-URL, "
                         "X-Rewrite-URL, and path traversal variants.",
-                        confidence="low")
+                        confidence="low", oracle="bare-signal")
 
         except httpx.HTTPError:
             pass
@@ -3987,7 +4030,11 @@ async def _module_info_disclosure(target: str, client: httpx.AsyncClient,
     for path, indicator, description in juice_files:
         try:
             r = await client.get(target + path, timeout=6)
-            if r.status_code == 200 and (indicator in r.text or len(r.content) > 10):
+            # Originally `indicator in r.text or len(r.content) > 10` — the OR-with-
+            # bare-size-check branch meant ANY response over 10 bytes at these
+            # hardcoded paths triggered a "high" finding even with zero indicator
+            # match. Found via a 2026-09-15 audit; now requires the real indicator.
+            if r.status_code == 200 and indicator in r.text:
                 yield _finding("info_disclosure", "forgotten_file_" + path.split("/")[-1].replace(".", "_"),
                     "high", f"Forgotten File Exposed: {path}",
                     description + f". File is publicly accessible without authentication.",
@@ -3995,7 +4042,7 @@ async def _module_info_disclosure(target: str, client: httpx.AsyncClient,
                     target + path, True,
                     "Remove all sensitive files from the /ftp and similar public directories. "
                     "Audit web-accessible directories regularly.",
-                    confidence="high")
+                    confidence="high", oracle="extracted-value")
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
@@ -4033,7 +4080,7 @@ async def _module_deserialization(target: str, client: httpx.AsyncClient,
                                     url, True,
                                     "Freeze Object.prototype in Node.js: `Object.freeze(Object.prototype)`. "
                                     "Use JSON schema validation to reject __proto__ keys.",
-                                    confidence="medium")
+                                    confidence="medium", oracle="extracted-value")
                     except Exception:
                         pass
             except httpx.HTTPError:
@@ -4058,7 +4105,7 @@ async def _module_deserialization(target: str, client: httpx.AsyncClient,
                                     f"URL: {url}?{pp_param}\nResponse: {str(data)[:200]}",
                                     url, True,
                                     "Sanitize URL query parameters. Reject keys containing __proto__ or constructor.",
-                                    confidence="medium")
+                                    confidence="medium", oracle="extracted-value")
                         except Exception:
                             pass
                 except httpx.HTTPError:
@@ -4166,7 +4213,7 @@ async def _module_rate_limit(target: str, client: httpx.AsyncClient) -> AsyncGen
                 login_url, True,
                 "Implement account lockout after 5-10 failed attempts. "
                 "Add exponential backoff or CAPTCHA. Use IP-based rate limiting.",
-                confidence="high")
+                confidence="high", oracle="bare-signal")
         else:
             yield _finding("rate_limit", "login_lockout_active", "info",
                 "Brute Force Protection Active on Login",
@@ -4174,7 +4221,7 @@ async def _module_rate_limit(target: str, client: httpx.AsyncClient) -> AsyncGen
                 f"Endpoint: {login_url}\nBlocked after {i+1} attempts",
                 login_url, False,
                 "Rate limiting is working. Verify the threshold and ensure it applies per-IP and per-account.",
-                confidence="high")
+                confidence="high", oracle="bare-signal")
 
         # ── Test 2: Check if X-Forwarded-For bypasses rate limiting ─────────
         # Reset by spoofing IP — some apps rate-limit by IP but trust X-Forwarded-For
@@ -4201,7 +4248,7 @@ async def _module_rate_limit(target: str, client: httpx.AsyncClient) -> AsyncGen
                 login_url, True,
                 "Never use X-Forwarded-For for rate limiting decisions unless behind a trusted proxy. "
                 "Rate limit by both account identity AND real connection IP.",
-                confidence="medium")
+                confidence="medium", oracle="differential")
 
     # ── Test 3: Password reset throttling ────────────────────────────────────
     reset_candidates = ["/api/forgot-password", "/rest/user/reset-password", "/forgot-password", "/api/auth/forgot-password"]
@@ -4222,7 +4269,7 @@ async def _module_rate_limit(target: str, client: httpx.AsyncClient) -> AsyncGen
                     url, True,
                     "Rate-limit password reset requests per email address and per IP. "
                     "Return identical responses for valid/invalid emails (prevent enumeration).",
-                    confidence="medium")
+                    confidence="medium", oracle="bare-signal")
                 break
         except httpx.HTTPError:
             continue
@@ -4265,7 +4312,7 @@ async def _module_session(target: str, client: httpx.AsyncClient) -> AsyncGenera
                 f"Set-Cookie: {cookie_str[:200]}",
                 target, True,
                 "Add HttpOnly flag to all session cookies: Set-Cookie: name=value; HttpOnly",
-                confidence="high")
+                confidence="high", oracle="bare-signal")
 
         if "secure" not in cookie_lower:
             yield _finding("session", "cookie_no_secure", "medium",
@@ -4275,7 +4322,7 @@ async def _module_session(target: str, client: httpx.AsyncClient) -> AsyncGenera
                 f"Set-Cookie: {cookie_str[:200]}",
                 target, True,
                 "Add Secure flag to all session cookies: Set-Cookie: name=value; Secure",
-                confidence="high")
+                confidence="high", oracle="bare-signal")
 
         if "samesite" not in cookie_lower:
             yield _finding("session", "cookie_no_samesite", "low",
@@ -4285,7 +4332,7 @@ async def _module_session(target: str, client: httpx.AsyncClient) -> AsyncGenera
                 f"Set-Cookie: {cookie_str[:200]}",
                 target, True,
                 "Set SameSite=Lax or SameSite=Strict on all session cookies.",
-                confidence="medium")
+                confidence="medium", oracle="bare-signal")
 
     # ── Test 2: Session fixation ──────────────────────────────────────────────
     # Capture session ID before login — if it stays the same after login, fixation is possible
@@ -4314,7 +4361,7 @@ async def _module_session(target: str, client: httpx.AsyncClient) -> AsyncGenera
                             target + path, True,
                             "Always generate a new session ID after successful authentication. "
                             "Invalidate the old session immediately.",
-                            confidence="medium")
+                            confidence="medium", oracle="differential")
                     break
             except httpx.HTTPError:
                 continue
@@ -4337,7 +4384,7 @@ async def _module_session(target: str, client: httpx.AsyncClient) -> AsyncGenera
                         url, True,
                         "Invalidate the server-side session token on logout. "
                         "Do not rely on client-side cookie deletion.",
-                        confidence="medium")
+                        confidence="medium", oracle="status-flip")
                 break
         except httpx.HTTPError:
             continue
@@ -4378,7 +4425,7 @@ async def _module_http_method(target: str, client: httpx.AsyncClient,
                             url, True,
                             f"Restrict HTTP methods per endpoint. Return 405 Method Not Allowed "
                             f"for unexpected methods. Use explicit method routing.",
-                            confidence="medium")
+                            confidence="medium", oracle="bare-signal")
                         break
                 except httpx.HTTPError:
                     pass
@@ -4408,7 +4455,7 @@ async def _module_http_method(target: str, client: httpx.AsyncClient,
                             url, True,
                             "Ignore X-HTTP-Method-Override headers if not explicitly needed. "
                             "If used, validate override is allowed for the endpoint.",
-                            confidence="high")
+                            confidence="high", oracle="status-flip")
                         break
         except httpx.HTTPError:
             pass
@@ -4425,7 +4472,7 @@ async def _module_http_method(target: str, client: httpx.AsyncClient,
                 f"TRACE / → {r_trace.status_code}\nBody: {r_trace.text[:200]}",
                 target, True,
                 "Disable TRACE method in web server configuration.",
-                confidence="high")
+                confidence="high", oracle="bare-signal")
     except httpx.HTTPError:
         pass
 
@@ -4471,7 +4518,7 @@ async def _module_2fa_bypass(target: str, client: httpx.AsyncClient) -> AsyncGen
                             active_otp_url, True,
                             "Validate OTP values server-side — reject empty, null, or zero values. "
                             "Implement a TOTP library with proper validation.",
-                            confidence="high")
+                            confidence="high", oracle="bare-signal")
                         break
                 except Exception:
                     pass
@@ -4501,7 +4548,7 @@ async def _module_2fa_bypass(target: str, client: httpx.AsyncClient) -> AsyncGen
             active_otp_url, True,
             "Rate limit OTP verification to 3-5 attempts before locking the session. "
             "Implement a time window (e.g. 1 OTP attempt per 30 seconds).",
-            confidence="high")
+            confidence="high", oracle="bare-signal")
 
     # ── Test 3: OTP step skipping ─────────────────────────────────────────────
     # Try to access authenticated resources without completing 2FA step
@@ -4521,7 +4568,7 @@ async def _module_2fa_bypass(target: str, client: httpx.AsyncClient) -> AsyncGen
                             target + path, True,
                             "Enforce 2FA completion at the session level, not just the login step. "
                             "Mark sessions as 'pending_mfa' and reject requests until OTP is verified.",
-                            confidence="medium")
+                            confidence="medium", oracle="bare-signal")
                         break
                 except Exception:
                     pass
