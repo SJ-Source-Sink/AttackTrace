@@ -483,9 +483,28 @@ async def export_findings(
     findings = result.scalars().all()
 
     if fmt in ("html", "pdf"):
-        from app.services.export_service import render_findings_html, html_to_pdf_bytes
+        from app.services.export_service import render_findings_html_async, html_to_pdf_bytes
+        from app.models.db.asset import Asset
 
-        html = render_findings_html(findings, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
+        # Findings have no screenshot of their own — they inherit the one
+        # their linked asset already has, via Finding.asset_id (only reliably
+        # populated as of the 2026-09-14 asset-linking fix in
+        # scan_worker.py's _persist_session_results — older/unresolved
+        # findings simply get no screenshot, not an error).
+        asset_ids = {f.asset_id for f in findings if f.asset_id}
+        screenshot_urls: dict = {}
+        if asset_ids:
+            asset_rows = await db.execute(
+                select(Asset.id, Asset.screenshot_url).where(Asset.id.in_(asset_ids), Asset.screenshot_url.isnot(None))
+            )
+            shots_by_asset = {row[0]: row[1] for row in asset_rows.all()}
+            screenshot_urls = {
+                f.id: shots_by_asset[f.asset_id] for f in findings if f.asset_id in shots_by_asset
+            }
+
+        html = await render_findings_html_async(
+            findings, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), screenshot_urls=screenshot_urls,
+        )
         if fmt == "html":
             return StreamingResponse(
                 iter([html]), media_type="text/html",

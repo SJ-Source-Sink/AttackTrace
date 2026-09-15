@@ -110,19 +110,41 @@ def _sev_badge(sev: str) -> str:
     return f'<span class="sev-badge" style="background:{color}">{escape(sev or "")}</span>'
 
 
-def render_findings_html(findings: Iterable, generated_at: str, org_name: str = "") -> str:
+def render_findings_html(
+    findings: Iterable, generated_at: str, org_name: str = "",
+    screenshot_urls: Optional[dict] = None, include_screenshots: bool = True,
+) -> str:
+    """screenshot_urls, when given, maps finding.id -> Asset.screenshot_url
+    for findings whose affected_asset resolves to an Asset with a real
+    screenshot — findings have no screenshot of their own, they inherit the
+    one their linked asset already has (Finding.asset_id, backfilled/fixed
+    2026-09-14 — see scan_worker.py's _persist_session_results)."""
+    dash = '<span class="muted">—</span>'
+    screenshot_urls = screenshot_urls or {}
     rows_html = []
+    screenshots_embedded = 0
+    screenshottable = sum(1 for f in findings if screenshot_urls.get(getattr(f, "id", None)))
+
     for f in findings:
         sev = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
         st = f.status.value if hasattr(f.status, "value") else str(f.status)
         cve = ", ".join(f.cve or []) if getattr(f, "cve", None) else ""
-        dash = '<span class="muted">—</span>'
         cvss_cell = escape(str(f.cvss_score)) if f.cvss_score is not None else dash
         cve_cell = escape(cve) if cve else dash
         conf_cell = escape(f.confidence or "") if f.confidence else dash
         created_cell = escape(f.created_at.strftime("%Y-%m-%d") if f.created_at else "")
+
+        screenshot_cell = dash
+        shot_url = screenshot_urls.get(f.id) if include_screenshots else None
+        if shot_url and screenshots_embedded < _MAX_SCREENSHOTS:
+            data_uri = _screenshot_data_uri(shot_url)
+            if data_uri:
+                screenshots_embedded += 1
+                screenshot_cell = f'<img src="{data_uri}" alt="" class="thumb">'
+
         rows_html.append(
             "<tr>"
+            f"<td>{screenshot_cell}</td>"
             f"<td>{_sev_badge(sev)}</td>"
             f"<td>{escape(f.title or '')}</td>"
             f"<td>{escape(st)}</td>"
@@ -135,28 +157,46 @@ def render_findings_html(findings: Iterable, generated_at: str, org_name: str = 
         )
 
     subtitle = f"{org_name + ' — ' if org_name else ''}{len(rows_html)} finding(s) — generated {escape(generated_at)}"
+    if screenshottable > _MAX_SCREENSHOTS:
+        subtitle += f' <span class="muted">({_MAX_SCREENSHOTS} of {screenshottable} available screenshots shown)</span>'
+
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Findings Export</title><style>{_BASE_CSS}
-  col.c-sev {{ width: 8%; }} col.c-title {{ width: 26%; }} col.c-status {{ width: 9%; }}
-  col.c-asset {{ width: 20%; }} col.c-cvss {{ width: 6%; }} col.c-cve {{ width: 12%; }}
-  col.c-conf {{ width: 9%; }} col.c-date {{ width: 10%; }}
+  col.c-shot {{ width: 11%; }} col.c-sev {{ width: 7%; }} col.c-title {{ width: 22%; }} col.c-status {{ width: 8%; }}
+  col.c-asset {{ width: 17%; }} col.c-cvss {{ width: 5%; }} col.c-cve {{ width: 10%; }}
+  col.c-conf {{ width: 8%; }} col.c-date {{ width: 8%; }}
+  img.thumb {{ display: block; width: 100%; max-width: 130px; border-radius: 3px; border: 1px solid #e5e7eb; }}
 </style></head>
 <body>
   <h1>Findings Export</h1>
   <p class="subtitle">{subtitle}</p>
   <table>
     <colgroup>
-      <col class="c-sev"><col class="c-title"><col class="c-status"><col class="c-asset">
+      <col class="c-shot"><col class="c-sev"><col class="c-title"><col class="c-status"><col class="c-asset">
       <col class="c-cvss"><col class="c-cve"><col class="c-conf"><col class="c-date">
     </colgroup>
     <thead><tr>
-      <th>Severity</th><th>Title</th><th>Status</th><th>Affected Asset</th>
+      <th>Screenshot</th><th>Severity</th><th>Title</th><th>Status</th><th>Affected Asset</th>
       <th>CVSS</th><th>CVE</th><th>Confidence</th><th>Found</th>
     </tr></thead>
-    <tbody>{''.join(rows_html) if rows_html else '<tr><td colspan="8" class="muted">No findings match the current filters.</td></tr>'}</tbody>
+    <tbody>{''.join(rows_html) if rows_html else '<tr><td colspan="9" class="muted">No findings match the current filters.</td></tr>'}</tbody>
   </table>
   <p class="footer">Exported from AttackTrace</p>
 </body></html>"""
+
+
+async def render_findings_html_async(
+    findings: Iterable, generated_at: str, org_name: str = "",
+    screenshot_urls: Optional[dict] = None, include_screenshots: bool = True,
+) -> str:
+    """Async wrapper — see render_assets_html_async's docstring for why
+    (screenshot embedding does real blocking disk I/O + image decoding)."""
+    loop = asyncio.get_event_loop()
+    findings_list = list(findings)
+    return await loop.run_in_executor(
+        None,
+        lambda: render_findings_html(findings_list, generated_at, org_name, screenshot_urls, include_screenshots),
+    )
 
 
 def render_assets_html(
