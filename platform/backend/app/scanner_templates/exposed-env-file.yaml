@@ -1,0 +1,27 @@
+id: exposed-env-file
+name: Exposed .env File
+severity: critical
+category: info_disclosure
+description: >
+  A .env file is publicly accessible and contains real environment-variable
+  secret keys. Attackers can read database credentials, API keys, and
+  other secrets directly from the deployed application.
+remediation: >
+  Never deploy .env files to a web-accessible directory. Inject secrets as
+  real environment variables at runtime via your deployment pipeline
+  instead, and block access to dotfiles at the web server layer.
+references:
+  - https://owasp.org/www-community/vulnerabilities/Information_exposure_through_debug_information
+oracle: extracted-value
+request:
+  method: GET
+  path: "/.env"
+matcher:
+  type: status-and-body-contains
+  status: 200
+  any_of:
+    - "DB_PASSWORD"
+    - "SECRET_KEY"
+    - "API_KEY"
+    - "AWS_SECRET"
+    - "DATABASE_URL"

@@ -1,0 +1,19 @@
+id: missing-hsts-header
+name: Missing HSTS Header
+severity: medium
+category: headers
+description: >
+  No Strict-Transport-Security header is present on the response. Without
+  it, a user's first visit (or any visit after clearing cookies) can be
+  downgraded from HTTPS to HTTP by a network attacker (SSL stripping).
+remediation: >
+  Add: Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+references:
+  - https://owasp.org/www-project-secure-headers/#http-strict-transport-security
+oracle: bare-signal
+request:
+  method: GET
+  path: "/"
+matcher:
+  type: header-absent
+  header: strict-transport-security

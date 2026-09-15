@@ -1,0 +1,22 @@
+id: cors-wildcard-open
+name: CORS Wildcard Origin
+severity: medium
+category: cors
+description: >
+  The Access-Control-Allow-Origin header is set to '*' (wildcard),
+  allowing any website to read this endpoint's response cross-origin via
+  fetch(). If the response ever contains authenticated or sensitive data,
+  this exposes it to any origin.
+remediation: >
+  Replace the wildcard with an explicit allowlist of trusted origins.
+  Never combine a wildcard ACAO with Access-Control-Allow-Credentials: true.
+references:
+  - https://portswigger.net/web-security/cors
+oracle: bare-signal
+request:
+  method: GET
+  path: "/"
+matcher:
+  type: header-value-contains
+  header: access-control-allow-origin
+  contains: "*"

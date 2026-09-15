@@ -1,0 +1,42 @@
+id: generic-sqli-query-param
+name: Generic SQL Injection (Query Parameter)
+severity: critical
+category: sqli
+description: >
+  Injecting a bare quote character into a URL query parameter produced a
+  DB-vendor-specific error message that was NOT present in a benign-value
+  baseline response — the target is concatenating unsanitized input
+  directly into a SQL statement.
+remediation: >
+  Use parameterized queries / an ORM for all database access. Never
+  concatenate user input into SQL strings. Disable verbose SQL error
+  messages in production.
+references:
+  - https://owasp.org/www-community/attacks/SQL_Injection
+oracle: differential
+request:
+  method: GET
+  path: "/"
+baseline:
+  value: "probe"
+payloads:
+  - "'"
+  - "\""
+params:
+  - q
+  - search
+  - id
+  - name
+  - category
+matcher:
+  type: word-not-in-baseline
+  words:
+    - "you have an error in your sql syntax"
+    - "warning: mysql_"
+    - "unclosed quotation mark after the character string"
+    - "quoted string not properly terminated"
+    - "pg_query(): query failed"
+    - "sqlite3.operationalerror"
+    - "odbc sql server driver"
+    - "ora-00933"
+    - "sqlstate["

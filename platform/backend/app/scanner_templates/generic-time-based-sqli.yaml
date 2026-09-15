@@ -1,0 +1,28 @@
+id: generic-time-based-sqli
+name: Time-Based Blind SQL Injection (Query Parameter)
+severity: critical
+category: sqli
+description: >
+  A SLEEP-style SQL injection payload in a URL query parameter caused the
+  response to consistently take longer than a clean threshold across
+  repeated attempts — consistent with blind time-based SQL injection.
+remediation: >
+  Use parameterized queries / an ORM for all database access. Never
+  concatenate user input into SQL strings, including in WHERE clauses used
+  only for filtering.
+references:
+  - https://owasp.org/www-community/attacks/Blind_SQL_Injection
+oracle: timing-x3
+request:
+  method: GET
+  path: "/"
+payloads:
+  - "' OR SLEEP(5)-- -"
+params:
+  - id
+  - user
+  - search
+matcher:
+  type: response-time-threshold
+  threshold_seconds: 4.5
+  repeat: 2

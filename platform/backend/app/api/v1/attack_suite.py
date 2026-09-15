@@ -24,6 +24,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, AsyncGenerator, Optional
 from urllib.parse import urljoin, urlparse
 
@@ -42,6 +43,7 @@ from app.models.db.user import User
 from app.api.v1.dashboard import invalidate_dashboard_cache
 from app.services.finding_ingest import ingest_findings
 from app.services.waf_service import detect_waf, get_waf_bypass_payloads
+from app.services import template_engine as _template_engine
 from app.api.v1.attack_patterns import (
     CORS_ATTACK_ORIGINS, CORS_SENSITIVE_PATHS, CORS_WILDCARD_API_PATHS,
     CSRF_SENSITIVE_ACTIONS,
@@ -122,6 +124,7 @@ MODULES_META = [
     {"id": "oauth_advanced","label": "OAuth Advanced Attacks",   "description": "PKCE bypass, scope escalation, token leakage via referrer, implicit flow, authorization code interception"},
     {"id": "type_confusion","label": "JSON Type Confusion",      "description": "Array/object injection bypassing string checks, null coercion, integer vs string auth checks"},
     {"id": "api_versioning","label": "API Version Downgrade",    "description": "Older API versions with relaxed security, version enumeration via Accept/URL, auth bypass on legacy routes"},
+    {"id": "custom_templates","label": "Custom Detection Templates","description": "Declarative, data-driven checks defined as YAML under app/scanner_templates/ — add new detection coverage without writing Python"},
 ]
 
 # ── Models ────────────────────────────────────────────────────────────────────
@@ -6351,6 +6354,32 @@ async def _module_api_versioning(target: str, client: httpx.AsyncClient,
             await asyncio.sleep(0)
 
 
+# ── Module: Custom Detection Templates (declarative, data-driven) ───────────
+# Tier 4: an ADDITIVE surface — new checks can be added as YAML data under
+# app/scanner_templates/ instead of hand-written Python. The 39 modules
+# above stay hand-tuned Python; this is a companion, not a replacement.
+# All real matcher/injection logic lives in app.services.template_engine
+# (deliberately no app.api.v1 imports there) — this is a thin translation
+# layer from that module's plain dicts into _finding()/_probe() calls, using
+# the oracle each template declares for confidence — same doctrine as every
+# other module in this file.
+
+_TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "scanner_templates"
+
+
+async def _module_custom_templates(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    templates = _template_engine.load_templates(_TEMPLATES_DIR)
+    for template in templates:
+        async for event in _template_engine.run_template(template, target, client):
+            if event["type"] == "probe":
+                yield _probe("custom_templates", event.get("method", "GET"), event["url"],
+                             note=event.get("note", ""))
+            elif event["type"] == "finding":
+                yield _finding("custom_templates", template.id, template.severity, template.name,
+                                event["description"], event["evidence"], event["url"], True,
+                                template.remediation, oracle=template.oracle)
+
+
 def _adapt_attack_suite_findings(findings: list[dict]) -> list[dict]:
     """Normalize classic Attack Suite findings (from `_finding()`) for
     finding_ingest.ingest_findings.
@@ -6728,6 +6757,7 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, org_id: UU
             "oauth_advanced": lambda: _module_oauth_advanced(req.target, client),
             "type_confusion": lambda: _module_type_confusion(req.target, client, crawl_result.forms),
             "api_versioning": lambda: _module_api_versioning(req.target, client, crawl_result.endpoints),
+            "custom_templates": lambda: _module_custom_templates(req.target, client),
         }
 
         for mod_id in req.modules:
