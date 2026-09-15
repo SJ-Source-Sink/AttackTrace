@@ -60,6 +60,15 @@ const MODULES = [
   { id: "hpp",             label: "HTTP Param Pollution",   category: "Access",     description: "ACL IDOR bypass via duplicate params, WAF evasion ($13.5k confirmed)" },
   { id: "saml",            label: "SAML Attacks",           category: "Auth",       description: "Signature wrapping, XXE in SAMLResponse, attribute pollution → admin ATO" },
   { id: "websocket",       label: "WebSocket / CSWSH",      category: "Access",     description: "Cross-Site WebSocket Hijacking — no CORS protection, Origin not checked" },
+  // Principal engineer additions
+  { id: "host_header",     label: "Host Header Injection",  category: "Access",     description: "Password reset poisoning, cache deception, routing bypass via Host/X-Forwarded-Host" },
+  { id: "path_traversal",  label: "Path Traversal / LFI",   category: "Injection",  description: "Directory traversal (../), null-byte, double-encoding, PHP wrapper exploitation" },
+  { id: "oauth_advanced",  label: "OAuth Advanced Attacks", category: "Auth",       description: "PKCE bypass, scope escalation, token leakage via referrer, authorization code interception" },
+  { id: "type_confusion",  label: "JSON Type Confusion",    category: "Injection",  description: "Array/object injection bypassing string checks, null coercion, integer vs string auth" },
+  { id: "api_versioning",  label: "API Version Downgrade",  category: "Access",     description: "Older API versions with relaxed security, version enumeration, auth bypass on legacy routes" },
+  // Tier 3/4 additions
+  { id: "graphql_deep",    label: "GraphQL Deep Testing",   category: "API",        description: "Schema-driven SQLi/SSTI/NoSQL injection into real query & mutation args, GraphQL IDOR, mutation auth-bypass, CSRF surface" },
+  { id: "custom_templates", label: "Custom Detection Templates", category: "Custom", description: "Declarative, data-driven checks defined as YAML — add new detection coverage without writing Python" },
 ];
 
 const PRESETS: Record<string, { label: string; description: string; modules: string[] }> = {
@@ -85,7 +94,11 @@ const PRESETS: Record<string, { label: string; description: string; modules: str
   },
   full: {
     label: "Full Scan",
-    description: "All 34 modules (~20 min)",
+    // Derived from MODULES.length rather than hardcoded — a hardcoded count
+    // here silently went stale by 7 modules (this text still said "34" with
+    // 41 real modules registered) since nothing kept it in sync as modules
+    // were added. Found via live testing (2026-09-15).
+    description: `All ${MODULES.length} modules (~20 min)`,
     modules: MODULES.map((m) => m.id),
   },
 };
@@ -1512,7 +1525,7 @@ export default function AttackSuitePage() {
                 <Swords className="h-12 w-12" />
                 <p className="text-sm">Run a scan to discover vulnerabilities</p>
                 <p className="text-xs text-zinc-700">
-                  17 modules · patterns from 5700+ bug bounty reports · crawler + login support
+                  {MODULES.length} modules · patterns from 5700+ bug bounty reports · crawler + login support
                 </p>
               </div>
             )
