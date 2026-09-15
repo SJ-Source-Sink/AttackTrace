@@ -109,7 +109,9 @@ export interface ApiKey {
 
 export type ScanStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 export type ScanIntensity = "passive" | "normal" | "aggressive" | "passive_due_diligence";
-export type ScanModule = "infrastructure" | "cloud" | "osint" | "web" | "enrichment";
+export type ScanModule =
+  | "seed" | "domain" | "dns" | "infrastructure" | "enrichment"
+  | "intel" | "osint" | "web" | "cloud" | "correlation";
 
 export interface ScanTarget {
   company_name: string;

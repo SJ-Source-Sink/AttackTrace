@@ -38,12 +38,24 @@ const scanSchema = z.object({
 
 type ScanFormData = z.infer<typeof scanSchema>;
 
+// Mirrors attacktrace.core.orchestrator.Orchestrator.MODULE_ORDER exactly —
+// this list previously only had 5 of the pipeline's real 10 modules, so
+// seed/domain/dns/intel/correlation were silently impossible to skip from
+// the UI even though the backend has always supported skipping any of them
+// (job.modules_to_skip is threaded all the way through to
+// orchestrator.create_session(modules=...)). Found via a 2026-09-15 audit
+// after finding the same stale-list bug in the Attack Suite module picker.
 const MODULES: { id: ScanModule; label: string; description: string }[] = [
+  { id: "seed", label: "Seed Discovery", description: "WHOIS, certificate transparency, ASN discovery — initial target seeding" },
+  { id: "domain", label: "Domain", description: "Subdomain enumeration" },
+  { id: "dns", label: "DNS", description: "DNS resolution of discovered domains" },
   { id: "infrastructure", label: "Infrastructure", description: "Port scanning, service enumeration, ASN lookup" },
-  { id: "cloud", label: "Cloud", description: "AWS, Azure, GCP resource discovery" },
-  { id: "osint", label: "OSINT", description: "DNS enumeration, certificate transparency, breach data" },
-  { id: "web", label: "Web", description: "Web application scanning, tech fingerprinting" },
   { id: "enrichment", label: "Enrichment", description: "Shodan, VirusTotal, threat intelligence enrichment" },
+  { id: "intel", label: "Threat Intel", description: "CVEs, breach data, threat intelligence correlation" },
+  { id: "osint", label: "OSINT", description: "GitHub recon, employee/certificate transparency discovery" },
+  { id: "web", label: "Web", description: "Web application scanning, tech fingerprinting" },
+  { id: "cloud", label: "Cloud", description: "AWS, Azure, GCP resource discovery" },
+  { id: "correlation", label: "Correlation", description: "Cross-module data correlation and risk scoring" },
 ];
 
 const INTENSITIES: { value: ScanIntensity; label: string; description: string; color: string }[] = [

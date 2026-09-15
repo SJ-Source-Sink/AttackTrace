@@ -54,6 +54,7 @@ const OWASP_CATEGORIES = [
   "API1: BOLA/IDOR",
   "API2: Broken Auth",
   "API4: Rate Limiting",
+  "API5: BFLA",
   "API6: SSRF",
   "API7: Security Misconfiguration",
   "API9: Improper Inventory",
@@ -67,8 +68,10 @@ export default function ApiScannerPage() {
   const [authToken2, setAuthToken2] = useState("");
   const [openapiUrl, setOpenapiUrl] = useState("");
   const [testBola, setTestBola] = useState(true);
+  const [testBfla, setTestBfla] = useState(true);
   const [testRateLimit, setTestRateLimit] = useState(true);
   const [testSsrf, setTestSsrf] = useState(false);
+  const [testMisconfig, setTestMisconfig] = useState(true);
   const [testGraphql, setTestGraphql] = useState(true);
   const [running, setRunning] = useState(false);
   const [findings, setFindings] = useState<ApiSecFinding[]>([]);
@@ -106,10 +109,10 @@ export default function ApiScannerPage() {
           auth_token_2: authToken2 || null,
           openapi_url: openapiUrl || null,
           test_bola: testBola,
-          test_bfla: testBola,
+          test_bfla: testBfla,
           test_rate_limit: testRateLimit,
           test_ssrf: testSsrf,
-          test_misconfig: true,
+          test_misconfig: testMisconfig,
           test_graphql: testGraphql,
         }),
         signal: ctrl.signal,
@@ -217,8 +220,10 @@ export default function ApiScannerPage() {
                   <p className="text-xs text-zinc-500 font-medium">Test Modules</p>
                   {[
                     { label: "BOLA / IDOR (API1)", val: testBola, set: setTestBola, note: "Requires 2 tokens" },
+                    { label: "BFLA (API5)", val: testBfla, set: setTestBfla, note: "Broken function-level authorization" },
                     { label: "Rate Limiting (API4)", val: testRateLimit, set: setTestRateLimit },
                     { label: "SSRF (API6)", val: testSsrf, set: setTestSsrf, note: "Sends external requests" },
+                    { label: "Security Misconfiguration (API7)", val: testMisconfig, set: setTestMisconfig },
                     { label: "GraphQL Introspection", val: testGraphql, set: setTestGraphql },
                   ].map(({ label, val, set, note }) => (
                     <div key={label} className="flex items-center justify-between">
