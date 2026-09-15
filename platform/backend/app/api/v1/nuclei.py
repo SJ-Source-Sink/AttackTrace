@@ -269,7 +269,7 @@ def _find_templates_dir() -> Path | None:
     return None
 
 
-def _build_nuclei_cmd(req: NucleiScanRequest) -> list[str]:
+def _build_nuclei_cmd(req: NucleiScanRequest, org_id: uuid.UUID | None = None) -> list[str]:
     nuclei_bin = shutil.which("nuclei") or "nuclei"
     # -j:       JSONL findings to stdout (NOT -json-export which writes to a file)
     # -stats:   progress stats to stderr
@@ -277,6 +277,31 @@ def _build_nuclei_cmd(req: NucleiScanRequest) -> list[str]:
     cmd = [nuclei_bin, "-target", req.target, "-j", "-stats", "-no-color"]
 
     templates_dir = _find_templates_dir()
+
+    # The template-management routes (browse/toggle/upload, above) write an
+    # org's disabled-template config and uploaded custom templates to disk,
+    # but until now nothing ever READ them back when actually building a
+    # scan — toggling a template off or uploading a custom one had zero
+    # effect on any real scan. Found via a 2026-09-15 audit while building
+    # the frontend for these routes. Fixed here: always additionally merge
+    # in the org's custom-templates dir (nuclei supports repeating -t to
+    # combine multiple template sources) and exclude org-disabled ids via
+    # nuclei's real -eid/-exclude-id flag (confirmed against the installed
+    # nuclei binary's own -h output, not guessed).
+    if org_id is not None:
+        custom_dir = Path(_settings.ATTACKTRACE_WORKSPACE_DIR) / str(org_id) / "custom-templates"
+        if custom_dir.is_dir() and any(custom_dir.glob("*.yaml")):
+            cmd.extend(["-t", str(custom_dir)])
+
+        config_path = Path(_settings.ATTACKTRACE_WORKSPACE_DIR) / str(org_id) / "nuclei_template_config.json"
+        if config_path.exists():
+            try:
+                config = json.loads(config_path.read_text())
+                disabled_ids = [tid for tid, enabled in config.items() if not enabled]
+                if disabled_ids:
+                    cmd.extend(["-eid", ",".join(disabled_ids)])
+            except Exception:
+                pass
 
     if req.custom_template_dir:
         safe_dir = Path(req.custom_template_dir)
@@ -356,7 +381,7 @@ def _parse_nuclei_line(line: str) -> dict | None:
 
 
 async def _stream_nuclei(scan_id: str, req: NucleiScanRequest, request: Request, org_id: uuid.UUID) -> AsyncGenerator[str, None]:
-    cmd = _build_nuclei_cmd(req)
+    cmd = _build_nuclei_cmd(req, org_id)
 
     def _sse(event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
