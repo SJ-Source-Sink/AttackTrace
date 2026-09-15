@@ -56,6 +56,7 @@ from app.api.v1.attack_patterns import (
     RACE_CONDITION_ENDPOINTS,
     BUSINESS_LOGIC_TESTS,
     GRAPHQL_PATHS, GRAPHQL_INTROSPECTION, GRAPHQL_BATCH, GRAPHQL_AUTH_BYPASS_QUERIES,
+    GRAPHQL_FULL_INTROSPECTION_QUERY, GRAPHQL_NOSQL_VARIABLE_PAYLOADS, GRAPHQL_TYPE_ERROR_MARKERS,
     JWT_WEAK_SECRETS, JWT_KID_PAYLOADS,
     REDIRECT_PARAMS, REDIRECT_PAYLOADS,
     TECH_SIGNATURES, COMMON_SENSITIVE_PATHS,
@@ -93,6 +94,7 @@ MODULES_META = [
     {"id": "race",          "label": "Race Conditions",        "description": "Parallel request attacks on state-changing endpoints — 39 reports"},
     {"id": "business",      "label": "Business Logic",         "description": "Negative price, quantity overflow, coupon stacking — 51 reports"},
     {"id": "graphql",       "label": "GraphQL Inspector",      "description": "Introspection, batch abuse, auth bypass — 175 reports + top Amazon endpoint"},
+    {"id": "graphql_deep",  "label": "GraphQL Deep Testing",   "description": "Schema-driven SQLi/SSTI/NoSQL injection into real query & mutation arguments, GraphQL IDOR, mutation auth-bypass, CSRF surface (form/GET query acceptance)"},
     {"id": "jwt",           "label": "JWT Analyzer",           "description": "alg:none, weak secrets, kid injection, claims exposure — 60 reports"},
     {"id": "redirect",      "label": "Open Redirect",          "description": "OAuth redirect_uri, redirect param bypass — 168 reports, chains to ATO"},
     {"id": "auth_bypass",   "label": "Auth Bypass",            "description": "Admin paths, X-Forwarded-For, method override, sensitive file exposure"},
@@ -1474,6 +1476,24 @@ async def _module_xss(target: str, client: httpx.AsyncClient,
 
 # ── Module: SQLi ──────────────────────────────────────────────────────────────
 
+# DB-vendor-specific error patterns only (no generic "syntax error" which
+# catches JS errors). Module-scoped (not just _module_sqli-local) so
+# _module_graphql_deep's schema-driven SQLi check can reuse the exact same
+# confirmed-pattern list instead of duplicating it.
+_SQLI_CONFIRMED_PATTERNS = [
+    "you have an error in your sql syntax",   # MySQL
+    "warning: mysql_",                         # PHP MySQL
+    "unclosed quotation mark after the character string",  # MSSQL
+    "quoted string not properly terminated",   # Oracle
+    "pg_query(): query failed",                # PostgreSQL
+    "sqlite3.operationalerror",                # SQLite
+    "odbc sql server driver",                  # ODBC MSSQL
+    "ora-00933",                               # Oracle
+    "sqlstate[",                               # PDO generic
+    "near \"'\"",                              # SQLite syntax near quote
+]
+
+
 async def _module_sqli(target: str, client: httpx.AsyncClient,
                        forms: list[dict],
                        waf_bypass_payloads: list[str] | None = None) -> AsyncGenerator[dict, None]:
@@ -1483,20 +1503,6 @@ async def _module_sqli(target: str, client: httpx.AsyncClient,
     - Time-based: 3-sample statistical analysis (mean + 2σ threshold)
     - Error patterns are DB-vendor-specific (no generic "error" strings)
     """
-    # DB-vendor-specific error patterns only (no generic "syntax error" which catches JS errors)
-    _SQLI_CONFIRMED_PATTERNS = [
-        "you have an error in your sql syntax",   # MySQL
-        "warning: mysql_",                         # PHP MySQL
-        "unclosed quotation mark after the character string",  # MSSQL
-        "quoted string not properly terminated",   # Oracle
-        "pg_query(): query failed",                # PostgreSQL
-        "sqlite3.operationalerror",                # SQLite
-        "odbc sql server driver",                  # ODBC MSSQL
-        "ora-00933",                               # Oracle
-        "sqlstate[",                               # PDO generic
-        "near \"'\"",                              # SQLite syntax near quote
-    ]
-
     # Establish baseline for the page WITHOUT injection (to filter pre-existing errors)
     baseline_body = ""
     try:
@@ -2745,6 +2751,445 @@ async def _module_graphql(target: str, client: httpx.AsyncClient) -> AsyncGenera
         await asyncio.sleep(0)
 
 
+# ── Module: GraphQL Deep Testing (schema-driven injection) ───────────────────
+# Companion to _module_graphql above, which only does generic misconfig
+# checks (introspection-enabled, batch abuse, hardcoded auth-bypass queries).
+# This module introspects the REAL schema — with field ARGUMENTS, which the
+# shallow GRAPHQL_INTROSPECTION query doesn't fetch — and uses it to drive
+# targeted SQLi/SSTI/NoSQL injection, GraphQL-specific IDOR, mutation
+# auth-bypass, and a GraphQL CSRF-surface check. None of this exists
+# anywhere else in the file; every other injection module here only tests
+# REST-shaped surfaces (URL params, form POSTs), never GraphQL's own
+# query+variables mechanism.
+
+def _graphql_resolve_type(type_obj: Optional[dict]) -> tuple[str, str]:
+    """Unwrap NON_NULL/LIST wrappers to find the base (name, kind), e.g.
+    NonNull(List(String)) -> ("String", "SCALAR"). Handles the 2 levels of
+    `ofType` nesting GRAPHQL_FULL_INTROSPECTION_QUERY requests."""
+    t = type_obj
+    while t and t.get("kind") in ("NON_NULL", "LIST") and t.get("ofType"):
+        t = t["ofType"]
+    if not t:
+        return ("", "")
+    return (t.get("name") or "", t.get("kind") or "")
+
+
+def _graphql_field_is_id_like(arg_name: str, base_type: str) -> bool:
+    """True if this argument looks like a resource identifier — either the
+    GraphQL scalar type is literally ID, or its name matches common
+    identifier naming (mirrors the naming heuristics IDOR_ID_PARAMS already
+    uses for REST query params in _module_idor)."""
+    if base_type == "ID":
+        return True
+    n = arg_name.lower()
+    return n == "id" or n.endswith("id") or n.endswith("_id")
+
+
+async def _graphql_introspect_schema(url: str, client: httpx.AsyncClient) -> Optional[dict]:
+    """POST the deep introspection query (with field arguments) and return
+    {"queries": [...], "mutations": [...]} where each entry is
+    {"name", "args": [{"name","base_type","kind"}], "return_kind"}.
+    Returns None if introspection is disabled/blocked/unparseable."""
+    try:
+        r = await client.post(url, json={"query": GRAPHQL_FULL_INTROSPECTION_QUERY}, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        schema = (data or {}).get("data", {}).get("__schema")
+        if not schema:
+            return None
+        query_type_name = (schema.get("queryType") or {}).get("name")
+        mutation_type_name = (schema.get("mutationType") or {}).get("name")
+        types_by_name = {t["name"]: t for t in schema.get("types", []) if t.get("name")}
+
+        def _extract_fields(type_name: Optional[str]) -> list[dict]:
+            if not type_name or type_name not in types_by_name:
+                return []
+            out = []
+            for f in (types_by_name[type_name].get("fields") or []):
+                args = []
+                for a in (f.get("args") or []):
+                    base_type, kind = _graphql_resolve_type(a.get("type"))
+                    if not base_type:
+                        continue
+                    args.append({"name": a["name"], "base_type": base_type, "kind": kind})
+                _ret_name, ret_kind = _graphql_resolve_type(f.get("type"))
+                out.append({"name": f["name"], "args": args, "return_kind": ret_kind})
+            return out
+
+        return {
+            "queries": _extract_fields(query_type_name),
+            "mutations": _extract_fields(mutation_type_name),
+        }
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _graphql_build_call(field_name: str, arg_name: str, return_kind: str,
+                         is_mutation: bool, var_type: str) -> str:
+    """Build a minimally-valid parameterized GraphQL query/mutation string
+    for a single field+arg, using __typename as a universal-safe subfield
+    selection for object-returning fields (valid on every GraphQL object
+    type — avoids needing to know the field's actual return shape)."""
+    op = "mutation" if is_mutation else "query"
+    selection = " { __typename }" if return_kind in ("OBJECT", "INTERFACE", "UNION") else ""
+    return f"{op}($v: {var_type}) {{ {field_name}({arg_name}: $v){selection} }}"
+
+
+async def _module_graphql_deep(target: str, client: httpx.AsyncClient) -> AsyncGenerator[dict, None]:
+    """Schema-driven GraphQL injection/IDOR/auth-bypass/CSRF testing — see
+    module-level comment above for what this adds beyond _module_graphql."""
+    gql_url: Optional[str] = None
+    for path in GRAPHQL_PATHS:
+        url = target + path
+        yield _probe("graphql_deep", "POST", url, note="GraphQL endpoint discovery")
+        try:
+            r = await client.post(url, content=GRAPHQL_INTROSPECTION,
+                                  headers={"Content-Type": "application/json"}, timeout=8)
+            if r.status_code == 200 and ("__schema" in r.text or "\"data\"" in r.text):
+                gql_url = url
+                break
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(0)
+
+    if not gql_url:
+        return
+
+    schema = await _graphql_introspect_schema(gql_url, client)
+    if not schema or not (schema["queries"] or schema["mutations"]):
+        yield _finding("graphql_deep", "schema_introspection_blocked", "info",
+            "GraphQL Deep Testing Skipped — Schema Introspection Unavailable",
+            f"Full schema introspection (with field arguments) did not succeed at {gql_url}. "
+            "Schema-driven injection/IDOR/mutation testing requires seeing real query/mutation "
+            "arguments and cannot run blind — this reflects good security posture, not a "
+            "finding requiring remediation.",
+            f"Endpoint: {gql_url}", gql_url, False,
+            "No action needed if introspection is intentionally disabled in production.",
+            confidence="low", oracle="bare-signal")
+        return
+
+    # ── SQLi / SSTI / NoSQL injection into query-argument variables ─────────
+    for field in schema["queries"][:6]:
+        candidate_args = [a for a in field["args"][:2]
+                           if a["base_type"] in ("String", "ID") and a["kind"] == "SCALAR"]
+        for arg in candidate_args:
+            query = _graphql_build_call(field["name"], arg["name"], field["return_kind"],
+                                         is_mutation=False, var_type=arg["base_type"])
+            stable_shape = f"{field['name']}({arg['name']})"
+
+            # Benign baseline first — filters pre-existing error strings /
+            # SSTI-canary-lookalike content, same discipline used everywhere
+            # else in this file.
+            benign_body = ""
+            try:
+                yield _probe("graphql_deep", "POST", gql_url, payload=stable_shape, note="injection baseline")
+                base_r = await client.post(gql_url, json={"query": query, "variables": {"v": "probe"}}, timeout=8)
+                benign_body = base_r.text.lower()
+            except httpx.HTTPError:
+                pass
+
+            # SQLi
+            for quote in ("'", '"'):
+                try:
+                    r = await client.post(gql_url, json={"query": query, "variables": {"v": quote}}, timeout=8)
+                    bl = r.text.lower()
+                    for pat in _SQLI_CONFIRMED_PATTERNS:
+                        if pat in bl and pat not in benign_body:
+                            yield _finding("graphql_deep", "graphql_sqli", "critical",
+                                f"SQL Injection via GraphQL Argument: {stable_shape}",
+                                f"Sending `{quote}` as the `{arg['name']}` variable to GraphQL field "
+                                f"`{field['name']}` triggered a DB-vendor-specific error pattern "
+                                f"(`{pat}`) not present in a benign-value baseline.",
+                                f"Endpoint: {gql_url}\nQuery: {query}\nInjected value: {quote}\n"
+                                f"Response: {r.text[:300]}",
+                                gql_url, True,
+                                "Use parameterized queries in the resolver backing this field. "
+                                "Never concatenate GraphQL variable values into raw SQL.",
+                                confidence="high", oracle="differential")
+                            break
+                except httpx.HTTPError:
+                    pass
+                await asyncio.sleep(0)
+
+            # SSTI
+            for payload, expected, engine in _SSTI_PROBES[:4]:
+                if expected in benign_body:
+                    continue
+                try:
+                    r = await client.post(gql_url, json={"query": query, "variables": {"v": payload}}, timeout=8)
+                    if expected in r.text and expected not in benign_body:
+                        yield _finding("graphql_deep", "graphql_ssti", "critical",
+                            f"Server-Side Template Injection via GraphQL Argument: {stable_shape} — {engine}",
+                            f"Payload `{payload}` sent as the `{arg['name']}` variable to `{field['name']}` "
+                            f"evaluated to `{expected}` in the response — the resolver is executing "
+                            f"template expressions from GraphQL input. This is a Remote Code Execution vector.",
+                            f"Endpoint: {gql_url}\nQuery: {query}\nPayload: {payload}\nExpected: {expected}",
+                            gql_url, True,
+                            "Never pass GraphQL variable values to template rendering functions. "
+                            "Use sandboxed template environments.",
+                            confidence="high", oracle="extracted-value")
+                        break
+                except httpx.HTTPError:
+                    pass
+                await asyncio.sleep(0)
+
+            # NoSQL operator injection — a spec-compliant server rejects a
+            # non-string object for a String-typed variable with a type-
+            # coercion error BEFORE reaching any resolver; that rejection
+            # must be recognized and skipped, not flagged. Also: "returns a
+            # non-null result" alone is too weak — any input-tolerant
+            # endpoint (e.g. a search that always returns {hits: 0} for a
+            # non-matching query) would satisfy that for garbage input too.
+            # Require the operator payload's response to MEANINGFULLY DIFFER
+            # from the same benign-value baseline used for SQLi/SSTI above —
+            # i.e. the operator actually changed query semantics (broader
+            # match / real data) versus what an ordinary non-matching string
+            # would produce.
+            for op_payload in GRAPHQL_NOSQL_VARIABLE_PAYLOADS:
+                try:
+                    r = await client.post(gql_url, json={"query": query, "variables": {"v": op_payload}}, timeout=8)
+                    if any(m in r.text.lower() for m in GRAPHQL_TYPE_ERROR_MARKERS):
+                        continue
+                    if r.status_code == 200:
+                        try:
+                            data = r.json()
+                            d = data.get("data") if isinstance(data, dict) else None
+                            if (isinstance(d, dict) and not data.get("errors")
+                                    and d.get(field["name"]) is not None
+                                    and _responses_meaningfully_differ(
+                                        benign_body, r.text.lower(), len(benign_body), len(r.content))):
+                                yield _finding("graphql_deep", "graphql_nosql_injection", "high",
+                                    f"NoSQL Operator Injection via GraphQL Argument: {stable_shape}",
+                                    f"Sending a MongoDB operator object (`{op_payload}`) as the "
+                                    f"`{arg['name']}` variable to `{field['name']}` was accepted "
+                                    f"(no type-coercion rejection) and returned data meaningfully "
+                                    f"different from a benign-value baseline — the operator changed "
+                                    f"query semantics rather than just being echoed as an opaque string.",
+                                    f"Endpoint: {gql_url}\nQuery: {query}\nPayload: {op_payload}\n"
+                                    f"Benign baseline: {benign_body[:200]}\nResponse: {r.text[:300]}",
+                                    gql_url, True,
+                                    "Validate variable values against the declared GraphQL scalar type "
+                                    "at the resolver, not just accept whatever the transport layer parses. "
+                                    "Never pass raw variable objects into database query builders.",
+                                    confidence="medium", oracle="extracted-value")
+                                break
+                        except Exception:
+                            pass
+                except httpx.HTTPError:
+                    pass
+                await asyncio.sleep(0)
+
+    # ── GraphQL-specific IDOR on ID-typed query arguments ────────────────────
+    for field in schema["queries"][:6]:
+        id_args = [a for a in field["args"][:2] if _graphql_field_is_id_like(a["name"], a["base_type"])]
+        for arg in id_args:
+            query = _graphql_build_call(field["name"], arg["name"], field["return_kind"],
+                                         is_mutation=False, var_type=arg["base_type"] or "ID")
+            stable_shape = f"{field['name']}({arg['name']})"
+            try:
+                yield _probe("graphql_deep", "POST", gql_url, payload=f"{stable_shape}: 999999",
+                             note="GraphQL IDOR — nonexistent-ID baseline")
+                nf_r = await client.post(gql_url, json={"query": query, "variables": {"v": "999999"}}, timeout=8)
+                try:
+                    nf_data = nf_r.json() if nf_r.status_code == 200 else {}
+                except Exception:
+                    nf_data = {}
+                nf_is_notfound = bool(nf_data.get("errors")) or (
+                    isinstance(nf_data.get("data"), dict) and nf_data["data"].get(field["name"]) is None
+                )
+                if not nf_is_notfound:
+                    continue  # can't establish a not-found baseline — endpoint proves nothing here
+                # A single real (non-null) hit among 1/2/3 that differs from
+                # the not-found baseline is NOT enough evidence on its own —
+                # whichever of those ids happens to be the scan's OWN
+                # authenticated identity will always look "different from
+                # not-found" even behind a perfectly correct ownership check
+                # (querying your own resource legitimately succeeds). Found
+                # via live testing against a purpose-built server that
+                # enforces real per-caller ownership. Real IDOR requires
+                # seeing MULTIPLE distinct real ids return DIFFERENT real
+                # data from EACH OTHER — proof that more than just "my own"
+                # resource is reachable — not merely "differs from null".
+                hits: list[tuple[str, "httpx.Response"]] = []
+                for real_id in ("1", "2", "3"):
+                    r = await client.post(gql_url, json={"query": query, "variables": {"v": real_id}}, timeout=8)
+                    if r.status_code != 200:
+                        continue
+                    try:
+                        if r.json().get("errors"):
+                            continue
+                    except Exception:
+                        pass
+                    if _responses_meaningfully_differ(nf_r.text, r.text, len(nf_r.content), len(r.content)):
+                        hits.append((real_id, r))
+                    await asyncio.sleep(0)
+                for i in range(len(hits)):
+                    for j in range(i + 1, len(hits)):
+                        id_a, r_a = hits[i]
+                        id_b, r_b = hits[j]
+                        if _responses_meaningfully_differ(r_a.text, r_b.text, len(r_a.content), len(r_b.content)):
+                            yield _finding("graphql_deep", "graphql_idor", "high",
+                                f"IDOR via GraphQL Argument: {stable_shape}",
+                                f"Querying `{field['name']}` with `{arg['name']}={id_a}` and "
+                                f"`{arg['name']}={id_b}` both returned real, DIFFERENT data from each "
+                                f"other (both also differing from the not-found baseline at "
+                                f"`{arg['name']}=999999`) — multiple distinct resources are reachable "
+                                f"with no ownership check, not just the caller's own.",
+                                f"Endpoint: {gql_url}\nQuery: {query}\n"
+                                f"Not-found baseline: {nf_r.text[:200]}\n"
+                                f"{arg['name']}={id_a}: {r_a.text[:250]}\n"
+                                f"{arg['name']}={id_b}: {r_b.text[:250]}",
+                                gql_url, True,
+                                "Verify resource ownership server-side in every resolver that takes an ID "
+                                "argument. Use unguessable identifiers (UUIDs) over sequential IDs.",
+                                confidence="medium", oracle="differential")
+                            break
+                    else:
+                        continue
+                    break
+            except httpx.HTTPError:
+                pass
+            await asyncio.sleep(0)
+
+    # ── Mutation auth-bypass ─────────────────────────────────────────────────
+    for field in schema["mutations"][:5]:
+        var_defs, query_parts, dummy_args = [], [], {}
+        for i, arg in enumerate(field["args"][:3]):
+            vname = f"v{i}"
+            var_defs.append(f"${vname}: {arg['base_type'] or 'String'}")
+            query_parts.append(f"{arg['name']}: ${vname}")
+            if arg["base_type"] == "Int":
+                dummy_args[vname] = 1
+            elif arg["base_type"] == "Boolean":
+                dummy_args[vname] = True
+            else:
+                dummy_args[vname] = "attacktrace-probe"
+        selection = " { __typename }" if field["return_kind"] in ("OBJECT", "INTERFACE", "UNION") else ""
+        if var_defs:
+            mutation_query = f"mutation({', '.join(var_defs)}) {{ {field['name']}({', '.join(query_parts)}){selection} }}"
+        else:
+            mutation_query = f"mutation {{ {field['name']}{selection} }}"
+
+        try:
+            with_auth_r = await client.post(gql_url, json={"query": mutation_query, "variables": dummy_args}, timeout=8)
+        except httpx.HTTPError:
+            continue
+
+        # httpx MERGES a request-level `headers=` dict with the client's own
+        # default headers — omitting "authorization" from that dict does NOT
+        # remove the client's already-configured default Authorization
+        # header, it stays on the request. Confirmed via direct testing
+        # (httpx.AsyncClient(headers={"Authorization": ...}).build_request()
+        # still carries it even when a `headers=` override dict lacks the
+        # key). The only way to truly strip a client-default header for one
+        # request is to build the request, delete the header object, then
+        # send it explicitly.
+        try:
+            no_auth_req = client.build_request(
+                "POST", gql_url, json={"query": mutation_query, "variables": dummy_args}, timeout=8)
+            for h in ("authorization", "cookie"):
+                if h in no_auth_req.headers:
+                    del no_auth_req.headers[h]
+            no_auth_r = await client.send(no_auth_req)
+        except httpx.HTTPError:
+            continue
+
+        try:
+            no_auth_data = no_auth_r.json()
+        except Exception:
+            continue
+        if no_auth_r.status_code != 200 or no_auth_data.get("errors"):
+            continue  # correctly rejected without auth
+
+        try:
+            with_auth_data = with_auth_r.json()
+        except Exception:
+            with_auth_data = None
+        with_auth_ok = bool(with_auth_r.status_code == 200 and with_auth_data and not with_auth_data.get("errors"))
+
+        if with_auth_ok and not _responses_meaningfully_differ(
+                with_auth_r.text, no_auth_r.text, len(with_auth_r.content), len(no_auth_r.content)):
+            yield _finding("graphql_deep", "graphql_mutation_auth_bypass", "critical",
+                f"Mutation Auth Bypass — GraphQL Mutation Callable Without Auth: {field['name']}",
+                f"Mutation `{field['name']}` succeeds with a response equivalent to the with-auth "
+                f"baseline even with the Authorization/Cookie headers stripped — authentication is "
+                f"not enforced on this mutation.",
+                f"Endpoint: {gql_url}\nMutation: {mutation_query}\n"
+                f"With-auth response: {with_auth_r.text[:200]}\n"
+                f"Without-auth response: {no_auth_r.text[:200]}",
+                gql_url, True,
+                "Enforce authentication/authorization on every mutation resolver, not just query "
+                "resolvers. Never rely on the client to only call mutations while logged in.",
+                confidence="high", oracle="differential")
+        else:
+            yield _finding("graphql_deep", "graphql_mutation_auth_bypass", "high",
+                f"Possible Mutation Auth Bypass — GraphQL Mutation Succeeds Without Auth: {field['name']}",
+                f"Mutation `{field['name']}` returned success data with Authorization/Cookie headers "
+                f"stripped. A with-auth baseline comparison wasn't available/meaningful for this scan, "
+                f"so this is a weaker signal than a confirmed differential bypass — verify manually.",
+                f"Endpoint: {gql_url}\nMutation: {mutation_query}\nWithout-auth response: {no_auth_r.text[:300]}",
+                gql_url, True,
+                "Enforce authentication/authorization on every mutation resolver, not just query resolvers.",
+                confidence="medium", oracle="bare-signal")
+        await asyncio.sleep(0)
+
+    # ── GraphQL CSRF surface: form-urlencoded / GET acceptance ───────────────
+    # Confirmed absent everywhere else in this file: _module_csrf never
+    # touches a GraphQL path, and _module_graphql only ever POSTs JSON. A
+    # GraphQL endpoint that ALSO accepts these is exploitable via a plain
+    # cross-origin <form>/<img> — no preflight, cookies sent automatically —
+    # even though the JSON-only path looks safe on its own.
+    csrf_probe_query = "{__typename}"
+    try:
+        baseline_r = await client.post(gql_url, json={"query": csrf_probe_query}, timeout=8)
+        baseline_ok = baseline_r.status_code == 200 and "__typename" in baseline_r.text.lower()
+    except httpx.HTTPError:
+        baseline_ok = False
+
+    if baseline_ok:
+        try:
+            form_r = await client.post(gql_url, data={"query": csrf_probe_query}, timeout=8)
+            if (form_r.status_code == 200 and not _responses_meaningfully_differ(
+                    baseline_r.text, form_r.text, len(baseline_r.content), len(form_r.content))):
+                yield _finding("graphql_deep", "graphql_csrf_form_urlencoded", "high",
+                    "GraphQL CSRF Surface — Accepts application/x-www-form-urlencoded",
+                    "The GraphQL endpoint returns data equivalent to a proper JSON POST when the "
+                    "same query is sent as a form-urlencoded POST body. Because this content type "
+                    "doesn't trigger a CORS preflight, a plain cross-origin HTML <form> can submit "
+                    "authenticated GraphQL operations on a victim's behalf — CSRF, even though the "
+                    "JSON-POST path alone would look safe.",
+                    f"Endpoint: {gql_url}\nJSON baseline: {baseline_r.text[:150]}\n"
+                    f"Form-urlencoded response: {form_r.text[:150]}",
+                    gql_url, True,
+                    "Reject non-application/json Content-Type on the GraphQL endpoint, or require "
+                    "a CSRF token / custom header (which a simple HTML form cannot set) for "
+                    "state-changing operations.",
+                    confidence="high", oracle="differential")
+        except httpx.HTTPError:
+            pass
+
+        try:
+            get_r = await client.get(gql_url, params={"query": csrf_probe_query}, timeout=8)
+            if (get_r.status_code == 200 and not _responses_meaningfully_differ(
+                    baseline_r.text, get_r.text, len(baseline_r.content), len(get_r.content))):
+                yield _finding("graphql_deep", "graphql_csrf_get", "high",
+                    "GraphQL CSRF Surface — Accepts GET Requests",
+                    "The GraphQL endpoint returns data equivalent to a proper JSON POST when the "
+                    "same query is sent as a plain GET with a `query` parameter. A GET request can "
+                    "be triggered cross-origin via a simple <img>/<link> tag with no user interaction "
+                    "and no preflight — any query reachable this way is a CSRF/data-exfiltration vector.",
+                    f"Endpoint: {gql_url}\nJSON baseline: {baseline_r.text[:150]}\n"
+                    f"GET response: {get_r.text[:150]}",
+                    gql_url, True,
+                    "Only accept GraphQL operations via POST with Content-Type: application/json. "
+                    "Reject GET requests entirely, or restrict them to whitelisted, side-effect-free "
+                    "persisted queries only.",
+                    confidence="high", oracle="differential")
+        except httpx.HTTPError:
+            pass
+
+
 # ── Module: JWT ───────────────────────────────────────────────────────────────
 
 def _b64d(s: str) -> bytes:
@@ -3474,6 +3919,21 @@ async def _module_nosql(target: str, client: httpx.AsyncClient,
 
 # ── Module: SSTI ─────────────────────────────────────────────────────────────
 
+# High-specificity SSTI probes: (payload, expected_result, engine_name).
+# Module-scoped (not just _module_ssti-local) so _module_graphql_deep's
+# schema-driven SSTI check can reuse the exact same math-canary list instead
+# of duplicating it.
+_SSTI_PROBES = [
+    ("{{7777*7777}}", "60481729", "Jinja2/Twig"),
+    ("{{7777*'7'}}", "7777777777", "Jinja2 (string mul)"),
+    ("<%= 7777*7777 %>", "60481729", "ERB/Ruby"),
+    ("${7777*7777}", "60481729", "FreeMarker/OGNL"),
+    ("#{7777*7777}", "60481729", "Pebble/Thymeleaf"),
+    ("*{7777*7777}", "60481729", "Spring/Thymeleaf"),
+    ("{{=7777*7777}}", "60481729", "Slim/Haml"),
+]
+
+
 async def _module_ssti(target: str, client: httpx.AsyncClient,
                        forms: list[dict]) -> AsyncGenerator[dict, None]:
     """
@@ -3485,17 +3945,6 @@ async def _module_ssti(target: str, client: httpx.AsyncClient,
     - ${7777*7777} → 60481729 (FreeMarker/OGNL)
     Also verifies result is NOT in the baseline response (rules out pre-existing content).
     """
-    # High-specificity SSTI probes: (payload, expected_result, engine_name)
-    _SSTI_PROBES = [
-        ("{{7777*7777}}", "60481729", "Jinja2/Twig"),
-        ("{{7777*'7'}}", "7777777777", "Jinja2 (string mul)"),
-        ("<%= 7777*7777 %>", "60481729", "ERB/Ruby"),
-        ("${7777*7777}", "60481729", "FreeMarker/OGNL"),
-        ("#{7777*7777}", "60481729", "Pebble/Thymeleaf"),
-        ("*{7777*7777}", "60481729", "Spring/Thymeleaf"),
-        ("{{=7777*7777}}", "60481729", "Slim/Haml"),
-    ]
-
     # Establish baseline for each param (to filter pre-existing content)
     baseline_body = ""
     try:
@@ -5838,13 +6287,22 @@ async def _module_api_versioning(target: str, client: httpx.AsyncClient,
             url_auth   = f"{target}{prefix}{path}"
             yield _probe("api_versioning", "GET", url_auth, note="auth check on this version")
             try:
-                # Test without auth header (strip Authorization)
-                r_no_auth = await client.get(
-                    url_auth,
-                    headers={k: v for k, v in client.headers.items()
-                              if k.lower() not in ("authorization", "cookie")},
-                    timeout=6
-                )
+                # Test without auth header (strip Authorization). httpx
+                # MERGES a request-level `headers=` dict with the client's
+                # own default headers — omitting "authorization" from that
+                # dict does NOT remove the client's already-configured
+                # default Authorization header, so this check previously
+                # always sent the real auth header regardless, silently
+                # never able to detect a real bypass. Found via live testing
+                # while building _module_graphql_deep's mutation auth-bypass
+                # check (same idiom, same bug). The only way to truly strip
+                # a client-default header for one request is to build the
+                # request, delete the header object, then send it.
+                no_auth_req = client.build_request("GET", url_auth, timeout=6)
+                for h in ("authorization", "cookie"):
+                    if h in no_auth_req.headers:
+                        del no_auth_req.headers[h]
+                r_no_auth = await client.send(no_auth_req)
                 yield _probe("api_versioning", "GET", url_auth,
                              status=r_no_auth.status_code, size=len(r_no_auth.content))
                 if (r_no_auth.status_code == 200 and len(r_no_auth.content) > 100
@@ -6241,6 +6699,7 @@ async def _stream_attack_suite(scan_id: str, req: AttackSuiteRequest, org_id: UU
             "race":      lambda: _module_race(req.target, client),
             "business":  lambda: _module_business(req.target, client, crawl_result.forms),
             "graphql":   lambda: _module_graphql(req.target, client),
+            "graphql_deep": lambda: _module_graphql_deep(req.target, client),
             "jwt":       lambda: _module_jwt(req.target, client, {**req.auth_headers, **auth_headers}),
             "redirect":  lambda: _module_redirect(req.target, client),
             "auth_bypass": lambda: _module_auth_bypass(req.target, client, spa_fallback_size),

@@ -364,11 +364,62 @@ GRAPHQL_PATHS = [
 
 GRAPHQL_INTROSPECTION = '{"query":"{__schema{types{name fields{name}}}}"}'
 GRAPHQL_BATCH = '[{"query":"{__typename}"},{"query":"{__typename}"}]'
-GRAPHQL_NOSQL_INJECTION = '{"query":"{ user(id: \\"1 OR 1=1\\") { id email } }"}'
 GRAPHQL_AUTH_BYPASS_QUERIES = [
     '{"query":"{ users { id email password } }"}',
     '{"query":"{ allUsers { id email role } }"}',
     '{"query":"{ admin { id email } }"}',
+]
+
+# Raw GraphQL query text (NOT pre-JSON-wrapped — caller does
+# json.dumps({"query": ...}) — a deep, manually-escaped JSON literal like
+# GRAPHQL_INTROSPECTION above would be error-prone at this nesting depth).
+# Unlike GRAPHQL_INTROSPECTION (which only fetches type/field NAMES), this
+# also requests each field's ARGUMENTS (2 levels of ofType unwrapping covers
+# the common NonNull(List(String)) wrapping depths) — the real schema-driven
+# testing in _module_graphql_deep needs to know what a query/mutation
+# actually accepts, which the shallow introspection query can't see.
+GRAPHQL_FULL_INTROSPECTION_QUERY = """
+{
+  __schema {
+    queryType { name }
+    mutationType { name }
+    types {
+      name
+      kind
+      fields {
+        name
+        args {
+          name
+          type {
+            name
+            kind
+            ofType { name kind ofType { name kind } }
+          }
+        }
+        type {
+          name
+          kind
+          ofType { name kind ofType { name kind } }
+        }
+      }
+    }
+  }
+}
+""".strip()
+
+# Object-shaped NoSQL operator payloads to try as a GraphQL variable's value
+# (same operator shapes _module_nosql already uses against REST JSON bodies).
+# A spec-compliant server rejects these with a type-coercion error before
+# reaching any resolver — the caller must check for GRAPHQL_TYPE_ERROR_MARKERS
+# and skip that case rather than flag it.
+GRAPHQL_NOSQL_VARIABLE_PAYLOADS = [
+    {"$ne": None},
+    {"$gt": ""},
+    {"$regex": ".*"},
+]
+GRAPHQL_TYPE_ERROR_MARKERS = [
+    "expected type", "got invalid value", "cannot represent",
+    "must be a", "of type", "variable \"$",
 ]
 
 # ── JWT ────────────────────────────────────────────────────────────────────────
