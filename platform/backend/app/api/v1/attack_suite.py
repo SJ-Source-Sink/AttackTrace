@@ -4621,7 +4621,7 @@ async def _module_oauth(target: str, client: httpx.AsyncClient) -> AsyncGenerato
                     oauth_base, True,
                     "Enforce a strict allowlist of registered redirect URIs. "
                     "Reject any redirect_uri not exactly matching a pre-registered value.",
-                    confidence="high")
+                    confidence="high", oracle="redirect-location")
         except httpx.HTTPError:
             pass
 
@@ -4639,7 +4639,7 @@ async def _module_oauth(target: str, client: httpx.AsyncClient) -> AsyncGenerato
                     oauth_base, True,
                     "Require the `state` parameter. Verify state value matches the stored value before "
                     "exchanging the authorization code.",
-                    confidence="medium")
+                    confidence="medium", oracle="bare-signal")
         except httpx.HTTPError:
             pass
 
@@ -4664,7 +4664,7 @@ async def _module_oauth(target: str, client: httpx.AsyncClient) -> AsyncGenerato
                             url, True,
                             "Validate client credentials against a secure registry. "
                             "Never accept test or default client IDs in production.",
-                            confidence="medium")
+                            confidence="medium", oracle="bare-signal")
                         break
                 except Exception:
                     pass
@@ -4706,7 +4706,7 @@ async def _module_smuggling(target: str, client: httpx.AsyncClient) -> AsyncGene
                     target, True,
                     "Reject requests with unrecognised or duplicate Transfer-Encoding values. "
                     "Ensure the reverse proxy and origin server agree on which header takes precedence.",
-                    confidence="medium")
+                    confidence="medium", oracle="bare-signal")
                 break
         except httpx.HTTPError:
             pass
@@ -4729,7 +4729,7 @@ async def _module_smuggling(target: str, client: httpx.AsyncClient) -> AsyncGene
                 target, True,
                 "Ensure all layers (reverse proxy, CDN, origin) agree on Content-Length handling. "
                 "Disable request body parsing on endpoints that don't require it.",
-                confidence="low")
+                confidence="low", oracle="bare-signal")
     except httpx.HTTPError:
         pass
 
@@ -4755,7 +4755,7 @@ async def _module_smuggling(target: str, client: httpx.AsyncClient) -> AsyncGene
                 target, True,
                 "Normalize request handling across all proxy layers. Configure the front-end to "
                 "always use Transfer-Encoding when present, or reject ambiguous requests.",
-                confidence="medium")
+                confidence="medium", oracle="timing")
     except (httpx.TimeoutException, httpx.HTTPError):
         pass
 
@@ -4797,7 +4797,7 @@ async def _module_crlf(target: str, client: httpx.AsyncClient) -> AsyncGenerator
                         url, True,
                         "Validate and encode all user input before using it in HTTP response headers. "
                         "Reject \\r and \\n characters in redirect targets and header values.",
-                        confidence="high")
+                        confidence="high", oracle="extracted-value")
                     break
             except httpx.HTTPError:
                 pass
@@ -4820,7 +4820,7 @@ async def _module_crlf(target: str, client: httpx.AsyncClient) -> AsyncGenerator
                         url, True,
                         "Sanitise all redirect / header values. Strip CRLF characters. "
                         "Use a strict CSP including `Content-Type: text/html` validation.",
-                        confidence="medium")
+                        confidence="medium", oracle="two-signal")
                     break
             except httpx.HTTPError:
                 pass
@@ -4840,7 +4840,7 @@ async def _module_crlf(target: str, client: httpx.AsyncClient) -> AsyncGenerator
                 target, True,
                 "Validate all incoming header values. Reject or sanitise CRLF in User-Agent. "
                 "Ensure log viewers escape control characters.",
-                confidence="low")
+                confidence="low", oracle="bare-signal")
     except httpx.HTTPError:
         pass
 
@@ -4879,7 +4879,7 @@ async def _module_hpp(target: str, client: httpx.AsyncClient, endpoints: set[str
                     url, True,
                     "Reject requests with duplicate parameter names. "
                     "Ensure all authorization checks read the same parameter that business logic uses.",
-                    confidence="medium")
+                    confidence="medium", oracle="differential")
                 break
         except httpx.HTTPError:
             pass
@@ -4904,7 +4904,7 @@ async def _module_hpp(target: str, client: httpx.AsyncClient, endpoints: set[str
                 waf_bypass_url, True,
                 "Configure the WAF to reject requests with duplicate parameters, or set it to "
                 "inspect all values, not just the first. Use parameterised queries to eliminate SQLi.",
-                confidence="medium")
+                confidence="medium", oracle="differential")
     except httpx.HTTPError:
         pass
 
@@ -4924,7 +4924,7 @@ async def _module_hpp(target: str, client: httpx.AsyncClient, endpoints: set[str
                 target, False,
                 "Test `?id=YOUR_ID&id=VICTIM_ID` on all resource endpoints. "
                 "Reject duplicate parameters at the framework level.",
-                confidence="high")
+                confidence="high", oracle="bare-signal")
         elif "node" in x_powered or "express" in x_powered:
             yield _finding("hpp", "hpp_node_array", "info",
                 "HPP Risk: Node.js/Express — Duplicate Parameters Form an Array",
@@ -4935,7 +4935,7 @@ async def _module_hpp(target: str, client: httpx.AsyncClient, endpoints: set[str
                 target, False,
                 "Validate that authorization checks perform strict type comparison "
                 "and cannot be confused by array inputs from duplicate parameters.",
-                confidence="medium")
+                confidence="medium", oracle="bare-signal")
     except httpx.HTTPError:
         pass
 
@@ -4978,7 +4978,7 @@ async def _module_saml(target: str, client: httpx.AsyncClient) -> AsyncGenerator
                     target, False,
                     "Test SAML responses with SAML Raider (Burp extension) for signature wrapping "
                     "and attribute pollution before going live.",
-                    confidence="low")
+                    confidence="low", oracle="bare-signal")
             return
         except httpx.HTTPError:
             return
@@ -4995,7 +4995,7 @@ async def _module_saml(target: str, client: httpx.AsyncClient) -> AsyncGenerator
         "Test with Burp Suite SAML Raider. Ensure XML signature validation uses "
         "strict canonicalization. Reject SAMLResponse with unsigned assertions. "
         "Use the ID attribute of the signed Assertion, not position.",
-        confidence="high")
+        confidence="high", oracle="bare-signal")
 
     # ── Test 1: XXE in SAMLResponse ───────────────────────────────────────────
     import base64 as _b64
@@ -5027,7 +5027,7 @@ async def _module_saml(target: str, client: httpx.AsyncClient) -> AsyncGenerator
                 "Disable XML external entity processing in the SAML library. "
                 "Use `libxml_disable_entity_loader(true)` (PHP) or equivalent. "
                 "Validate and reject DTD declarations in SAMLResponse.",
-                confidence="high")
+                confidence="high", oracle="extracted-value")
         elif r.status_code not in (400, 415) and "error" not in body.lower()[:100]:
             yield _finding("saml", "saml_xxe_no_rejection", "medium",
                 "SAML ACS Accepts DTD Declarations — Possible XXE",
@@ -5037,7 +5037,7 @@ async def _module_saml(target: str, client: httpx.AsyncClient) -> AsyncGenerator
                 f"SAMLResponse with XXE payload → {r.status_code}",
                 saml_endpoint, True,
                 "Disable XML external entities. Test with an OOB XXE payload using Burp Collaborator.",
-                confidence="low")
+                confidence="low", oracle="bare-signal")
     except httpx.HTTPError:
         pass
 
@@ -5070,7 +5070,7 @@ async def _module_saml(target: str, client: httpx.AsyncClient) -> AsyncGenerator
                 "Configure the SAML SP library to require signed Assertions. "
                 "Reject responses where the Assertion lacks a valid ds:Signature. "
                 "Use SAML Raider to test signature stripping and wrapping.",
-                confidence="medium")
+                confidence="medium", oracle="bare-signal")
     except httpx.HTTPError:
         pass
 
@@ -5142,7 +5142,7 @@ async def _module_websocket(target: str, client: httpx.AsyncClient) -> AsyncGene
                         "Validate the `Origin` header on every WebSocket upgrade request. "
                         "Reject connections from unexpected origins. "
                         "Implement a CSRF token in the WebSocket handshake URL or as a first message.",
-                        confidence="medium")
+                        confidence="medium", oracle="bare-signal")
                 elif r.status_code == 101 and r_cross.status_code in (403, 400):
                     yield _finding("websocket", "ws_origin_check_present", "info",
                         f"WebSocket Endpoint Found — Origin Check Present",
@@ -5152,7 +5152,7 @@ async def _module_websocket(target: str, client: httpx.AsyncClient) -> AsyncGene
                         http_url, False,
                         "Continue validating Origin on every WS connection. "
                         "Also ensure authentication tokens are required in the handshake.",
-                        confidence="medium")
+                        confidence="medium", oracle="bare-signal")
                 else:
                     yield _finding("websocket", "ws_endpoint_found", "info",
                         f"WebSocket Endpoint Detected — Manual CSWSH Testing Required",
@@ -5163,7 +5163,7 @@ async def _module_websocket(target: str, client: httpx.AsyncClient) -> AsyncGene
                         http_url, False,
                         "Test manually: intercept WS handshake in Burp, change Origin to evil.com. "
                         "If the server sends user data, CSWSH is confirmed.",
-                        confidence="low")
+                        confidence="low", oracle="bare-signal")
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
@@ -5221,7 +5221,7 @@ async def _module_host_header(target: str, client: httpx.AsyncClient) -> AsyncGe
                         "Never build reset URLs from the Host header. Use an explicit base URL "
                         "configured server-side (e.g. FRONTEND_URL env var). "
                         "Validate the Host header against an allowlist at the web layer.",
-                        confidence="high")
+                        confidence="high", oracle="bare-signal")
                     break
         except httpx.HTTPError:
             pass
@@ -5249,7 +5249,7 @@ async def _module_host_header(target: str, client: httpx.AsyncClient) -> AsyncGe
                     "Do not reflect the Host/X-Forwarded-Host header in responses. "
                     "Add `Vary: Host` or ensure your cache key includes the Host header. "
                     "Validate Host against an allowlist before trusting it.",
-                    confidence="high")
+                    confidence="high", oracle="reflected")
                 break
         except httpx.HTTPError:
             pass
@@ -5279,7 +5279,7 @@ async def _module_host_header(target: str, client: httpx.AsyncClient) -> AsyncGe
                         "Configure the reverse proxy to validate the Host header against a strict "
                         "allowlist. Return 400 for unknown hosts. "
                         "Never route to internal services based solely on the Host header.",
-                        confidence="medium")
+                        confidence="medium", oracle="bare-signal")
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
@@ -5315,10 +5315,14 @@ async def _module_path_traversal(target: str, client: httpx.AsyncClient,
         "php://filter/convert.base64-encode/resource=index.php",
         "php://filter/read=convert.base64-encode/resource=../config.php",
     ]
-    _LFI_INDICATORS = [
-        "root:x:", "nobody:", "[fonts]", "[extensions]", "PATH=",  # /etc/passwd, win.ini
-        "127.0.0.1", "localhost",                                    # /etc/hosts
-    ]
+    # Split into strong (highly specific to an actual file read) vs weak
+    # (generic strings like "127.0.0.1"/"localhost" that legitimately appear
+    # on ordinary pages too) — mixing them into one flat list meant a normal
+    # page mentioning "localhost" could false-positive as confirmed LFI.
+    # Found via a 2026-09-15 audit.
+    _LFI_STRONG_INDICATORS = ["root:x:", "nobody:", "[fonts]", "[extensions]", "PATH="]
+    _LFI_WEAK_INDICATORS = ["127.0.0.1", "localhost"]
+    _LFI_INDICATORS = _LFI_STRONG_INDICATORS + _LFI_WEAK_INDICATORS
 
     # Parameters that commonly lead to file inclusion
     lfi_params = ["file", "path", "page", "include", "template", "view", "load",
@@ -5348,6 +5352,7 @@ async def _module_path_traversal(target: str, client: httpx.AsyncClient,
                                  size=len(r.content))
                     if r.status_code == 200 and any(ind in r.text for ind in _LFI_INDICATORS):
                         hit.add(param)
+                        lfi_strong_hit = any(ind in r.text for ind in _LFI_STRONG_INDICATORS)
                         yield _finding("path_traversal", "lfi_url_param", "critical",
                             f"Local File Inclusion via '{param}' Parameter",
                             f"The `{param}` parameter allows reading local server files. "
@@ -5360,7 +5365,8 @@ async def _module_path_traversal(target: str, client: httpx.AsyncClient,
                             "Never pass user input directly to file-reading functions. "
                             "Implement a strict allowlist of permitted file paths. "
                             "Chroot the web server or run in a container with minimal filesystem access.",
-                            confidence="high")
+                            confidence="high",
+                            oracle="extracted-value" if lfi_strong_hit else "error-string")
                         break
                 except httpx.HTTPError:
                     pass
@@ -5395,7 +5401,7 @@ async def _module_path_traversal(target: str, client: httpx.AsyncClient,
                                 "Disable allow_url_include and allow_url_fopen in php.ini. "
                                 "Validate file includes against a strict allowlist. "
                                 "Never expose the document root to user-controlled path parameters.",
-                                confidence="high")
+                                confidence="high", oracle="extracted-value")
                     except Exception:
                         pass
             except httpx.HTTPError:
@@ -5420,7 +5426,7 @@ async def _module_path_traversal(target: str, client: httpx.AsyncClient,
                     test_url, True,
                     "Upgrade to PHP 5.3.4+. Validate file paths against an allowlist of permitted names. "
                     "Use realpath() and basename() to normalize before any file operation.",
-                    confidence="high")
+                    confidence="high", oracle="extracted-value")
         except httpx.HTTPError:
             pass
         await asyncio.sleep(0)
@@ -5474,7 +5480,7 @@ async def _module_oauth_advanced(target: str, client: httpx.AsyncClient) -> Asyn
                             url, False,
                             "Restrict the discovery document to internal clients if not needed publicly. "
                             "Remove deprecated grant types (implicit, password).",
-                            confidence="high")
+                            confidence="high", oracle="bare-signal")
                     except Exception:
                         pass
                 if not oauth_base:
@@ -5501,7 +5507,7 @@ async def _module_oauth_advanced(target: str, client: httpx.AsyncClient) -> Asyn
                     target, False,
                     "Test the OAuth flow manually. Ensure PKCE is enforced. "
                     "Verify the state parameter is present and validated.",
-                    confidence="medium")
+                    confidence="medium", oracle="bare-signal")
         except httpx.HTTPError:
             pass
         return
@@ -5529,7 +5535,7 @@ async def _module_oauth_advanced(target: str, client: httpx.AsyncClient) -> Asyn
                         "Require the `state` parameter in all authorization requests. "
                         "Validate state on the callback and reject mismatches. "
                         "Consider using PKCE as additional protection.",
-                        confidence="medium")
+                        confidence="medium", oracle="redirect-location")
     except httpx.HTTPError:
         pass
 
@@ -5556,7 +5562,7 @@ async def _module_oauth_advanced(target: str, client: httpx.AsyncClient) -> Asyn
                     "Enforce PKCE (code_challenge + code_challenge_method=S256) for all public clients. "
                     "Reject authorization requests without code_challenge from public client_ids. "
                     "See RFC 7636 and RFC 9700.",
-                    confidence="medium")
+                    confidence="medium", oracle="bare-signal")
     except httpx.HTTPError:
         pass
 
@@ -5582,7 +5588,7 @@ async def _module_oauth_advanced(target: str, client: httpx.AsyncClient) -> Asyn
                     "Validate all requested scopes against the client's pre-registered allowed scopes. "
                     "Return `invalid_scope` error for any unauthorized scope request. "
                     "Never grant more permissions than the client is registered to request.",
-                    confidence="medium")
+                    confidence="medium", oracle="bare-signal")
                 break
         except httpx.HTTPError:
             pass
@@ -5614,7 +5620,7 @@ async def _module_oauth_advanced(target: str, client: httpx.AsyncClient) -> Asyn
                         "Move all OAuth secrets to the server side. "
                         "Use the Authorization Code flow with PKCE for SPAs (no client_secret needed). "
                         "Rotate the exposed secret immediately.",
-                        confidence="high")
+                        confidence="high", oracle="pattern-entropy")
                     break
     except httpx.HTTPError:
         pass
@@ -5676,7 +5682,7 @@ async def _module_type_confusion(target: str, client: httpx.AsyncClient,
                             "Use strict type checking (=== in PHP, strict comparison in JS). "
                             "Validate all input types before passing to authentication functions. "
                             "Use parameterized queries — never concatenate user input into auth logic.",
-                            confidence="high")
+                            confidence="high", oracle="bare-signal")
                         break
             except httpx.HTTPError:
                 pass
@@ -5690,22 +5696,45 @@ async def _module_type_confusion(target: str, client: httpx.AsyncClient,
         for null_payload in [{"role": None}, {"admin": None}, {"is_admin": None}]:
             try:
                 r_normal = await client.get(url, timeout=6)
+                # r_normal was fetched but never checked before flagging — a PATCH
+                # succeeding on an endpoint that isn't even a real resource (404s
+                # on GET) proves nothing about role coercion. Found via a
+                # 2026-09-15 audit. Now require the endpoint to actually exist.
+                if r_normal.status_code == 404:
+                    continue
                 r_null   = await client.patch(url, json=null_payload, timeout=6)
                 yield _probe("type_confusion", "PATCH", url, status=r_null.status_code,
                              payload=str(null_payload), note="null coercion in role field")
                 if r_null.status_code in (200, 204):
+                    # Independently confirm via read-back whether the null value was
+                    # actually persisted, same discipline as the mass-assignment fix —
+                    # a write response alone (esp. a 204 with no body) doesn't prove
+                    # the field was stored as null rather than ignored.
+                    confirmed_null = False
+                    try:
+                        readback = await client.get(url, timeout=6)
+                        if readback.status_code == 200:
+                            rb_data = readback.json()
+                            field = list(null_payload.keys())[0]
+                            confirmed_null = isinstance(rb_data, dict) and rb_data.get(field) is None and field in rb_data
+                    except Exception:
+                        pass
                     yield _finding("type_confusion", "null_role_coercion", "high",
                         f"JSON Null Coercion — Role/Admin Field Set to null Accepted",
-                        f"PATCH `{ep}` with `{null_payload}` returned {r_null.status_code}. "
-                        f"If the server stores null for role and then checks `if user.role` (truthy check), "
+                        f"PATCH `{ep}` with `{null_payload}` returned {r_null.status_code}"
+                        + (" and was confirmed persisted via a follow-up GET"
+                           if confirmed_null else
+                           " (not independently confirmed as persisted via read-back)")
+                        + f". If the server stores null for role and then checks `if user.role` (truthy check), "
                         f"the user could gain or lose permissions unexpectedly. "
                         f"Some implementations treat null role as a superuser (no restrictions applied).",
-                        f"URL: {url}\nPayload: {null_payload}\nResponse: {r_null.status_code}",
+                        f"URL: {url}\nPayload: {null_payload}\nResponse: {r_null.status_code}\n"
+                        f"Confirmed via independent GET read-back: {confirmed_null}",
                         url, True,
                         "Use strict type validation for all role/permission fields. "
                         "Never use truthy checks for authorization — compare against explicit allowed values. "
                         "Reject requests that set role/admin/permission fields to null.",
-                        confidence="medium")
+                        confidence="medium", oracle="extracted-value" if confirmed_null else "bare-signal")
             except httpx.HTTPError:
                 pass
             await asyncio.sleep(0)
@@ -5734,7 +5763,7 @@ async def _module_type_confusion(target: str, client: httpx.AsyncClient,
                         "Cast all ID parameters to the expected type before use. "
                         "Use === (strict equality) in JavaScript and cast to int in PHP. "
                         "Validate IDs match the expected format (UUID, integer) before querying.",
-                        confidence="medium")
+                        confidence="medium", oracle="bare-signal")
             except httpx.HTTPError:
                 pass
             await asyncio.sleep(0)
@@ -5796,7 +5825,7 @@ async def _module_api_versioning(target: str, client: httpx.AsyncClient,
             target, False,
             "Decommission all unused API versions. Enforce identical security controls "
             "across all active versions. Add deprecation warnings and sunset dates.",
-            confidence="high")
+            confidence="high", oracle="bare-signal")
 
     # ── Test 2: Auth bypass via version downgrade ─────────────────────────────
     # Check if an authenticated endpoint on v2 is accessible without auth on v1
@@ -5832,7 +5861,7 @@ async def _module_api_versioning(target: str, client: httpx.AsyncClient,
                         "Apply authentication middleware to ALL API versions, not just the latest. "
                         "Decommission or restrict deprecated versions behind feature flags. "
                         "Audit every endpoint across every active version for auth gaps.",
-                        confidence="high")
+                        confidence="high", oracle="bare-signal")
             except httpx.HTTPError:
                 pass
             await asyncio.sleep(0)
@@ -5857,7 +5886,7 @@ async def _module_api_versioning(target: str, client: httpx.AsyncClient,
                         test_ep, False,
                         "Ensure all security controls (auth, rate limiting, input validation) "
                         "are version-agnostic and applied uniformly.",
-                        confidence="medium")
+                        confidence="medium", oracle="bare-signal")
                     break
             except httpx.HTTPError:
                 pass
