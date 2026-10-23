@@ -23,25 +23,30 @@
 ## Platform Preview
 
 <p align="center">
-  <img src="docs/images/report-dashboard.png" alt="AttackTrace Dashboard" width="100%">
+  <img src="docs/images/dashboard.png" alt="AttackTrace Dashboard" width="100%">
 </p>
 
 <details>
 <summary><b>More Screenshots</b></summary>
 
-### Subdomains Discovery
+### Attack Suite — 41 modules, presets, AI Agent tab
 <p align="center">
-  <img src="docs/images/report-subdomains.png" alt="Subdomains" width="100%">
+  <img src="docs/images/attack-suite.png" alt="Attack Suite" width="100%">
 </p>
 
-### Web Applications
+### AI Provider — Claude API or self-hosted Qwen
 <p align="center">
-  <img src="docs/images/report-webapps.png" alt="Web Applications" width="100%">
+  <img src="docs/images/settings-integrations.png" alt="AI Provider settings" width="100%">
 </p>
 
-### Screenshot Gallery
+### Live Scan Activity
 <p align="center">
-  <img src="docs/images/report-screenshots.png" alt="Screenshot Gallery" width="100%">
+  <img src="docs/images/scan-activity.png" alt="Scan Activity feed" width="100%">
+</p>
+
+### Live AI Activity
+<p align="center">
+  <img src="docs/images/ai-activity.png" alt="AI Activity feed" width="100%">
 </p>
 
 </details>
@@ -55,7 +60,7 @@
 | 🔍 **Discover** | Enumerate subdomains, IPs, web apps, cloud buckets, and employee identities from a single domain |
 | 🛡️ **Scan** | Run Nuclei, Nmap, ffuf, WAF detection, and custom attack modules against discovered assets |
 | 📊 **Track** | Unified findings dashboard across recon, manual, and mobile scans — with KEV/EPSS enrichment |
-| 🤖 **Triage** | Claude AI auto-classifies severity, detects false positives, generates PoC and remediation tickets |
+| 🤖 **Triage** | Claude or self-hosted Qwen auto-classifies severity, detects false positives, generates PoC and remediation tickets |
 | 🗺️ **Map** | Visualize attack paths with MITRE ATT&CK mapping, APT group intelligence, and network graphs |
 | 📱 **Mobile** | Static + dynamic analysis of APK/IPA files with findings federated into the central dashboard |
 | 👥 **Collaborate** | Multi-tenant, role-based access for pentest teams with audit logging and ticket integration |
@@ -93,6 +98,19 @@
 | **Threat Intel** | Shodan, Censys, SecurityTrails, AlienVault OTX, GreyNoise, URLScan, PassiveTotal |
 | **Enrichment** | CVE/CVSS from NVD, CISA KEV status, FIRST.org EPSS scores, priority scoring |
 
+### Platform Highlights (latest)
+
+| Feature | Description |
+|---|---|
+| **Multi-provider AI** | Switch between the Claude API and a self-hosted OpenAI-compatible model (e.g. Qwen) in Settings → Integrations; one seam (`llm_client.py`) serves every AI feature |
+| **Live AI Activity** | Real-time feed of every AI call platform-wide — feature, model, full prompt/response, latency (live-only, nothing persisted) |
+| **Live Scan Activity** | Real-time feed across every scanner — which tool, which target, each request/probe, grouped by run |
+| **Cross-scanner Correlation** | Groups open findings by asset and synthesizes compound CRITICAL/HIGH findings (e.g. takeover + exposed service, secret + live service, KEV + admin port), always linking back to the real constituent findings |
+| **Confidence Grading** | False-positive gate in code: confidence derived from the verification oracle (differential, timing, extracted value, …) with a plain-English explanation on each finding |
+| **Professional Reports** | HTML/PDF assessment reports: executive summary, overall risk rating, top remediation priorities ranked by KEV → EPSS → CVSS, per-finding evidence and remediation |
+| **Aggressive-scan Auto-chain** | Aggressive scans automatically follow up with Nuclei, secrets, JS scanner and takeover checks |
+| **Unified Findings** | ~40 scanners (cloud, container, IaC, email, supply chain, MCP, API, AI/LLM, mobile…) ingest into one deduplicated, org-scoped findings table |
+
 ### Security Tools
 
 | Tool | Description |
@@ -101,15 +119,16 @@
 | **Nuclei Scanner** | 3-mode template selector (All / Categories / Specific), severity filter, live streaming progress, CVE enrichment, export JSON/CSV/Markdown, scan history |
 | **ffuf Fuzzer** | Bundled / SecLists / custom wordlist modes, live progress log, results table with status/size/words/lines, base64-decoded FUZZ inputs, scan history |
 | **Firewall & WAF Scanner** | 4 tabs: WAF Detection (10 vendors, confidence score), WAF Bypass Probe (13 evasion techniques, live SSE), Port Firewall Mapper (5 nmap modes), Rule Analyzer (iptables/Cisco ACL/pfSense XML); scan history persisted in localStorage |
-| **Attack Suite** | 24-module adaptive web scanner — crawl, headers, CORS, CSRF, XSS, SQLi, SSRF, IDOR, JWT, GraphQL, NoSQL, SSTI, XXE, deserialization, file upload, and more |
-| **AI Attack Suite** | Autonomous AI pentester — real exploit execution, CVSS scoring, structured reports |
+| **Attack Suite** | 41-module adaptive web scanner — crawl, headers, CORS, CSRF, XSS, SQLi, SSRF, IDOR, JWT, GraphQL (incl. schema-driven deep testing), NoSQL, SSTI, XXE, deserialization, file upload, host-header, OAuth, type confusion, API versioning, and more. Every finding's confidence is graded server-side from the oracle that confirmed it |
+| **Custom Detection Templates** | Declarative YAML checks (`app/scanner_templates/*.yaml`) run alongside the built-in modules — add new detections without touching Python |
+| **AI Agent** | Autonomous, tool-using pentest agent. Strictly scope-enforced to your org's assets, fixed non-destructive tools, provider-aware budget cap, full audit trail, and a kill switch |
 | **Takeover Checker** | CNAME chain analysis, 42+ service fingerprints, NS/MX takeover detection |
 | **Attack Path Mapper** | MITRE ATT&CK path mapping for AD/AWS/Azure/GCP; APT Groups browser (187 threat actors with country attribution and MITRE descriptions); CVE correlation; intel sync with 26k+ items |
 | **Network Map** | Interactive WebGL graph (xyflow); severity-colored nodes; domain→subdomain→IP→webapp hierarchy; attack path animation; scan selector; node detail panel with actions |
 | **Mobile Scanner (MSRA)** | APK/IPA/JAR static analysis, AI-driven dynamic analysis, Claude PoC generation, findings federation into central dashboard |
 | **Test Case Generator** | 169 test cases across 18 categories (Authorization, Injection, Deserialization, Business Logic, API, Cloud, Mobile, and more) sourced from HackerOne/Bugcrowd reports, PortSwigger, OWASP WSTG; Standard or AI-Assisted mode |
 
-### AI Features (Claude-powered)
+### AI Features (Claude or self-hosted Qwen)
 
 | Feature | Description |
 |---|---|
