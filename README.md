@@ -29,6 +29,16 @@
 <details>
 <summary><b>More Screenshots</b></summary>
 
+### Findings — severity, confidence, status workflow
+<p align="center">
+  <img src="docs/images/findings.png" alt="Findings" width="100%">
+</p>
+
+### Network Map — domain → subdomain → IP → web app
+<p align="center">
+  <img src="docs/images/network.png" alt="Network Map" width="100%">
+</p>
+
 ### Attack Suite — 41 modules, presets, AI Agent tab
 <p align="center">
   <img src="docs/images/attack-suite.png" alt="Attack Suite" width="100%">
