@@ -133,7 +133,13 @@ async def _run_auto_nuclei(org_id, domains: list[str]) -> dict:
         for domain in domains:
             async with Session() as db:
                 scan_id = str(_uuid.uuid4())
-                req = NucleiScanRequest(target=domain, categories=_NUCLEI_AUTO_CATEGORIES)
+                req = NucleiScanRequest(
+                    target=domain,
+                    categories=_NUCLEI_AUTO_CATEGORIES,
+                    # Category tags now resolve to thousands of real templates; keep the
+                    # automatic chain bounded to the findings worth auto-reporting.
+                    severity=["critical", "high"],
+                )
                 async for _ in _stream_nuclei(scan_id, req, fake_request, org_id):
                     pass
         return {"status": "completed", "domains_scanned": len(domains), "categories": _NUCLEI_AUTO_CATEGORIES}

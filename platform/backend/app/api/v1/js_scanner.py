@@ -1545,6 +1545,7 @@ async def _run_js_scan(
     def _count_finding(f: dict) -> None:
         nonlocal secrets_count, dom_xss_count, proto_pollution_count, env_leak_count
         nonlocal security_header_count, sri_missing_count, vuln_lib_count, open_redirect_count, hardcoded_auth_count
+        nonlocal confirmed_xss_count
         t = f.get("type", "")
         if t == "secret":
             secrets_count += 1

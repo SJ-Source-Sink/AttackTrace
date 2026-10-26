@@ -153,7 +153,7 @@ async def lifespan(app: FastAPI):
     # Pre-load nuclei templates in background (12k+ YAML files, ~20s blocking I/O)
     import asyncio as _asyncio
     from app.api.v1.nuclei import preload_templates
-    _asyncio.create_task(preload_templates())
+    app.state.preload_task = _asyncio.create_task(preload_templates())
     logger.info("Nuclei template pre-loading started in background")
 
     # On startup: recover scans that were PENDING or RUNNING when the server last died.

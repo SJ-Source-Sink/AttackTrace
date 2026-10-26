@@ -192,6 +192,16 @@ async def send_webhook(
 
 # --- Event-Specific Notification Helpers ---
 
+
+_BG_TASKS: set = set()
+
+
+def _spawn(coro) -> None:
+    """Fire-and-forget with a strong reference so the task isn't garbage-collected mid-flight."""
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+
 async def notify_scan_completed(
     org_id: str,
     scan_id: str,
@@ -231,7 +241,7 @@ async def notify_scan_completed(
             "target_domains": target_domains,
             "findings_count": findings_count,
         }
-        asyncio.create_task(
+        _spawn(
             send_webhook(webhook_url, "scan.completed", payload, webhook_secret)
         )
 
@@ -262,7 +272,7 @@ async def notify_scan_failed(
             "target_domains": target_domains,
             "error_message": error_message,
         }
-        asyncio.create_task(
+        _spawn(
             send_webhook(webhook_url, "scan.failed", payload, webhook_secret)
         )
 
@@ -300,7 +310,7 @@ async def notify_critical_finding(
             "severity": severity,
             "affected_asset": affected_asset,
         }
-        asyncio.create_task(
+        _spawn(
             send_webhook(webhook_url, "finding.created", payload, webhook_secret)
         )
 

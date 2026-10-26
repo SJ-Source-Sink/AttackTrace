@@ -216,6 +216,22 @@ TEMPLATE_CATEGORIES = [
 ]
 
 
+# The UI's category names are not nuclei's real tag names — passing them straight to
+# `-tags` matched ~0 templates for most of them (e.g. "technologies" -> 2 lines vs
+# the real "tech" tag's 1221 templates), so the scan failed with "no templates
+# provided". Verified against the installed nuclei-templates with `nuclei -tl`.
+_CATEGORY_TAGS = {
+    "cves": "cve",
+    "exposures": "exposure",
+    "misconfiguration": "misconfig,misconfiguration",
+    "takeovers": "takeover",
+    "technologies": "tech",
+    "default-logins": "default-login",
+    "fuzzing": "dast,fuzz,fuzzing",
+    "workflows": "workflow",
+}
+
+
 class NucleiScanRequest(BaseModel):
     target: str
     templates: list[str] | None = None          # specific template IDs
@@ -319,7 +335,7 @@ def _build_nuclei_cmd(req: NucleiScanRequest, org_id: uuid.UUID | None = None) -
             cmd.extend(["-t", str(templates_dir)])
         for c in req.categories:
             if c in TEMPLATE_CATEGORIES:
-                cmd.extend(["-tags", c])
+                cmd.extend(["-tags", _CATEGORY_TAGS.get(c, c)])
     else:
         # All templates — explicitly point at the templates directory
         if templates_dir:
