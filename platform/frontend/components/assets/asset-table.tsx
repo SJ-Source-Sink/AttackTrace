@@ -414,6 +414,7 @@ export function AssetTable({
                   variant="ghost"
                   size="sm"
                   className="h-7 w-7 p-0 text-zinc-500 hover:text-zinc-300"
+                  aria-label="Asset actions"
                 >
                   <MoreHorizontal className="h-4 w-4" />
                 </Button>

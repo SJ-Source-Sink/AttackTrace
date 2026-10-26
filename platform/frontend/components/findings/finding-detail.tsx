@@ -181,6 +181,8 @@ function RevalidateButton({ finding }: { finding: Finding }) {
 
 export function FindingDetail({ finding, onClose }: FindingDetailProps) {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  // Once deleted, unmount history/comments so their queries don't refetch the (now gone) finding and 404.
+  const [deleted, setDeleted] = useState(false);
   const deleteFinding = useDeleteFinding();
   const confidenceColor =
     finding.ai_triage?.confidence !== undefined
@@ -257,7 +259,7 @@ export function FindingDetail({ finding, onClose }: FindingDetailProps) {
             </Button>
             <Button
               variant="destructive"
-              onClick={() => deleteFinding.mutate(finding.id, { onSuccess: () => { setShowDeleteConfirm(false); onClose(); } })}
+              onClick={() => deleteFinding.mutate(finding.id, { onSuccess: () => { setDeleted(true); setShowDeleteConfirm(false); onClose(); } })}
               disabled={deleteFinding.isPending}
             >
               {deleteFinding.isPending ? "Deleting..." : "Delete"}
@@ -448,12 +450,12 @@ export function FindingDetail({ finding, onClose }: FindingDetailProps) {
           <Separator />
 
           {/* History */}
-          <FindingHistory findingId={finding.id} />
+          {!deleted && <FindingHistory findingId={finding.id} />}
 
           <Separator />
 
           {/* Comments */}
-          <FindingComments findingId={finding.id} />
+          {!deleted && <FindingComments findingId={finding.id} />}
         </div>
       </ScrollArea>
     </div>

@@ -225,6 +225,7 @@ export default function AssetsPage() {
                   onClick={() => pushParams(filters, Math.max(1, page - 1))}
                   disabled={page === 1}
                   className="h-8"
+                  aria-label="Previous page"
                 >
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
@@ -237,6 +238,7 @@ export default function AssetsPage() {
                   onClick={() => pushParams(filters, Math.min(totalPages, page + 1))}
                   disabled={page === totalPages}
                   className="h-8"
+                  aria-label="Next page"
                 >
                   <ChevronRight className="h-4 w-4" />
                 </Button>

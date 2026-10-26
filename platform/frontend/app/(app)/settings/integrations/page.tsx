@@ -275,6 +275,7 @@ function AIProviderCard({
                     size="icon"
                     className="absolute right-1 top-1/2 -translate-y-1/2 h-6 w-6 text-zinc-500 hover:text-zinc-300"
                     onClick={() => setShowFields((prev) => ({ ...prev, [field.key]: !prev[field.key] }))}
+                    aria-label={showFields[field.key] ? `Hide ${field.label ?? field.key}` : `Show ${field.label ?? field.key}`}
                   >
                     {showFields[field.key] ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
                   </Button>
@@ -430,6 +431,7 @@ function IntegrationCard({
                     size="icon"
                     className="absolute right-1 top-1/2 -translate-y-1/2 h-6 w-6 text-zinc-500 hover:text-zinc-300"
                     onClick={() => setShowFields((prev) => ({ ...prev, [field.key]: !prev[field.key] }))}
+                    aria-label={showFields[field.key] ? `Hide ${field.label ?? field.key}` : `Show ${field.label ?? field.key}`}
                   >
                     {showFields[field.key] ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
                   </Button>

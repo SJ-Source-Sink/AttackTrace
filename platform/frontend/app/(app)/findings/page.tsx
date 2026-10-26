@@ -2014,7 +2014,7 @@ function CreateFindingDrawer({
         </div>
 
         {/* Form */}
-        <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+        <form id="create-finding-form" onSubmit={handleSubmit} className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
           {/* Title */}
           <div className="space-y-1.5">
             <label className="text-xs font-medium text-zinc-400 uppercase tracking-wider">
@@ -2181,11 +2181,8 @@ function CreateFindingDrawer({
             Cancel
           </Button>
           <Button
-            onClick={(e) => {
-              e.preventDefault();
-              const formEl = document.querySelector("form");
-              formEl?.requestSubmit();
-            }}
+            type="submit"
+            form="create-finding-form"
             disabled={createFinding.isPending}
             className="bg-orange-600 hover:bg-orange-500 text-white"
           >
@@ -2207,6 +2204,16 @@ export default function FindingsPage() {
   const [page, setPage] = useState(1);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  // Search runs server-side (the list is paginated, so filtering only the loaded page
+  // would miss matches elsewhere and leave the counts wrong) — debounce keystrokes.
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setDebouncedSearch(searchQuery.trim());
+      setPage(1);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkLoading, setBulkLoading] = useState(false);
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
@@ -2225,11 +2232,13 @@ export default function FindingsPage() {
         // category ("secrets") without needing an exact-match/OR filter.
         category: secretsOnly ? "secret" : undefined,
         overdue: overdueOnly || undefined,
+        search: debouncedSearch || undefined,
         page,
         per_page: PER_PAGE,
       }
     : {
         suppressed: true,
+        search: debouncedSearch || undefined,
         page,
         per_page: PER_PAGE,
       };
@@ -2270,12 +2279,8 @@ export default function FindingsPage() {
     setPage(1);
   };
 
-  // Search filter applied client-side on the current page's findings
-  const filteredFindings = searchQuery.trim()
-    ? findings.filter((f) =>
-        f.title?.toLowerCase().includes(searchQuery.toLowerCase())
-      )
-    : findings;
+  // Search is applied by the API (see debouncedSearch above), so the list is already filtered.
+  const filteredFindings = findings;
 
   // Select all visible (filtered) findings on current page
   const allVisibleSelected =
@@ -2548,7 +2553,7 @@ export default function FindingsPage() {
           <div>
             <h1 className="text-2xl font-bold text-zinc-100">Findings</h1>
             <p className="text-sm text-zinc-400 mt-0.5">
-              {total.toLocaleString()} findings {hasFilters && viewMode === 'active' && "matching filters"}
+              {total.toLocaleString()} {total === 1 ? "finding" : "findings"} {hasFilters && viewMode === 'active' && "matching filters"}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -2713,6 +2718,7 @@ export default function FindingsPage() {
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
                   disabled={page === 1}
                   className="h-8"
+                  aria-label="Previous page"
                 >
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
@@ -2725,6 +2731,7 @@ export default function FindingsPage() {
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                   disabled={page === totalPages}
                   className="h-8"
+                  aria-label="Next page"
                 >
                   <ChevronRight className="h-4 w-4" />
                 </Button>

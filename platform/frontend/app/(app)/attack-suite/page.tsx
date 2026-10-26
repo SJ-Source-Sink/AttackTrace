@@ -795,6 +795,7 @@ export default function AttackSuitePage() {
                       <Checkbox
                         checked={selectedModules.has(mod.id)}
                         onCheckedChange={() => !isScanning && toggleModule(mod.id)}
+                        aria-label={`Include ${mod.label} module`}
                         className="mt-0.5"
                       />
                       <div className="min-w-0 flex-1">

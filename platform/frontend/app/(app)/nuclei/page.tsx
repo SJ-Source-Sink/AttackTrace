@@ -289,6 +289,8 @@ export default function NucleiPage() {
   }, []);
   const [progressLog, setProgressLog]   = useState<string[]>([]);
   const [runningCmd, setRunningCmd]     = useState<string>("");
+  // nuclei's periodic `-stats` JSON lines drive a progress bar instead of cluttering the log
+  const [scanStats, setScanStats]       = useState<{ percent: number; requests: string; matched: string; errors: string; templates: string } | null>(null);
   const progressEndRef                  = useRef<HTMLDivElement | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
@@ -364,6 +366,7 @@ export default function NucleiPage() {
     setCounts({});
     setFilterSev(null);
     setProgressLog([]);
+    setScanStats(null);
     setRunningCmd("");
 
     abortRef.current = new AbortController();
@@ -423,7 +426,23 @@ export default function NucleiPage() {
           if (event === "start") {
             setRunningCmd(data.command ?? "");
           } else if (event === "progress") {
-            setProgressLog((prev) => [...prev.slice(-199), data.message]);
+            const msg: string = data.message ?? "";
+            if (msg.startsWith('{"duration"')) {
+              try {
+                const st = JSON.parse(msg);
+                setScanStats({
+                  percent: Math.min(100, Number(st.percent) || 0),
+                  requests: String(st.requests ?? "0"),
+                  matched: String(st.matched ?? "0"),
+                  errors: String(st.errors ?? "0"),
+                  templates: String(st.templates ?? "0"),
+                });
+              } catch {
+                setProgressLog((prev) => [...prev.slice(-199), msg]);
+              }
+            } else {
+              setProgressLog((prev) => [...prev.slice(-199), msg]);
+            }
           } else if (event === "finding") {
             allFindings.push(data as NucleiFinding);
             const sev = (data.severity ?? "info").toLowerCase();
@@ -877,6 +896,20 @@ export default function NucleiPage() {
                   </span>
                 )}
               </div>
+              {scanStats && (
+                <div className="px-3 py-2 border-b border-zinc-800 space-y-1.5">
+                  <div className="h-1.5 w-full rounded-full bg-zinc-800 overflow-hidden">
+                    <div className="h-full bg-blue-500 transition-all" style={{ width: `${scanStats.percent}%` }} />
+                  </div>
+                  <div className="flex gap-4 text-[11px] text-zinc-500 font-mono">
+                    <span>{scanStats.percent}%</span>
+                    <span>{scanStats.templates} templates</span>
+                    <span>{scanStats.requests} requests</span>
+                    <span>{scanStats.matched} matched</span>
+                    {scanStats.errors !== "0" && <span className="text-amber-500">{scanStats.errors} errors</span>}
+                  </div>
+                </div>
+              )}
               <div className="max-h-48 overflow-y-auto p-3 space-y-0.5">
                 {progressLog.length === 0 ? (
                   <p className="text-xs text-zinc-600">Waiting for nuclei output…</p>
