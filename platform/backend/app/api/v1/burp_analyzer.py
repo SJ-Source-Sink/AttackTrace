@@ -1222,6 +1222,7 @@ async def verify_request(
     original_status: int,
     req_timeout: int = 10,
     verify_ssl: bool = True,
+    pinned_ip: Optional[str] = None,
 ) -> dict:
     """Replay a request with the payload injected and analyse the response."""
     try:
@@ -1259,6 +1260,17 @@ async def verify_request(
         new_path = re.sub(r'(?<=/)\d+(?=/|$)', payload, new_path)
         url = urlunparse(parsed._replace(path=new_path))
 
+    extensions: dict = {}
+    if pinned_ip:
+        # Connect to the already-validated IP; keep the original Host header and
+        # TLS server name so virtual hosting and certificate checks still work.
+        p = urlparse(url)
+        host = p.hostname or ""
+        ip_host = f"[{pinned_ip}]" if ":" in pinned_ip else pinned_ip
+        headers["Host"] = p.netloc.split("@")[-1]
+        extensions["sni_hostname"] = host
+        url = urlunparse(p._replace(netloc=ip_host + (f":{p.port}" if p.port else "")))
+
     try:
         # Redirects are not followed: an in-scope target could otherwise bounce this
         # server-side request to an arbitrary (internal/off-scope) address.
@@ -1267,6 +1279,7 @@ async def verify_request(
             resp = await client.request(
                 method=method, url=url, headers=headers,
                 content=request_body.encode() if request_body else None,
+                extensions=extensions,
             )
         body  = resp.text[:4000]
         status = resp.status_code

@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     CELERY_TASK_TIME_LIMIT: int = 7800  # 2h 10m
 
     # Encryption
+    # Active-verification endpoints refuse private/loopback targets unless a self-hosted
+    # deployment explicitly opts in (e.g. scanning an internal network it owns).
+    ALLOW_PRIVATE_SCAN_TARGETS: bool = False
     KMS_MASTER_KEY: str = "change-me-32-bytes-base64-encoded=="
 
     # Anthropic AI

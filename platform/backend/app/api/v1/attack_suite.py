@@ -7032,6 +7032,8 @@ async def verify_burp_test_case(
     import ipaddress
     import socket
     from app.api.v1.burp_analyzer import verify_request
+    from app.core.config import get_settings
+    from app.core.ssrf_guard import _is_unsafe_ip
     from app.services.attack_agent import _is_in_scope
 
     url = body.endpoint.split(" ", 1)[-1].strip()
@@ -7040,15 +7042,22 @@ async def verify_burp_test_case(
         raise HTTPException(status_code=400, detail="endpoint must be an http(s) URL")
     if not await _is_in_scope(db, org_id, parsed.hostname):
         raise HTTPException(status_code=403, detail="Target host is not one of this organization's assets")
+
+    # Resolve ONCE, validate every address, then connect to the validated IP
+    # (verify_request pins it) so a DNS rebind between check and use can't swap it.
     try:
-        infos = await asyncio.get_running_loop().getaddrinfo(parsed.hostname, parsed.port or 443)
+        infos = await asyncio.get_running_loop().getaddrinfo(
+            parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM
+        )
     except socket.gaierror:
         raise HTTPException(status_code=400, detail="Target host does not resolve")
-    for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        ip = getattr(ip, "ipv4_mapped", None) or ip
-        if ip.is_link_local or ip.is_multicast or ip.is_unspecified:
-            raise HTTPException(status_code=400, detail="Target resolves to a blocked address range")
+    addrs = [ipaddress.ip_address(i[4][0]) for i in infos]
+    if not addrs:
+        raise HTTPException(status_code=400, detail="Target host does not resolve")
+    if not get_settings().ALLOW_PRIVATE_SCAN_TARGETS and any(_is_unsafe_ip(a) for a in addrs):
+        raise HTTPException(status_code=400, detail="Target resolves to a private or reserved address range")
+    if any(a.is_link_local for a in addrs):  # cloud metadata etc. — never allowed, even with the opt-in
+        raise HTTPException(status_code=400, detail="Target resolves to a link-local address")
 
     return await verify_request(
         endpoint_str=body.endpoint,
@@ -7062,6 +7071,7 @@ async def verify_burp_test_case(
         original_status=body.original_status,
         req_timeout=body.timeout,
         verify_ssl=body.verify_ssl,
+        pinned_ip=str(addrs[0]),
     )
 
 

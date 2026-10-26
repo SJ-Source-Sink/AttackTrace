@@ -37,3 +37,16 @@ def test_burp_verify_is_scoped_typed_and_does_not_follow_redirects():
     assert "TRACE" not in attack_suite.BurpVerifyRequest.model_json_schema()["properties"]["method"]["enum"]
     from app.api.v1 import burp_analyzer
     assert "follow_redirects=False" in inspect.getsource(burp_analyzer.verify_request)
+
+
+def test_burp_verify_imports_resolve_and_pin_the_validated_ip():
+    # A bad import inside the handler only fails at request time (HTTP 500), so
+    # exercise the same imports here, and check the resolved IP is pinned.
+    import ast, textwrap
+    src = textwrap.dedent(inspect.getsource(attack_suite.verify_burp_test_case))
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.ImportFrom):
+            mod = __import__(node.module, fromlist=[n.name for n in node.names])
+            for n in node.names:
+                assert hasattr(mod, n.name), f"{node.module}.{n.name} does not exist"
+    assert "pinned_ip=" in src
