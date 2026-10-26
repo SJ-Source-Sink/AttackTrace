@@ -49,4 +49,4 @@ def test_burp_verify_imports_resolve_and_pin_the_validated_ip():
             mod = __import__(node.module, fromlist=[n.name for n in node.names])
             for n in node.names:
                 assert hasattr(mod, n.name), f"{node.module}.{n.name} does not exist"
-    assert "pinned_ip=" in src
+    assert "pinned_ip=" in src and "_embedded_v4" in src

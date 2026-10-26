@@ -7056,8 +7056,22 @@ async def verify_burp_test_case(
         raise HTTPException(status_code=400, detail="Target host does not resolve")
     if not get_settings().ALLOW_PRIVATE_SCAN_TARGETS and any(_is_unsafe_ip(a) for a in addrs):
         raise HTTPException(status_code=400, detail="Target resolves to a private or reserved address range")
-    if any(a.is_link_local for a in addrs):  # cloud metadata etc. — never allowed, even with the opt-in
-        raise HTTPException(status_code=400, detail="Target resolves to a link-local address")
+    # Never allowed, even with the opt-in: link-local (cloud metadata), multicast, unspecified —
+    # judged on the embedded IPv4 for ::ffff:a.b.c.d, NAT64 (64:ff9b::/96) and 6to4 (2002::/16) forms.
+    def _embedded_v4(a):
+        if isinstance(a, ipaddress.IPv6Address):
+            if a.ipv4_mapped is not None:
+                return a.ipv4_mapped
+            if a in ipaddress.ip_network("64:ff9b::/96"):
+                return ipaddress.IPv4Address(int(a) & 0xFFFFFFFF)
+            if a in ipaddress.ip_network("2002::/16"):
+                return ipaddress.IPv4Address((int(a) >> 80) & 0xFFFFFFFF)
+        return a
+
+    for a in addrs:
+        for cand in (a, _embedded_v4(a)):
+            if cand.is_link_local or cand.is_multicast or cand.is_unspecified:
+                raise HTTPException(status_code=400, detail="Target resolves to a blocked address range")
 
     return await verify_request(
         endpoint_str=body.endpoint,
