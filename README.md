@@ -518,6 +518,50 @@ make down && make up
 
 ---
 
+## Acknowledgements
+
+AttackTrace stands on the shoulders of a great deal of open-source security work. It orchestrates these tools rather than reimplementing them, and full credit belongs to their authors and maintainers. They are invoked as separate executables and are **not bundled or redistributed** with this repository; install them via `scripts/install-tools.sh` and consult each project for its license terms.
+
+### Security tools
+
+| Tool | Used for | Project |
+|---|---|---|
+| **Nuclei** + **nuclei-templates** | Template-based vulnerability scanning | [ProjectDiscovery](https://github.com/projectdiscovery/nuclei) · MIT |
+| **ffuf** | Content discovery and fuzzing | [ffuf](https://github.com/ffuf/ffuf) · MIT |
+| **Nmap** | Port, service and OS detection | [nmap.org](https://nmap.org) · Nmap Public Source License |
+| **subfinder** | Passive subdomain enumeration | [ProjectDiscovery](https://github.com/projectdiscovery/subfinder) · MIT |
+| **cloudlist** | Cloud asset enumeration | [ProjectDiscovery](https://github.com/projectdiscovery/cloudlist) · MIT |
+| **gowitness** | Web screenshots | [SensePost](https://github.com/sensepost/gowitness) |
+| **gau**, **waybackurls** | Historical URL discovery | [lc/gau](https://github.com/lc/gau), [tomnomnom/waybackurls](https://github.com/tomnomnom/waybackurls) · MIT |
+| **TruffleHog** | Secret detection | [Truffle Security](https://github.com/trufflesecurity/trufflehog) |
+| **Trivy** | Container and dependency scanning | [Aqua Security](https://github.com/aquasecurity/trivy) · Apache-2.0 |
+| **Checkov** | Infrastructure-as-code scanning | [Prisma Cloud / Bridgecrew](https://github.com/bridgecrewio/checkov) · Apache-2.0 |
+| **Prowler** | Cloud security posture | [Prowler](https://github.com/prowler-cloud/prowler) · Apache-2.0 |
+| **Semgrep** | Static code analysis | [Semgrep](https://github.com/semgrep/semgrep) |
+| **wafw00f** | WAF fingerprinting | [EnableSecurity](https://github.com/EnableSecurity/wafw00f) |
+| **masscan** | Fast port scanning | [Robert Graham](https://github.com/robertdavidgraham/masscan) |
+| **mitmproxy** | Mobile dynamic-analysis traffic capture | [mitmproxy](https://github.com/mitmproxy/mitmproxy) · MIT |
+| **SecLists** | Wordlists for fuzzing and discovery | [Daniel Miessler et al.](https://github.com/danielmiessler/SecLists) · MIT |
+
+### Frameworks and libraries
+
+[FastAPI](https://github.com/fastapi/fastapi), [SQLAlchemy](https://www.sqlalchemy.org), [Alembic](https://alembic.sqlalchemy.org), [Celery](https://github.com/celery/celery), [Playwright](https://playwright.dev), [WeasyPrint](https://weasyprint.org), [Next.js](https://nextjs.org), [React](https://react.dev), [Tailwind CSS](https://tailwindcss.com), [shadcn/ui](https://ui.shadcn.com), [TanStack Query](https://tanstack.com/query), [xyflow / React Flow](https://reactflow.dev), [Recharts](https://recharts.org), and the many other packages listed in `requirements.txt` and `platform/frontend/package.json`.
+
+### Data sources and research
+
+- **[MITRE ATT&CK®](https://attack.mitre.org)** — technique and threat-group knowledge base. ATT&CK is a registered trademark of The MITRE Corporation.
+- **[CISA Known Exploited Vulnerabilities](https://www.cisa.gov/known-exploited-vulnerabilities-catalog)** catalog.
+- **[FIRST EPSS](https://www.first.org/epss/)** — Exploit Prediction Scoring System.
+- **[NVD](https://nvd.nist.gov)** — CVE and CVSS data. This product uses data from the NVD API but is not endorsed or certified by the NVD.
+- **[OWASP](https://owasp.org)** — Top 10, API Security Top 10, and the Web Security Testing Guide, which inform test coverage.
+- **[PortSwigger Web Security Academy](https://portswigger.net/web-security)** and publicly disclosed **HackerOne** / **Bugcrowd** reports, which inform the Attack Suite's detection patterns and the Test Case Generator.
+- Threat-intelligence providers used through your own API keys: Shodan, Censys, SecurityTrails, AlienVault OTX, GreyNoise, URLScan and PassiveTotal.
+- **[Anthropic Claude](https://www.anthropic.com)** and open-weight models such as **Qwen** power the optional AI features.
+
+All trademarks and project names belong to their respective owners; their use here does not imply endorsement. If you maintain one of these projects and would like a credit corrected or removed, please open an issue.
+
+---
+
 ## Legal Notice
 
 AttackTrace is intended for **authorized security testing only**. Only scan targets you own or have explicit written permission to test. Unauthorized scanning may violate computer fraud laws in your jurisdiction. The authors accept no liability for misuse.
