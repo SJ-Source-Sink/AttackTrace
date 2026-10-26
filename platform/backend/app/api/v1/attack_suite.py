@@ -25,13 +25,13 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, AsyncGenerator, Optional
+from typing import Annotated, AsyncGenerator, Literal, Optional
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6998,30 +6998,70 @@ async def delete_burp_analysis(
     return {"deleted": True}
 
 
+class BurpVerifyRequest(BaseModel):
+    endpoint: str = Field(min_length=1, max_length=2048)
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] = "GET"
+    vuln_type: str = Field("", max_length=64)
+    param: str = Field("", max_length=256)
+    payload: str = Field("", max_length=4096)
+    inject_in: Literal["query", "body_json", "body_form", "path"] = "query"
+    body_params: dict = Field(default_factory=dict)
+    auth_headers: dict[str, str] = Field(default_factory=dict)
+    original_status: int = 200
+    timeout: int = Field(10, ge=1, le=30)
+    verify_ssl: bool = True
+
+
 @router.post("/burp/verify")
 async def verify_burp_test_case(
-    request: Request,
+    body: BurpVerifyRequest,
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
     current_user: Annotated[User, Depends(require_tool("burp_analyzer"))] = None,
 ):
     """
     Active replay: inject a payload into a real request and confirm whether
     the finding is real. verify_ssl defaults to True; set to False only for
     targets with self-signed certificates in controlled lab environments.
+
+    This makes a server-side request and reads the response, so the target is
+    restricted exactly like the AI agent's tools: its host must be one of the
+    org's own Assets, and it may never resolve to link-local / cloud-metadata
+    addresses. Redirects are not followed (see verify_request).
     """
+    import ipaddress
+    import socket
     from app.api.v1.burp_analyzer import verify_request
-    body = await request.json()
+    from app.services.attack_agent import _is_in_scope
+
+    url = body.endpoint.split(" ", 1)[-1].strip()
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise HTTPException(status_code=400, detail="endpoint must be an http(s) URL")
+    if not await _is_in_scope(db, org_id, parsed.hostname):
+        raise HTTPException(status_code=403, detail="Target host is not one of this organization's assets")
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(parsed.hostname, parsed.port or 443)
+    except socket.gaierror:
+        raise HTTPException(status_code=400, detail="Target host does not resolve")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        ip = getattr(ip, "ipv4_mapped", None) or ip
+        if ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+            raise HTTPException(status_code=400, detail="Target resolves to a blocked address range")
+
     return await verify_request(
-        endpoint_str=body.get("endpoint", ""),
-        method=body.get("method", "GET"),
-        vuln_type=body.get("vuln_type", ""),
-        param=body.get("param", ""),
-        payload=body.get("payload", ""),
-        inject_in=body.get("inject_in", "query"),
-        body_params=body.get("body_params", {}),
-        auth_headers=body.get("auth_headers", {}),
-        original_status=body.get("original_status", 200),
-        req_timeout=min(int(body.get("timeout", 10)), 30),
-        verify_ssl=bool(body.get("verify_ssl", True)),
+        endpoint_str=body.endpoint,
+        method=body.method,
+        vuln_type=body.vuln_type,
+        param=body.param,
+        payload=body.payload,
+        inject_in=body.inject_in,
+        body_params=body.body_params,
+        auth_headers=body.auth_headers,
+        original_status=body.original_status,
+        req_timeout=body.timeout,
+        verify_ssl=body.verify_ssl,
     )
 
 

@@ -27,3 +27,13 @@ def test_js_scanner_counts_confirmed_xss_without_crashing():
     src = inspect.getsource(js_scanner._run_js_scan)
     start = src.index("def _count_finding")
     assert "nonlocal confirmed_xss_count" in src[start:src.index('yield _sse("start"', start)]
+
+
+def test_burp_verify_is_scoped_typed_and_does_not_follow_redirects():
+    # Once /burp/verify actually worked it became a server-side request primitive:
+    # it must scope-check the target and never follow redirects off-scope.
+    src = inspect.getsource(attack_suite.verify_burp_test_case)
+    assert "_is_in_scope" in src and "is_link_local" in src
+    assert "TRACE" not in attack_suite.BurpVerifyRequest.model_json_schema()["properties"]["method"]["enum"]
+    from app.api.v1 import burp_analyzer
+    assert "follow_redirects=False" in inspect.getsource(burp_analyzer.verify_request)

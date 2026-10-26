@@ -1260,7 +1260,9 @@ async def verify_request(
         url = urlunparse(parsed._replace(path=new_path))
 
     try:
-        async with httpx.AsyncClient(verify=verify_ssl, follow_redirects=True,
+        # Redirects are not followed: an in-scope target could otherwise bounce this
+        # server-side request to an arbitrary (internal/off-scope) address.
+        async with httpx.AsyncClient(verify=verify_ssl, follow_redirects=False,
                                      timeout=req_timeout) as client:
             resp = await client.request(
                 method=method, url=url, headers=headers,
