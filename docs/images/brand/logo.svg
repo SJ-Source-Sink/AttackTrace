@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AttackTrace" viewBox="0 0 860 256" width="860" height="256"><rect width="860" height="256" rx="36" fill="#111113" stroke="none"/><g transform="translate(20 0)"><polygon points="30,128 50,40 100,92 128,150" fill="#f97316"/><polygon points="226,128 206,40 156,92 128,150" fill="#fb923c"/>
+<polygon points="100,92 156,92 128,150" fill="#fed7aa"/><polygon points="30,128 128,150 128,232" fill="#ea580c"/><polygon points="226,128 128,150 128,232" fill="#c2410c"/>
+<polygon points="50,40 70,78 100,92" fill="#9a3412"/><polygon points="206,40 186,78 156,92" fill="#9a3412"/>
+<polygon points="72,116 106,124 94,138" fill="#22d3ee"/><polygon points="184,116 150,124 162,138" fill="#22d3ee"/><polygon points="116,208 140,208 128,226" fill="#0f172a"/></g>
+<g font-family="'SF Pro Display','Inter','Segoe UI',Helvetica,Arial,sans-serif" font-weight="800"><text x="300" y="146" font-size="88" letter-spacing="-2" fill="#fafafa">Attack<tspan fill="#f97316">Trace</tspan></text><text x="304" y="196" font-size="24" font-weight="500" letter-spacing="6" fill="#fafafa" fill-opacity=".55">ATTACK SURFACE MANAGEMENT</text></g></svg>
