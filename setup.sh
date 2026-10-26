@@ -108,7 +108,7 @@ fi
 
 # Read credentials from .env for the summary at the end
 ADMIN_EMAIL=$(grep -E '^FIRST_SUPERUSER_EMAIL=' .env | cut -d= -f2 | tr -d '"' || echo "admin")
-ADMIN_PASS=$(grep -E '^FIRST_SUPERUSER_PASSWORD=' .env | cut -d= -f2 | tr -d '"' || echo "Ihate13\$")
+ADMIN_PASS=$(grep -E '^FIRST_SUPERUSER_PASSWORD=' .env | cut -d= -f2 | tr -d '"' || echo "admin")
 
 # ─── 3. Build Docker images ───────────────────────────────────────────────────
 header "Building Docker images"

@@ -167,7 +167,7 @@ REFRESH_TOKEN_EXPIRE_DAYS=7
 ENVIRONMENT=development
 DEBUG=false
 FIRST_SUPERUSER_EMAIL=admin
-FIRST_SUPERUSER_PASSWORD=Ihate13\$
+FIRST_SUPERUSER_PASSWORD=admin
 ATTACKTRACE_WORKSPACE_DIR=${HOME}/.attacktrace/scans
 ANTHROPIC_API_KEY=
 AI_MODEL=claude-haiku-4-5-20251001
@@ -381,7 +381,7 @@ echo -e "${BOLD}${GREEN}║   Frontend  →  http://localhost:3000              
 echo -e "${BOLD}${GREEN}║   API       →  http://localhost:8000               ║${NC}"
 echo -e "${BOLD}${GREEN}║   API Docs  →  http://localhost:8000/api/v1/docs   ║${NC}"
 echo -e "${BOLD}${GREEN}║                                                    ║${NC}"
-echo -e "${BOLD}${GREEN}║   Login:  admin / Ihate13\$                         ║${NC}"
+echo -e "${BOLD}${GREEN}║   Login:  admin / admin                         ║${NC}"
 echo -e "${BOLD}${GREEN}║                                                    ║${NC}"
 echo -e "${BOLD}${GREEN}║   Logs:                                            ║${NC}"
 echo -e "${BOLD}${GREEN}║     make native-logs   (tail all services)         ║${NC}"

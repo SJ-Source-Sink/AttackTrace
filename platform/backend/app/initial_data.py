@@ -38,7 +38,7 @@ async def seed() -> None:
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     email    = os.getenv("FIRST_SUPERUSER_EMAIL", "admin")
-    password = os.getenv("FIRST_SUPERUSER_PASSWORD", "Ihate13$")
+    password = os.getenv("FIRST_SUPERUSER_PASSWORD", "admin")
     org_name = os.getenv("FIRST_ORG_NAME", "AttackTrace")
 
     async with async_session() as db:
@@ -115,7 +115,7 @@ async def seed() -> None:
     await engine.dispose()
     print(f"[seed] Created org {org_name!r} (slug={slug})")
     print(f"[seed] Created superuser: {email} / (password set)")
-    print(f"[seed] Default login — username: admin  password: Ihate13$")
+    print(f"[seed] Default login — username: admin  password: admin")
     print(f"[seed] Invite code for new users: ATTACKTRACE")
 
 

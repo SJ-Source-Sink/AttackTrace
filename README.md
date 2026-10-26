@@ -271,7 +271,7 @@ Open **http://localhost:3000**
 | Field | Value |
 |---|---|
 | Username | `admin` |
-| Password | `Ihate13$` |
+| Password | `admin` |
 
 > Change the default password immediately via **Settings → Profile**.
 
