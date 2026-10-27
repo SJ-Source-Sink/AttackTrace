@@ -150,3 +150,47 @@ def test_non_php_and_closed(servers):
 def test_patched_yields_no_finding(servers):
     from app.api.v1.php_cve import host_to_findings
     assert host_to_findings(_fp(servers["patched"]).to_dict()) == []
+
+
+# ── report ──────────────────────────────────────────────────────────────────
+
+def _record():
+    evil = '<script>alert(1)</script>'
+    return {
+        "id": "11111111-1111-1111-1111-111111111111", "started_at": "2026-10-27T12:00:00+00:00",
+        "ports": [80], "summary": {"errors": [{"target": evil, "error": evil}], "total_hosts": 3},
+        "scanned_targets": [{"ip": "93.184.216.34", "host": "www.example.com"},
+                            {"ip": "93.184.216.35", "host": "93.184.216.35"},
+                            {"ip": "93.184.216.36", "host": "93.184.216.36"}],
+        "results": [
+            {"label": "www.example.com (93.184.216.34)", "ip": "93.184.216.34", "port": 80, "url": "http://www.example.com:80/",
+             "php_detected": True, "version": "8.3.10", "version_source": "x-powered-by", "server_header": evil,
+             "powered_by": '=HYPERLINK("http://evil")', "distro": None, "sapi": None, "phpinfo_url": None,
+             "upload_progress": None, "memory_limit": None, "signals": [],
+             "assessment": {"status": "vulnerable", "branch": "8.3", "fixed_in": "8.3.36", "reason": "below fix"}},
+            {"label": "93.184.216.35", "ip": "93.184.216.35", "port": 80, "url": "http://93.184.216.35:80/",
+             "php_detected": True, "version": "8.3.36", "version_source": "x-powered-by", "signals": [],
+             "assessment": {"status": "patched", "branch": "8.3", "fixed_in": "8.3.36", "reason": "ok"}},
+        ],
+    }
+
+
+def test_report_rows_cover_unanswered_targets_and_inventory():
+    from app.services import php2shell_report as rep
+    rows = rep.build_rows(_record(), {"www.example.com": {"asset_type": "subdomain", "risk_score": 7.5}})
+    by = {r["target"]: r for r in rows}
+    assert rows[0]["status"] == "vulnerable"                      # worst first
+    assert by["93.184.216.36"]["status"] == "no_web"              # scanned, nothing answered
+    assert by["www.example.com"]["in_inventory"] and by["www.example.com"]["asset_type"] == "subdomain"
+    assert not by["93.184.216.35"]["in_inventory"]
+
+
+def test_report_escapes_remote_values_and_csv_formulas():
+    from app.services import php2shell_report as rep
+    rows = rep.build_rows(_record(), {})
+    html = rep.render_html(_record(), rows, "<b>Org</b>", "now")
+    assert "<script>alert(1)" not in html and "&lt;script&gt;" in html and "&lt;b&gt;Org" in html
+    assert "Vulnerable" in html and "Asset coverage" in html and "Targets not scanned" in html
+    csv_text = rep.render_csv(rows)
+    assert "'=HYPERLINK" in csv_text and ",=HYPERLINK" not in csv_text
+    assert "No web service answered" in csv_text

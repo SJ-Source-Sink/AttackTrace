@@ -17,15 +17,20 @@ from pathlib import Path
 from typing import Annotated, Any, AsyncGenerator
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from urllib.parse import urlparse
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.dashboard import invalidate_dashboard_cache
 from app.core.config import get_settings as _get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
+from app.models.db.asset import Asset, AssetType
+from app.models.db.org import Organization
 from app.models.db.user import User
 from app.services import php2shell as p2s
 from app.services.finding_ingest import ingest_findings
@@ -252,6 +257,7 @@ async def _run_scan(
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "ports": ports,
         "summary": summary,
+        "scanned_targets": [{"ip": t.ip, "host": t.host_header or t.ip} for t in targets],
         "results": results,
         "findings": findings,
     })
@@ -351,3 +357,96 @@ async def delete_history_scan(
         raise HTTPException(status_code=404, detail="Scan not found")
     path.unlink()
     return {"deleted": True}
+
+
+# ── Asset picker + report ─────────────────────────────────────────────────────
+
+_PICKER_TYPES = {"ip", "domain", "subdomain", "webapp"}
+
+
+def _asset_target(asset_type: str, value: str) -> str | None:
+    """The scannable host for an inventory asset (webapp URLs -> hostname)."""
+    v = (value or "").strip()
+    if asset_type == "webapp":
+        v = urlparse(v if "://" in v else f"//{v}").hostname or ""
+    v = v.strip().rstrip(".")
+    if not v or "*" in v or " " in v or "/" in v:
+        return None
+    return v
+
+
+@router.get("/assets", summary="Discovered assets that can be added as scan targets")
+async def list_scannable_assets(
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+    types: str = Query("ip,domain,subdomain,webapp", description="comma-separated asset types"),
+    search: str | None = Query(None, max_length=200),
+    active_only: bool = True,
+    limit: int = Query(5000, ge=1, le=10000),
+) -> dict:
+    wanted = [t for t in (x.strip().lower() for x in types.split(",")) if t in _PICKER_TYPES]
+    if not wanted:
+        raise HTTPException(status_code=422, detail="no valid asset types")
+    q = select(Asset).where(Asset.org_id == org_id, Asset.asset_type.in_([AssetType(t) for t in wanted]))
+    if active_only:
+        q = q.where(Asset.is_active.is_(True))
+    if search:
+        q = q.where(Asset.value.ilike(f"%{search.replace('%', '').replace('_', '')}%"))
+    q = q.order_by(Asset.risk_score.desc().nulls_last(), Asset.value).limit(limit + 1)
+    rows = (await db.execute(q)).scalars().all()
+    truncated = len(rows) > limit
+    items, seen = [], set()
+    for a in rows[:limit]:
+        t = _asset_target(a.asset_type.value, a.value)
+        if not t or t.lower() in seen:
+            continue
+        seen.add(t.lower())
+        items.append({"id": str(a.id), "value": a.value, "asset_type": a.asset_type.value,
+                      "target": t, "risk_score": a.risk_score})
+    return {"items": items, "total": len(items), "truncated": truncated, "max_scan_hosts": p2s.MAX_HOSTS}
+
+
+async def _inventory_for(db: AsyncSession, org_id: str, record: dict) -> dict[str, dict]:
+    keys: set[str] = set()
+    for t in record.get("scanned_targets", []):
+        keys.update({str(t.get("host", "")).lower(), str(t.get("ip", "")).lower()})
+    for r in record.get("results", []):
+        keys.update({r["label"].split(" (")[0].lower(), str(r.get("ip", "")).lower()})
+    keys.discard("")
+    if not keys:
+        return {}
+    res = await db.execute(select(Asset).where(Asset.org_id == org_id, func.lower(Asset.value).in_(list(keys))))
+    inv: dict[str, dict] = {}
+    for a in res.scalars().all():
+        inv.setdefault(a.value.lower(), {"asset_type": a.asset_type.value, "risk_score": a.risk_score})
+    return inv
+
+
+@router.get("/history/{scan_id}/report", summary="Download a PHP2Shell scan report (html, pdf or csv)")
+async def scan_report(
+    scan_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+    fmt: str = Query("html", pattern="^(html|pdf|csv)$"),
+) -> Response:
+    from app.services import php2shell_report as rep
+    path = _safe_history_path(str(org_id), scan_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Scan not found")
+    record = json.loads(path.read_text())
+    inventory = await _inventory_for(db, str(org_id), record)
+    rows = rep.build_rows(record, inventory)
+    name = f"php2shell-report-{scan_id[:8]}"
+    if fmt == "csv":
+        return Response(rep.render_csv(rows), media_type="text/csv",
+                        headers={"Content-Disposition": f"attachment; filename={name}.csv"})
+    org_name = (await db.execute(select(Organization.name).where(Organization.id == org_id))).scalar_one_or_none() or ""
+    html = rep.render_html(record, rows, org_name, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
+    if fmt == "html":
+        return Response(html, media_type="text/html",
+                        headers={"Content-Disposition": f"attachment; filename={name}.html"})
+    from app.services.export_service import html_to_pdf_bytes
+    return Response(await html_to_pdf_bytes(html), media_type="application/pdf",
+                    headers={"Content-Disposition": f"attachment; filename={name}.pdf"})

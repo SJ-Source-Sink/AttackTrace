@@ -220,6 +220,12 @@ export const scansApi = {
   getDiff: (id: string) => api.get(`/scans/${id}/diff`),
 };
 
+export const phpCveApi = {
+  assets: (params?: Record<string, string | number | boolean | undefined>) => api.get("/php-cve/assets", params),
+  exportReport: async (scanId: string, fmt: "csv" | "html" | "pdf"): Promise<void> =>
+    downloadAuthenticatedFile(`/php-cve/history/${scanId}/report`, { fmt }, `php2shell-report-${scanId.slice(0, 8)}.${fmt}`),
+};
+
 export const assetsApi = {
   list: (params?: Record<string, string | number | string[] | undefined>) =>
     api.get("/assets", params),

@@ -3,7 +3,7 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import {
   ShieldAlert, Play, Square, Loader2, History, Trash2, ChevronRight, ChevronDown,
-  AlertTriangle, CheckCircle2, HelpCircle, EyeOff, Info,
+  AlertTriangle, CheckCircle2, HelpCircle, EyeOff, Info, Server,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -11,6 +11,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/shared/page-header";
+import { ExportMenu } from "@/components/shared/export-menu";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { phpCveApi } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { fetchWithAuth } from "@/lib/auth";
 import { toast } from "sonner";
@@ -135,6 +139,119 @@ function SummaryCards({ s }: { s: Partial<Summary> }) {
   );
 }
 
+
+interface PickerAsset { id: string; value: string; asset_type: string; target: string; risk_score: number | null }
+const PICKER_TYPES = ["ip", "subdomain", "domain", "webapp"] as const;
+const MAX_SCAN_HOSTS = 1024;
+
+function AssetPicker({
+  open, onOpenChange, existing, onAdd,
+}: { open: boolean; onOpenChange: (o: boolean) => void; existing: Set<string>; onAdd: (targets: string[]) => void }) {
+  const [types, setTypes] = useState<Record<string, boolean>>({ ip: true, subdomain: true, domain: true, webapp: true });
+  const [search, setSearch] = useState("");
+  const [items, setItems] = useState<PickerAsset[]>([]);
+  const [truncated, setTruncated] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!open) return;
+    const t = setTimeout(async () => {
+      setLoading(true);
+      try {
+        const sel = PICKER_TYPES.filter(x => types[x]);
+        if (sel.length === 0) { setItems([]); return; }
+        const d = (await phpCveApi.assets({ types: sel.join(","), search: search || undefined })) as
+          { items: PickerAsset[]; truncated: boolean };
+        setItems(d.items ?? []);
+        setTruncated(!!d.truncated);
+      } catch {
+        toast.error("Failed to load assets");
+      } finally {
+        setLoading(false);
+      }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [open, types, search]);
+
+  const selectable = items.filter(i => !existing.has(i.target.toLowerCase()));
+  const toggle = (t: string) => setPicked(p => { const n = new Set(p); if (n.has(t)) n.delete(t); else n.add(t); return n; });
+  const allPicked = selectable.length > 0 && selectable.every(i => picked.has(i.target));
+  const total = existing.size + picked.size;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Add discovered assets</DialogTitle>
+          <DialogDescription>Pick assets from your inventory to scan. Web app URLs are reduced to their hostname.</DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-wrap items-center gap-3">
+          <Input aria-label="Search assets" placeholder="Search assets…" value={search} onChange={e => setSearch(e.target.value)} className="h-8 w-56 text-xs" />
+          {PICKER_TYPES.map(t => (
+            <label key={t} className="flex items-center gap-1.5 text-xs text-zinc-400 capitalize">
+              <Checkbox checked={types[t]} onCheckedChange={v => setTypes(p => ({ ...p, [t]: v === true }))} aria-label={`Include ${t} assets`} />
+              {t === "ip" ? "IP" : t}
+            </label>
+          ))}
+        </div>
+        <div className="flex items-center justify-between text-xs text-zinc-500">
+          <label className="flex items-center gap-2">
+            <Checkbox
+              checked={allPicked}
+              aria-label="Select all listed assets"
+              onCheckedChange={v => setPicked(p => {
+                const n = new Set(p);
+                selectable.forEach(i => (v === true ? n.add(i.target) : n.delete(i.target)));
+                return n;
+              })}
+            />
+            Select all ({selectable.length}{truncated ? "+" : ""})
+          </label>
+          <span>{loading ? "Loading…" : `${items.length} assets · ${items.length - selectable.length} already in targets`}</span>
+        </div>
+        <div className="max-h-80 overflow-y-auto rounded-md border border-zinc-800 divide-y divide-zinc-800">
+          {items.length === 0 && !loading && <p className="p-4 text-center text-xs text-zinc-500">No matching assets.</p>}
+          {items.map(i => {
+            const already = existing.has(i.target.toLowerCase());
+            return (
+              <label key={i.id} className={cn("flex items-center gap-3 px-3 py-1.5 text-xs", already ? "opacity-40" : "cursor-pointer hover:bg-zinc-900")}>
+                <Checkbox checked={already || picked.has(i.target)} disabled={already} onCheckedChange={() => toggle(i.target)} aria-label={`Select ${i.target}`} />
+                <span className="font-mono text-zinc-200 flex-1 truncate">{i.target}</span>
+                <Badge variant="outline" className="text-[10px] border-zinc-700 text-zinc-400">{i.asset_type}</Badge>
+                {i.risk_score != null && <span className="w-10 text-right text-zinc-500">{Math.round(i.risk_score)}</span>}
+              </label>
+            );
+          })}
+        </div>
+        {total > MAX_SCAN_HOSTS && (
+          <p className="text-xs text-yellow-400">
+            {total} targets exceeds the {MAX_SCAN_HOSTS}-host limit per scan — only the first {MAX_SCAN_HOSTS} will be scanned. Split into batches.
+          </p>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button disabled={picked.size === 0} onClick={() => { onAdd([...picked]); setPicked(new Set()); onOpenChange(false); }}>
+            Add {picked.size || ""} to targets
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ReportMenu({ scanId }: { scanId: string }) {
+  return (
+    <ExportMenu
+      label="Report"
+      onExport={async fmt => {
+        try { await phpCveApi.exportReport(scanId, fmt); toast.success("Report downloaded"); }
+        catch { toast.error("Report download failed"); }
+      }}
+    />
+  );
+}
+
 function HistoryTab({ onRestore }: { onRestore: (t: string) => void }) {
   const [items, setItems] = useState<HistoryItem[]>([]);
   const [detail, setDetail] = useState<HistoryDetail | null>(null);
@@ -167,6 +284,7 @@ function HistoryTab({ onRestore }: { onRestore: (t: string) => void }) {
           <button onClick={() => { onRestore(detail.target); setDetail(null); }} className="ml-auto text-xs text-blue-400 hover:text-blue-300">
             Restore targets
           </button>
+          <ReportMenu scanId={detail.id} />
         </div>
         <SummaryCards s={detail.summary} />
         <div className="space-y-2">{sorted.map((r, i) => <ResultRow key={`${r.ip}:${r.port}:${i}`} r={r} />)}</div>
@@ -211,6 +329,14 @@ export default function PhpCvePage() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [startErrors, setStartErrors] = useState<{ target: string; error: string }[]>([]);
   const abortRef = useRef<AbortController | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  const existingTargets = new Set(targets.split(/[\s,;]+/).filter(Boolean).map(t => t.toLowerCase()));
+  const addTargets = (list: string[]) => {
+    const fresh = list.filter(t => !existingTargets.has(t.toLowerCase()));
+    setTargets(p => (p.trim() ? p.replace(/\s+$/, "") + "\n" : "") + fresh.join("\n"));
+    toast.success(`Added ${fresh.length} asset${fresh.length === 1 ? "" : "s"} to targets`);
+  };
 
   useEffect(() => {
     try { setTargets(localStorage.getItem("php_cve_targets") ?? ""); } catch { /* ignore */ }
@@ -330,7 +456,12 @@ export default function PhpCvePage() {
 
           <div className="grid gap-4 md:grid-cols-[1fr_16rem]">
             <div className="space-y-2">
-              <Label htmlFor="php-targets">Targets — IPs, CIDR ranges or hostnames (one per line or comma-separated)</Label>
+              <div className="flex items-center justify-between gap-2">
+                <Label htmlFor="php-targets">Targets — IPs, CIDR ranges or hostnames (one per line or comma-separated)</Label>
+                <Button type="button" variant="outline" size="sm" onClick={() => setPickerOpen(true)} className="gap-1.5 h-7 text-xs">
+                  <Server className="h-3.5 w-3.5" /> Add from assets
+                </Button>
+              </div>
               <textarea
                 id="php-targets"
                 value={targets}
@@ -376,6 +507,9 @@ export default function PhpCvePage() {
                   <div className="h-1.5 rounded bg-zinc-800 overflow-hidden"><div className="h-full bg-blue-500 transition-all" style={{ width: `${pct}%` }} /></div>
                 </div>
               )}
+              {summary && (
+                <div className="flex justify-end"><ReportMenu scanId={summary.scan_id} /></div>
+              )}
               <SummaryCards s={live} />
               {summary && results.length === 0 && (
                 <p className="text-sm text-zinc-500">No web service answered on the scanned ports.</p>
@@ -385,6 +519,7 @@ export default function PhpCvePage() {
           )}
         </>
       )}
+      <AssetPicker open={pickerOpen} onOpenChange={setPickerOpen} existing={existingTargets} onAdd={addTargets} />
     </div>
   );
 }
