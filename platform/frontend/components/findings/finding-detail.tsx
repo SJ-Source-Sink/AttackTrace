@@ -65,6 +65,7 @@ const SOURCE_LABELS: Record<string, string> = {
   container_scanner: "Container/Kubernetes Scanner",
   firewall_physical: "Physical Firewall Scanner",
   exposure_scanner: "Exposure Scanner",
+  php2shell: "PHP2Shell Scanner",
   mcp_scanner: "MCP Scanner",
   takeover: "Subdomain Takeover Scanner",
   email_security: "Email Security Scanner",

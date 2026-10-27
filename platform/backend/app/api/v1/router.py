@@ -96,6 +96,12 @@ except ImportError:
     cspm_router = None
 
 try:
+    from app.api.v1.php_cve import router as php_cve_router
+except ImportError:
+    _log.warning("php_cve module not found — PHP2Shell Scanner disabled")
+    php_cve_router = None
+
+try:
     from app.api.v1.exposure_scanner import router as exposure_router
 except ImportError:
     _log.warning("exposure_scanner module not found — Exposure Scanner disabled")
@@ -179,6 +185,8 @@ if cspm_router:
     api_router.include_router(cspm_router)
 if exposure_router:
     api_router.include_router(exposure_router)
+if php_cve_router:
+    api_router.include_router(php_cve_router)
 if email_security_router:
     api_router.include_router(email_security_router)
 if iac_router:

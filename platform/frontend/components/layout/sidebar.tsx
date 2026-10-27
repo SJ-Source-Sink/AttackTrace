@@ -222,6 +222,11 @@ const securityScannerItems: NavItem[] = [
     icon: ScanLine,
   },
   {
+    label: "PHP2Shell",
+    href: "/php-cve",
+    icon: ShieldAlert,
+  },
+  {
     label: "Email Security",
     href: "/email-security",
     icon: Mail,
