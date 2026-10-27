@@ -102,6 +102,11 @@ def test_blocked_targets():
     assert p2s.blocked_reason(ip.ip_address("100.64.0.1"), False)  # CGNAT
     assert p2s.blocked_reason(ip.ip_address("192.0.2.1"), False)  # documentation range
     assert p2s.blocked_reason(ip.ip_address("100.64.0.1"), True) is None
+    # IPv4-compatible / SIIT forms (is_global is True for these on some Pythons)
+    for a in ("::a9fe:a9fe", "::7f00:1", "::ffff:0:a9fe:a9fe", "200::1"):
+        assert p2s.blocked_reason(ip.ip_address(a), False), a
+    assert p2s.blocked_reason(ip.ip_address("::a9fe:a9fe"), True)  # link-local stays blocked
+    assert p2s.blocked_reason(ip.ip_address("::ffff:0:a9fe:a9fe"), True)
     # Teredo wrapping a loopback client / link-local server
     assert p2s.blocked_reason(ip.ip_address("2001:0:a9fe:a9fe::1"), True)
     assert p2s.blocked_reason(ip.ip_address("2001:0:5ef5:79fd:0:0:80ff:fffe"), False)

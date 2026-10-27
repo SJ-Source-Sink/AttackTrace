@@ -168,6 +168,10 @@ class Target:
 def _embedded_v4(ip: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
     if ip.ipv4_mapped:
         return ip.ipv4_mapped
+    if ip in ipaddress.ip_network("::/96"):  # IPv4-compatible (deprecated): ::a.b.c.d
+        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    if ip in ipaddress.ip_network("::ffff:0:0:0/96"):  # SIIT: ::ffff:0:a.b.c.d
+        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
     if ip in ipaddress.ip_network("64:ff9b::/96"):
         return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
     if ip in ipaddress.ip_network("2002::/16"):
@@ -188,7 +192,7 @@ def blocked_reason(ip: ipaddress._BaseAddress, allow_private: bool) -> str | Non
         return "link-local/multicast/unspecified address (always blocked)"
     # Fail closed: anything not globally routable (private, loopback, CGNAT
     # 100.64/10, documentation, reserved, ...) needs the explicit opt-in.
-    if not ip.is_global and not allow_private:
+    if (not ip.is_global or ip.is_reserved) and not allow_private:
         return "non-public address (set ALLOW_PRIVATE_SCAN_TARGETS=true to scan internal ranges)"
     return None
 
