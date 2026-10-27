@@ -178,11 +178,18 @@ def _embedded_v4(ip: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
 def blocked_reason(ip: ipaddress._BaseAddress, allow_private: bool) -> str | None:
     """Why the platform refuses to send traffic to this address, or None."""
     if isinstance(ip, ipaddress.IPv6Address):
+        if ip.teredo:  # (server, client) -- judge both embedded IPv4s
+            for v4 in ip.teredo:
+                reason = blocked_reason(v4, allow_private)
+                if reason:
+                    return reason
         ip = _embedded_v4(ip) or ip
     if ip.is_link_local or ip.is_multicast or ip.is_unspecified:
         return "link-local/multicast/unspecified address (always blocked)"
-    if (ip.is_private or ip.is_loopback or ip.is_reserved) and not allow_private:
-        return "private/loopback/reserved address (set ALLOW_PRIVATE_SCAN_TARGETS=true to scan internal ranges)"
+    # Fail closed: anything not globally routable (private, loopback, CGNAT
+    # 100.64/10, documentation, reserved, ...) needs the explicit opt-in.
+    if not ip.is_global and not allow_private:
+        return "non-public address (set ALLOW_PRIVATE_SCAN_TARGETS=true to scan internal ranges)"
     return None
 
 

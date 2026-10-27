@@ -98,13 +98,20 @@ def test_blocked_targets():
     assert p2s.blocked_reason(ip.ip_address("127.0.0.1"), False)
     assert p2s.blocked_reason(ip.ip_address("127.0.0.1"), True) is None
     assert p2s.blocked_reason(ip.ip_address("93.184.216.34"), False) is None
+    # non-global ranges that is_private/is_reserved miss
+    assert p2s.blocked_reason(ip.ip_address("100.64.0.1"), False)  # CGNAT
+    assert p2s.blocked_reason(ip.ip_address("192.0.2.1"), False)  # documentation range
+    assert p2s.blocked_reason(ip.ip_address("100.64.0.1"), True) is None
+    # Teredo wrapping a loopback client / link-local server
+    assert p2s.blocked_reason(ip.ip_address("2001:0:a9fe:a9fe::1"), True)
+    assert p2s.blocked_reason(ip.ip_address("2001:0:5ef5:79fd:0:0:80ff:fffe"), False)
 
 
 def test_expand_targets():
     t, e = asyncio.run(p2s.expand_targets(["93.184.216.34", "93.184.216.0/30", "10.0.0.1", "bad host!", "0.0.0.0/0"], False))
     assert {x.ip for x in t} >= {"93.184.216.34", "93.184.216.1", "93.184.216.2"}
     msgs = " | ".join(x["error"] for x in e)
-    assert "private" in msgs and "not an IP" in msgs and "too large" in msgs
+    assert "non-public" in msgs and "not an IP" in msgs and "too large" in msgs
 
 
 @pytest.mark.parametrize("site,status,detected", [
