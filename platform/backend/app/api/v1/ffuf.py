@@ -252,9 +252,18 @@ class FfufScanRequest(BaseModel):
     @field_validator("url")
     @classmethod
     def _guard_scan_target(cls, v):
-        # The host must resolve to a public address now. FUZZ is only supported in the path, query,
-        # headers and body: an unresolvable FUZZ.<domain> could be pointed at an internal address
-        # by the domain owner's DNS once words are substituted.
+        # FUZZ is only supported in the path, query, headers and body. In the authority (host,
+        # userinfo or port) the connection target depends on the substituted word, which can't be
+        # vetted up front: a domain owner's DNS could answer 127.0.0.1 for "admin.<domain>" while
+        # the unsubstituted "FUZZ.<domain>" looked public.
+        from urllib.parse import urlsplit
+
+        try:
+            netloc = urlsplit(v if "://" in v else "//" + v).netloc
+        except ValueError:
+            raise ValueError("URL could not be parsed")
+        if "fuzz" in netloc.lower():
+            raise ValueError("FUZZ is not allowed in the host, userinfo or port; use it in the path or query")
         return guard_scan_target(v)
 
     url: str

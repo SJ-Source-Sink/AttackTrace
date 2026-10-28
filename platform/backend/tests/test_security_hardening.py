@@ -206,3 +206,24 @@ def test_client_ip_uses_trusted_proxy_entry(monkeypatch, trust, hops, xff, expec
     monkeypatch.setattr(auth.settings, "TRUSTED_PROXY_HOPS", hops)
     req = types.SimpleNamespace(headers={"x-forwarded-for": xff}, client=types.SimpleNamespace(host="10.0.0.9"))
     assert auth._client_ip(req) == expected
+
+
+@pytest.mark.parametrize("url", [
+    "http://FUZZ.example.com/", "https://fuzz.example.com/x", "http://FUZZ@example.com/",
+    "http://example.com:FUZZ/", "FUZZ.example.com", "http://admin.FUZZ.example.com/",
+])
+def test_ffuf_rejects_fuzz_in_authority_even_if_host_looks_public(monkeypatch, url):
+    from app.api.v1.ffuf import FfufScanRequest
+
+    # Pretend every host passes the resolve/address check: the FUZZ rule must hold on its own.
+    monkeypatch.setattr(target_guard, "scan_target_problem", lambda raw, allow_unresolvable=False: None)
+    with pytest.raises(ValueError):
+        FfufScanRequest(url=url)
+
+
+def test_ffuf_allows_fuzz_in_path_and_query(monkeypatch):
+    from app.api.v1.ffuf import FfufScanRequest
+
+    monkeypatch.setattr(target_guard, "scan_target_problem", lambda raw, allow_unresolvable=False: None)
+    assert FfufScanRequest(url="https://example.com/FUZZ")
+    assert FfufScanRequest(url="https://example.com/a?x=FUZZ")
