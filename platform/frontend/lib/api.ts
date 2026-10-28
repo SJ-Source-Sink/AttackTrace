@@ -368,11 +368,8 @@ export const reportsApi = {
 export const aiApi = {
   search: (query: string, context?: string) =>
     api.post("/ai/search", { query, context }),
-  summarize: (scanId: string, includeRecommendations = true) =>
-    api.post("/ai/summarize", {
-      scan_id: scanId,
-      include_recommendations: includeRecommendations,
-    }),
+  summarize: (scanId: string) =>
+    api.post("/ai/summarize", { scan_job_id: scanId }),
 };
 
 export const dashboardApi = {

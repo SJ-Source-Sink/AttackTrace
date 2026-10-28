@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef, useCallback } from "react";
 import type { ScanStatus } from "@/types";
-import { getAccessToken } from "@/lib/auth";
+import { fetchWithAuth } from "@/lib/auth";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
 
@@ -103,19 +103,33 @@ export function useScanStream(scanId: string | null): ScanStreamState & { discon
       eventSourceRef.current = null;
     }
 
-    const token = getAccessToken();
-    const url = `${API_BASE}/scans/${scanId}/stream${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+    // EventSource can't send headers, so the URL carries a token. Use a short-lived (60s),
+    // scan-bound one, never the real access token (URLs end up in logs and Referer headers).
+    let cancelled = false;
+    let eventSource: EventSource | null = null;
 
-    const eventSource = new EventSource(url);
-    eventSourceRef.current = eventSource;
+    const connect = async () => {
+    let streamToken = "";
+    try {
+      const res = await fetchWithAuth(`${API_BASE}/scans/${scanId}/stream-token`, { method: "POST" });
+      if (res.ok) streamToken = (await res.json()).token ?? "";
+    } catch {
+      // fall through: the stream will 401 and the normal backoff/retry path handles it
+    }
+    if (cancelled) return;
+    const url = `${API_BASE}/scans/${scanId}/stream${streamToken ? `?token=${encodeURIComponent(streamToken)}` : ""}`;
 
-    eventSource.onopen = () => {
+    const es = new EventSource(url);
+    eventSource = es;
+    eventSourceRef.current = es;
+
+    es.onopen = () => {
       // Successful connection — reset backoff
       reconnectAttemptRef.current = 0;
       setState((prev) => ({ ...prev, isConnected: true, error: null }));
     };
 
-    eventSource.onmessage = (event) => {
+    es.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data) as {
           event_type: string;
@@ -249,14 +263,14 @@ export function useScanStream(scanId: string | null): ScanStreamState & { discon
       }
     };
 
-    eventSource.onerror = () => {
+    es.onerror = () => {
       setState((prev) => ({
         ...prev,
         isConnected: false,
         error: "Connection lost. Retrying...",
       }));
-      eventSource.close();
-      if (eventSourceRef.current === eventSource) {
+      es.close();
+      if (eventSourceRef.current === es) {
         eventSourceRef.current = null;
       }
       // Exponential backoff: 3s → 6s → 12s → 24s → max 30s
@@ -268,13 +282,16 @@ export function useScanStream(scanId: string | null): ScanStreamState & { discon
         setReconnectKey((k) => k + 1);
       }, delay);
     };
+    };
+    void connect();
 
     return () => {
+      cancelled = true;
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
       }
-      eventSource.close();
+      eventSource?.close();
       if (eventSourceRef.current === eventSource) {
         eventSourceRef.current = null;
       }

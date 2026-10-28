@@ -195,7 +195,7 @@ function MfaCard() {
           <div className="space-y-4">
             <div>
               <p className="text-sm text-zinc-400 mb-2">
-                Scan can't happen here — add this key manually in your authenticator app:
+                Scan can&apos;t happen here — add this key manually in your authenticator app:
               </p>
               <div className="flex items-center gap-2">
                 <code className="text-xs bg-zinc-900 border border-zinc-800 rounded px-2 py-1.5 text-zinc-300 break-all">

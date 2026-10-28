@@ -566,7 +566,7 @@ export default function AttackSuitePage() {
       setIsScanning(false);
     }
   }, [
-    target, selectedModules, authHeaders, followRedirects, timeout, aiAnalysis,
+    target, selectedModules, authHeaders, followRedirects, timeout, aiAnalysis, anthropicKey,
     crawlerEnabled, crawlerDepth, crawlerPages, crawlerRobots,
     loginEnabled, loginUrl, loginType, loginUsername, loginPassword,
     loginUsernameField, loginPasswordField, loginBearerToken, loginCookie, loginTokenPath,

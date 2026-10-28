@@ -246,7 +246,7 @@ export default function NmapPage() {
       }
       setIsScanning(false);
     }
-  }, [target, scanType, ports, timing, customFlags, scanCommand, rawLines, loadHistory]);
+  }, [target, scanType, ports, timing, customFlags, loadHistory]);
 
   const stopScan = () => {
     abortRef.current?.abort();

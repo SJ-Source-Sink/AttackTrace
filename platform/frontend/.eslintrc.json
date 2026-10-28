@@ -1,0 +1,7 @@
+{
+  "extends": "next/core-web-vitals",
+  "rules": {
+    // Screenshots are served by the API origin (not a configured next/image remote), so a plain <img> is intended.
+    "@next/next/no-img-element": "off"
+  }
+}

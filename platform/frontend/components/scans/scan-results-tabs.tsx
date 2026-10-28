@@ -26,11 +26,38 @@ interface ScanResultsTabsProps {
   scan: Scan;
 }
 
+/** Minimal, XSS-safe rendering of the **bold** and "- " bullet Markdown the AI summary returns.
+ *  Builds React nodes only (never innerHTML), so model output can't inject markup. */
+function SummaryText({ text }: { text: string }) {
+  const bold = (line: string) =>
+    line.split(/\*\*(.+?)\*\*/g).map((part, i) =>
+      i % 2 === 1 ? <strong key={i} className="font-semibold text-zinc-100">{part}</strong> : part,
+    );
+  return (
+    <div className="space-y-1.5 text-sm text-zinc-300 leading-relaxed">
+      {text.split("\n").map((raw, i) => {
+        const line = raw.trimEnd();
+        if (!line.trim()) return null;
+        const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
+        return bullet ? (
+          <div key={i} className="flex items-start gap-2">
+            <span className="text-blue-400 shrink-0 text-xs mt-1">•</span>
+            <span>{bold(bullet[1])}</span>
+          </div>
+        ) : (
+          <p key={i}>{bold(line)}</p>
+        );
+      })}
+    </div>
+  );
+}
+
 function SummaryTab({ scan }: { scan: Scan }) {
   const { data: summary, isLoading } = useQuery({
     queryKey: ["ai", "summarize", scan.id],
     queryFn: () => aiApi.summarize(scan.id) as Promise<AISummarizeResponse>,
     staleTime: Infinity,
+    retry: false, // each attempt is an LLM call; a 4xx (e.g. scan not completed) won't fix itself
   });
 
   const riskColors: Record<string, string> = {
@@ -78,20 +105,22 @@ function SummaryTab({ scan }: { scan: Scan }) {
             </div>
           ) : summary ? (
             <div className="space-y-4">
-              <div className="flex items-center gap-2">
-                <span className="text-sm text-zinc-400">Overall Risk:</span>
-                <span className={`font-semibold capitalize ${riskColors[summary.risk_level]}`}>
-                  {summary.risk_level}
-                </span>
-              </div>
-              <p className="text-sm text-zinc-300 leading-relaxed">{summary.summary}</p>
-              {summary.key_findings.length > 0 && (
+              {summary.risk_level && (
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-zinc-400">Overall Risk:</span>
+                  <span className={`font-semibold capitalize ${riskColors[summary.risk_level]}`}>
+                    {summary.risk_level}
+                  </span>
+                </div>
+              )}
+              <SummaryText text={summary.summary} />
+              {!!summary.key_findings?.length && (
                 <div>
                   <p className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">
                     Key Findings
                   </p>
                   <ul className="space-y-1">
-                    {summary.key_findings.map((finding, idx) => (
+                    {summary.key_findings?.map((finding, idx) => (
                       <li key={idx} className="flex items-start gap-2 text-sm text-zinc-300">
                         <TrendingDown className="h-3.5 w-3.5 text-red-400 mt-0.5 shrink-0" />
                         {finding}
@@ -100,13 +129,13 @@ function SummaryTab({ scan }: { scan: Scan }) {
                   </ul>
                 </div>
               )}
-              {summary.recommendations.length > 0 && (
+              {!!summary.recommendations?.length && (
                 <div>
                   <p className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">
                     Recommendations
                   </p>
                   <ul className="space-y-1">
-                    {summary.recommendations.map((rec, idx) => (
+                    {summary.recommendations?.map((rec, idx) => (
                       <li key={idx} className="flex items-start gap-2 text-sm text-zinc-300">
                         <span className="text-blue-400 shrink-0 text-xs mt-0.5">→</span>
                         {rec}

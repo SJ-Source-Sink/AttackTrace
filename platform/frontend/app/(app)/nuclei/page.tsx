@@ -945,7 +945,7 @@ export default function NucleiPage() {
             <div className="flex flex-col items-center justify-center py-20 text-zinc-600 space-y-3">
               <Crosshair className="h-12 w-12" />
               <p className="text-sm">Enter a target and run a scan</p>
-              <p className="text-xs text-zinc-700">Leaving templates on "All" runs every template</p>
+              <p className="text-xs text-zinc-700">Leaving templates on &quot;All&quot; runs every template</p>
             </div>
           )}
         </div>

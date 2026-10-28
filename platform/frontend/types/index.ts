@@ -509,10 +509,13 @@ export interface AISummarizeRequest {
 
 export interface AISummarizeResponse {
   summary: string;
-  key_findings: string[];
-  recommendations: string[];
-  risk_level: "low" | "medium" | "high" | "critical";
-  generated_at: string;
+  scan_job_id?: string;
+  has_comparison?: boolean;
+  // Not currently returned by the backend (it sends the narrative in `summary`); rendered if present.
+  key_findings?: string[];
+  recommendations?: string[];
+  risk_level?: "low" | "medium" | "high" | "critical";
+  generated_at?: string;
 }
 
 // ============================================================

@@ -386,7 +386,12 @@ export default function CSPMPage() {
         setIsScanning(false);
       }
     }
-  }, [provider, awsKey, awsSecret, awsRegion, awsSessionToken, severityFilter]);
+  }, [
+    provider, awsKey, awsSecret, awsRegion, awsSessionToken, severityFilter,
+    gcpProjectId, gcpServiceAccountKey,
+    azureSubscriptionId, azureTenantId, azureClientId, azureClientSecret,
+    k8sApiServer, k8sToken, k8sCaCert, k8sInsecureSkipTlsVerify,
+  ]);
 
   const stopScan = () => {
     abortRef.current?.abort();

@@ -898,11 +898,11 @@ export function BurpImport() {
     setParamGraph([]); setAuthFlows(null); setAnalysisId(null);
   };
 
-  const onDrop = useCallback((e: React.DragEvent) => {
+  const onDrop = (e: React.DragEvent) => {
     e.preventDefault(); setDragging(false);
     const f = e.dataTransfer.files[0];
     if (f) handleFile(f);
-  }, []);
+  };
 
   // ── Analysis ────────────────────────────────────────────────────────────────
 

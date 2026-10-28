@@ -688,7 +688,7 @@ function MobileScanDetailPageInner() {
                 Dynamic Analysis Jobs
               </h2>
               <p className="text-xs text-zinc-500 mt-0.5">
-                Expand a finding on the Findings tab and click "Dynamic Analysis" to start a live verification job.
+                Expand a finding on the Findings tab and click &quot;Dynamic Analysis&quot; to start a live verification job.
               </p>
             </div>
             <Button
