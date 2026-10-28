@@ -196,7 +196,7 @@ async def _run_auto_takeover(org_id, subdomains: list[str]) -> dict:
             # Drop hosts the scan-target policy refuses (e.g. subdomains resolving to private
             # IPs) individually, so one internal name doesn't abort the whole batch.
             from app.core.target_guard import scan_target_problem
-            subdomains = [h for h in subdomains if not scan_target_problem(h)]
+            subdomains = [h for h in subdomains if not scan_target_problem(h, allow_unresolvable=True)]
             if not subdomains:
                 return {"status": "skipped", "reason": "no_public_subdomains"}
             req = TakeoverRequest(targets=subdomains)

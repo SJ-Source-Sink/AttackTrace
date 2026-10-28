@@ -9,8 +9,8 @@ ALLOW_PRIVATE_SCAN_TARGETS=true. Link-local/multicast/unspecified (which include
 metadata address) are blocked even then.
 
 Hostnames are resolved here and every returned address is checked. A name that doesn't resolve
-is allowed through (subdomain-takeover scanning targets exactly those) since nothing can be
-connected to. Resolution here is a point-in-time check, not DNS pinning: scanners that must
+is refused unless the caller opts in (subdomain-takeover scanning targets exactly those).
+Resolution here is a point-in-time check, not DNS pinning: scanners that must
 withstand DNS rebinding (php2shell) pin the resolved IP themselves.
 """
 
@@ -53,17 +53,26 @@ def blocked_reason(ip: ipaddress._BaseAddress, allow_private: bool) -> str | Non
     return None
 
 
-def _host_of(token: str) -> str:
-    """Bare host from a URL, host:port, [v6]:port, or plain host/IP."""
+def _host_of(token: str) -> str | None:
+    """Host the way the HTTP clients that consume the target will parse it, or None when the
+    token can't be parsed unambiguously (callers must then refuse it).
+
+    Scheme-less input is parsed as a network location (``//host``) so userinfo, ports, paths and
+    scp-style ``git@host:org/repo`` yield the real host instead of a string that merely fails to
+    resolve; a mismatch between this parser and the client is what a guard bypass needs.
+    """
     token = token.strip()
-    if "://" in token:
-        return (urlsplit(token).hostname or "").strip()
-    token = token.split("/", 1)[0] if "/" in token and not _is_cidr(token) else token
-    if token.startswith("["):
-        return token[1 : token.find("]")] if "]" in token else token[1:]
-    if token.count(":") == 1:  # host:port (a bare IPv6 has several colons)
-        return token.split(":", 1)[0]
-    return token
+    if "\\" in token:  # backslash handling differs between URL parsers: refuse
+        return None
+    try:
+        return ipaddress.ip_address(token.split("%")[0]).compressed  # bare IPv4/IPv6
+    except ValueError:
+        pass
+    try:
+        host = urlsplit(token if "://" in token else "//" + token).hostname
+    except ValueError:
+        return None
+    return host or None
 
 
 def _is_cidr(token: str) -> bool:
@@ -74,9 +83,14 @@ def _is_cidr(token: str) -> bool:
         return False
 
 
-def scan_target_problem(raw: str) -> str | None:
+def scan_target_problem(raw: str, allow_unresolvable: bool = False) -> str | None:
     """Reason a scan target must be refused, or None. Accepts URLs, hosts, IPs, CIDRs, and
-    whitespace/comma separated lists of those."""
+    whitespace/comma separated lists of those.
+
+    Fails closed: unparseable targets and names that don't resolve are refused. Only callers that
+    legitimately target non-resolving names (subdomain takeover, ffuf FUZZ hosts) pass
+    ``allow_unresolvable=True``.
+    """
     allow_private = bool(get_settings().ALLOW_PRIVATE_SCAN_TARGETS)
     for token in raw.replace(",", " ").split():
         if _is_cidr(token):
@@ -87,15 +101,17 @@ def scan_target_problem(raw: str) -> str | None:
                     return f"{token}: {reason}"
             continue
         host = _host_of(token)
-        if not host:
-            continue
+        if host is None:
+            return f"{token[:60]}: could not be parsed as a host or URL"
         try:
             addrs = [ipaddress.ip_address(host.split("%")[0])]
         except ValueError:
             try:
                 infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
             except socket.gaierror:
-                continue  # unresolvable: nothing to connect to
+                if allow_unresolvable:
+                    continue  # nothing to connect to (e.g. dangling DNS for takeover checks)
+                return f"{host}: does not resolve"
             addrs = []
             for info in infos:
                 try:
@@ -109,14 +125,14 @@ def scan_target_problem(raw: str) -> str | None:
     return None
 
 
-def guard_scan_target(value):
+def guard_scan_target(value, allow_unresolvable: bool = False):
     """Pydantic-validator helper: returns the value, or raises ValueError (-> HTTP 422)."""
     if value is None:
         return value
     items = value if isinstance(value, (list, tuple)) else [value]
     for item in items:
         if isinstance(item, str) and item.strip():
-            problem = scan_target_problem(item)
+            problem = scan_target_problem(item, allow_unresolvable)
             if problem:
                 raise ValueError(f"Target not allowed: {problem}")
     return value

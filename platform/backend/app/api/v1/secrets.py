@@ -908,8 +908,9 @@ class SecretScanRequest(BaseModel):
 
     @model_validator(mode="after")
     def _guard_url_target(self):
-        # url and git_repo scans connect to the host in `target`; github_org/github_user don't
-        if self.scan_type in ("url", "git_repo"):
+        # Deny by default: only the GitHub org/user scans (which take a name, not a host) skip the
+        # guard, so a new or unexpected scan_type that connects to `target` can't bypass it.
+        if self.scan_type not in ("github_org", "github_user"):
             guard_scan_target(self.target)
         return self
 

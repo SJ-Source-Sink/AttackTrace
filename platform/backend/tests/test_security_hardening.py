@@ -69,10 +69,44 @@ def test_target_guard_allows_public(monkeypatch, target):
     assert target_guard.scan_target_problem(target) is None
 
 
-def test_target_guard_unresolvable_name_is_allowed(monkeypatch):
-    # takeover scanning targets dangling names; nothing can be connected to
+def test_target_guard_fails_closed_on_unresolvable_unless_opted_in(monkeypatch):
     monkeypatch.setattr(target_guard, "get_settings", _settings(False))
-    assert target_guard.scan_target_problem("no-such-host-zzqq-12345.invalid") is None
+    name = "no-such-host-zzqq-12345.invalid"
+    assert target_guard.scan_target_problem(name)  # default: refuse
+    assert target_guard.scan_target_problem(name, allow_unresolvable=True) is None  # takeover etc.
+
+
+@pytest.mark.parametrize("target", [
+    "user@127.0.0.1", "git@127.0.0.1:x/y", "ssh://git@10.0.0.1/r.git", "http://x\\@127.0.0.1",
+    "127.0.0.1#@example.com", "2130706433", "0x7f.0.0.1", "127.1", "user:pw@localhost:8080/p",
+    "http://a@b@127.0.0.1", "//127.0.0.1", "[::1",
+])
+def test_target_guard_parses_like_the_client(monkeypatch, target):
+    # parser-differential bypasses: userinfo/scp-style/obfuscated forms must not look "unresolvable"
+    monkeypatch.setattr(target_guard, "get_settings", _settings(False))
+    assert target_guard.scan_target_problem(target)
+
+
+def test_secrets_guard_is_deny_by_default(monkeypatch):
+    from app.api.v1.secrets import SecretScanRequest
+
+    monkeypatch.setattr(target_guard, "get_settings", _settings(False))
+    for scan_type in ("url", "git_repo", "github_repo", "anything-else"):
+        with pytest.raises(ValueError):
+            SecretScanRequest(target="http://127.0.0.1", scan_type=scan_type)
+    # github org/user scans take a name, not a host
+    assert SecretScanRequest(target="some-org", scan_type="github_org").target == "some-org"
+
+
+def test_takeover_and_ffuf_opt_in_to_unresolvable(monkeypatch):
+    from app.api.v1.ffuf import FfufScanRequest
+    from app.api.v1.takeover import TakeoverRequest
+
+    monkeypatch.setattr(target_guard, "get_settings", _settings(False))
+    assert TakeoverRequest(targets=["dangling.no-such-host-zzqq-12345.invalid"])
+    assert FfufScanRequest(url="http://FUZZ.no-such-host-zzqq-12345.invalid/")
+    with pytest.raises(ValueError):
+        FfufScanRequest(url="http://no-such-host-zzqq-12345.invalid/FUZZ")  # no FUZZ in host
 
 
 def test_target_guard_opt_in_allows_private_but_never_metadata(monkeypatch):

@@ -540,8 +540,8 @@ class TakeoverRequest(BaseModel):
     @field_validator("targets")
     @classmethod
     def _guard_scan_target(cls, v):
-        # Block loopback/private/metadata addresses unless ALLOW_PRIVATE_SCAN_TARGETS (see target_guard)
-        return guard_scan_target(v)
+        # Dangling (non-resolving) names are exactly what takeover checks look for
+        return guard_scan_target(v, allow_unresolvable=True)
 
     targets: list[str]
     check_cname: bool = True

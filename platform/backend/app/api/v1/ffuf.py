@@ -243,8 +243,14 @@ class FfufScanRequest(BaseModel):
     @field_validator("url")
     @classmethod
     def _guard_scan_target(cls, v):
-        # Block loopback/private/metadata addresses unless ALLOW_PRIVATE_SCAN_TARGETS (see target_guard)
-        return guard_scan_target(v)
+        # A FUZZ keyword in the host (subdomain fuzzing) can't resolve until substituted
+        from urllib.parse import urlsplit
+
+        try:
+            netloc = urlsplit(v if "://" in v else "//" + v).netloc
+        except ValueError:
+            netloc = ""
+        return guard_scan_target(v, allow_unresolvable="FUZZ" in netloc)
 
     url: str
     wordlist: str | None = None
