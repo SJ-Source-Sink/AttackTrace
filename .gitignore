@@ -95,3 +95,6 @@ tools/msra/data/community/
 
 # Local Claude Code project memory (contains credentials/internal notes)
 CLAUDE.md
+
+# Local Claude Code memory notes (personal/dev context; keep local, not in the repo)
+.claude/memory/
