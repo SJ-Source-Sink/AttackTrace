@@ -20,6 +20,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.target_guard import guard_scan_target
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user, require_tool
@@ -233,6 +234,12 @@ _CATEGORY_TAGS = {
 
 
 class NucleiScanRequest(BaseModel):
+    @field_validator("target")
+    @classmethod
+    def _guard_scan_target(cls, v):
+        # Block loopback/private/metadata addresses unless ALLOW_PRIVATE_SCAN_TARGETS (see target_guard)
+        return guard_scan_target(v)
+
     target: str
     templates: list[str] | None = None          # specific template IDs
     categories: list[str] | None = None          # category tags
@@ -320,8 +327,11 @@ def _build_nuclei_cmd(req: NucleiScanRequest, org_id: uuid.UUID | None = None) -
                 pass
 
     if req.custom_template_dir:
-        safe_dir = Path(req.custom_template_dir)
-        if safe_dir.is_dir():
+        # Only the caller's own org directory: an arbitrary server path (or another org's
+        # custom-templates) must not be loadable as templates.
+        org_root = (Path(_settings.ATTACKTRACE_WORKSPACE_DIR) / str(org_id)).resolve()
+        safe_dir = Path(req.custom_template_dir).resolve()
+        if safe_dir.is_dir() and (safe_dir == org_root or org_root in safe_dir.parents):
             cmd.extend(["-t", str(safe_dir)])
     elif req.templates:
         # template browser returns IDs — use -id flag (requires nuclei to know templates dir)

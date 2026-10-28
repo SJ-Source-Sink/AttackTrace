@@ -60,6 +60,20 @@ def create_access_token(
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
+def create_stream_token(user_id: str, org_id: str, scan_id: str, ttl_seconds: int = 60) -> str:
+    """Single-purpose token for browser EventSource URLs (which can't send headers).
+
+    A URL ends up in logs and Referer headers, so it must not carry the real access token: this
+    one is valid for one scan, for ~1 minute, and is rejected everywhere except the stream route.
+    """
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": user_id, "org_id": org_id, "scan_id": scan_id, "type": "sse",
+        "iat": now, "exp": now + timedelta(seconds=ttl_seconds),
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
 def create_refresh_token(subject: str) -> str:
     """Create a long-lived JWT refresh token."""
     now = datetime.now(timezone.utc)

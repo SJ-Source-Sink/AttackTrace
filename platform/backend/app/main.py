@@ -15,7 +15,7 @@ from typing import Any
 from pathlib import Path
 
 import structlog
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -318,7 +318,26 @@ async def internal_error_handler(request: Request, exc):
 # --- Static files (screenshots) ---
 _screenshots_root = Path(settings.ATTACKTRACE_WORKSPACE_DIR)
 _screenshots_root.mkdir(parents=True, exist_ok=True)
-app.mount("/static/screenshots", StaticFiles(directory=str(_screenshots_root)), name="screenshots")
+
+
+class _ScreenshotFiles(StaticFiles):
+    """Serve only screenshot images from the scan workspace.
+
+    The workspace also holds every scanner's history JSON, reports and org config, so the
+    mount must not expose anything beyond ``<...>/screenshots/<file>.<image ext>``. <img>
+    tags can't send auth headers, so access relies on the unguessable org/scan UUID path.
+    """
+
+    _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+
+    async def get_response(self, path, scope):
+        parts = path.replace("\\", "/").split("/")
+        if "screenshots" not in parts[:-1] or not path.lower().endswith(self._IMAGE_EXTS):
+            raise HTTPException(status_code=404)
+        return await super().get_response(path, scope)
+
+
+app.mount("/static/screenshots", _ScreenshotFiles(directory=str(_screenshots_root)), name="screenshots")
 
 # --- Routers ---
 from app.api.v1.router import api_router

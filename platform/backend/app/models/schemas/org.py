@@ -156,6 +156,14 @@ class ApiKeyCreate(BaseModel):
     expires_in_days: Optional[int] = Field(None, ge=1, le=365)
     scopes: list[str] = Field(default_factory=list)
 
+    @field_validator("scopes")
+    @classmethod
+    def validate_scopes(cls, v: list[str]) -> list[str]:
+        bad = [x for x in v if x not in {"read", "write", "admin", "*"}]
+        if bad:
+            raise ValueError(f"Unknown scopes: {bad}. Allowed: read, write, admin, *")
+        return list(dict.fromkeys(v))
+
 
 class ApiKeyResponse(BaseModel):
     id: str

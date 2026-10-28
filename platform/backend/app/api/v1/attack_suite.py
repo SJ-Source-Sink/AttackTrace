@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.target_guard import guard_scan_target
 from app.core.dependencies import get_current_user, get_current_org_id, require_tool
 from app.core.config import get_settings
 from app.core.database import get_db
@@ -161,6 +162,12 @@ class Account2Config(BaseModel):
     cookie: str = ""
 
 class AttackSuiteRequest(BaseModel):
+    @field_validator("target")
+    @classmethod
+    def _guard_scan_target(cls, v):
+        # Block loopback/private/metadata addresses unless ALLOW_PRIVATE_SCAN_TARGETS (see target_guard)
+        return guard_scan_target(v)
+
     target: str
     modules: list[str] = [m["id"] for m in MODULES_META]
     auth_headers: dict[str, str] = {}

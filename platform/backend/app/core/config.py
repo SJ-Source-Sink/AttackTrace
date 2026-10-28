@@ -5,10 +5,10 @@ All settings can be overridden via environment variables.
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Optional
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -47,7 +47,8 @@ class Settings(BaseSettings):
     REDIS_SCAN_PUBSUB_DB: int = 1
 
     # CORS
-    CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    # NoDecode: let parse_cors_origins accept "a,b" / JSON / bare strings (env sources JSON-decode lists otherwise)
+    CORS_ORIGINS: Annotated[list[str], NoDecode] = ["http://localhost:3000", "http://127.0.0.1:3000"]
     CORS_ALLOW_CREDENTIALS: bool = True
 
     # Celery
@@ -86,6 +87,9 @@ class Settings(BaseSettings):
 
     # Rate limiting
     RATE_LIMIT_PER_MINUTE: int = 60
+    # Only enable behind a reverse proxy you control: client IPs for rate limits/lockouts are then
+    # taken from X-Forwarded-For (otherwise every user behind the proxy shares one IP).
+    TRUST_PROXY_HEADERS: bool = False
     AUTH_RATE_LIMIT_PER_MINUTE: int = 10   # tighter limit on /auth endpoints (brute-force protection)
 
     # File uploads

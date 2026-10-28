@@ -35,6 +35,8 @@ from typing import Any
 
 import httpx
 
+from app.core.target_guard import blocked_reason  # shared with every scanner; re-exported here
+
 CVES = ["CVE-2026-109618", "CVE-2026-109619"]
 CVSS = 9.2  # CVSS v4.0, both CVEs
 FIXED_PATCH: dict[tuple[int, int], int] = {(8, 2): 35, (8, 3): 36, (8, 4): 27, (8, 5): 12}
@@ -163,38 +165,6 @@ class Target:
     ip: str
     host_header: str | None  # original hostname when the input was a name
     label: str
-
-
-def _embedded_v4(ip: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
-    if ip.ipv4_mapped:
-        return ip.ipv4_mapped
-    if ip in ipaddress.ip_network("::/96"):  # IPv4-compatible (deprecated): ::a.b.c.d
-        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
-    if ip in ipaddress.ip_network("::ffff:0:0:0/96"):  # SIIT: ::ffff:0:a.b.c.d
-        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
-    if ip in ipaddress.ip_network("64:ff9b::/96"):
-        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
-    if ip in ipaddress.ip_network("2002::/16"):
-        return ipaddress.IPv4Address((int(ip) >> 80) & 0xFFFFFFFF)
-    return None
-
-
-def blocked_reason(ip: ipaddress._BaseAddress, allow_private: bool) -> str | None:
-    """Why the platform refuses to send traffic to this address, or None."""
-    if isinstance(ip, ipaddress.IPv6Address):
-        if ip.teredo:  # (server, client) -- judge both embedded IPv4s
-            for v4 in ip.teredo:
-                reason = blocked_reason(v4, allow_private)
-                if reason:
-                    return reason
-        ip = _embedded_v4(ip) or ip
-    if ip.is_link_local or ip.is_multicast or ip.is_unspecified:
-        return "link-local/multicast/unspecified address (always blocked)"
-    # Fail closed: anything not globally routable (private, loopback, CGNAT
-    # 100.64/10, documentation, reserved, ...) needs the explicit opt-in.
-    if (not ip.is_global or ip.is_reserved) and not allow_private:
-        return "non-public address (set ALLOW_PRIVATE_SCAN_TARGETS=true to scan internal ranges)"
-    return None
 
 
 async def expand_targets(

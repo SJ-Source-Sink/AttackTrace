@@ -49,6 +49,52 @@ def _slugify(name: str) -> str:
     return slug.strip("-")[:100]
 
 
+def _client_ip(request: Request) -> str:
+    if settings.TRUST_PROXY_HEADERS:
+        fwd = request.headers.get("x-forwarded-for", "")
+        if fwd:
+            return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+async def _redis_call(coro_factory):
+    """Run one Redis operation on a short-lived connection; None on any error (callers fail open
+    only where noted: /login's lockout reads, which can't work without Redis anyway)."""
+    import redis.asyncio as _aioredis
+
+    _r = None
+    try:
+        _r = _aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=1)
+        return await coro_factory(_r)
+    except Exception:
+        return None
+    finally:
+        if _r is not None:
+            try:
+                await _r.aclose()
+            except Exception:
+                pass
+
+
+async def _rate_limit(request: Request, bucket: str, limit: int, window: int = 60) -> None:
+    """Fixed-window per-IP limiter for unauthenticated auth endpoints."""
+    key = f"ratelimit:{bucket}:{_client_ip(request)}"
+
+    async def _hit(r):
+        n = await r.incr(key)
+        if n == 1:
+            await r.expire(key, window)
+        return int(n)
+
+    n = await _redis_call(_hit)
+    if n is not None and n > limit:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"error": {"code": "TOO_MANY_REQUESTS", "message": "Too many requests. Slow down and try again shortly."}},
+        )
+
+
+
 @router.post(
     "/register",
     response_model=TokenResponse,
@@ -58,8 +104,10 @@ def _slugify(name: str) -> str:
 )
 async def register(
     payload: RegisterRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
+    await _rate_limit(request, "register", settings.AUTH_RATE_LIMIT_PER_MINUTE)
     # Validate invite code
     invite_result = await db.execute(
         select(InviteCode).where(InviteCode.code == payload.invite_code.upper().strip())
@@ -152,11 +200,17 @@ async def login(
     # in a finally block, preventing connection leaks on all code paths.
     import redis.asyncio as _aioredis
 
-    _lockout_key = f"lockout:{payload.email}"
-    _attempt_key = f"loginattempts:{payload.email}"
-    _client_ip = request.client.host if request.client else "unknown"
-    _ip_lockout_key = f"lockout_ip:{_client_ip}"
-    _ip_attempt_key = f"loginattempts_ip:{_client_ip}"
+    # Account lockout is keyed on (email, source IP): keying on the email alone would let any
+    # stranger lock any user out just by failing logins against their address. A much higher
+    # per-account threshold (across all IPs) still stops distributed guessing.
+    _email = payload.email.strip().lower()
+    _client_ip_str = _client_ip(request)
+    _lockout_key = f"lockout:{_email}:{_client_ip_str}"
+    _attempt_key = f"loginattempts:{_email}:{_client_ip_str}"
+    _acct_lockout_key = f"lockout_acct:{_email}"
+    _acct_attempt_key = f"loginattempts_acct:{_email}"
+    _ip_lockout_key = f"lockout_ip:{_client_ip_str}"
+    _ip_attempt_key = f"loginattempts_ip:{_client_ip_str}"
 
     async def _redis_op(coro_factory):
         """Execute a Redis coroutine with a dedicated connection; return None on any error."""
@@ -181,6 +235,12 @@ async def login(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={"error": {"code": "ACCOUNT_LOCKED", "message": "Account temporarily locked due to too many failed login attempts. Try again in 15 minutes."}},
         )
+    _acct_locked = await _redis_op(lambda r: r.get(_acct_lockout_key))
+    if _acct_locked:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"error": {"code": "ACCOUNT_LOCKED", "message": "Too many failed login attempts for this account from multiple sources. Try again in 15 minutes."}},
+        )
     _ip_locked = await _redis_op(lambda r: r.get(_ip_lockout_key))
     if _ip_locked:
         raise HTTPException(
@@ -202,6 +262,12 @@ async def login(
                 await r.set(_lockout_key, "1", ex=900)
                 await r.delete(_attempt_key)
 
+            acct_attempts = await r.incr(_acct_attempt_key)
+            await r.expire(_acct_attempt_key, 900)
+            if int(acct_attempts) >= 30:
+                await r.set(_acct_lockout_key, "1", ex=900)
+                await r.delete(_acct_attempt_key)
+
             ip_attempts = await r.incr(_ip_attempt_key)
             await r.expire(_ip_attempt_key, 900)
             if int(ip_attempts) >= 20:
@@ -220,11 +286,10 @@ async def login(
             detail={"error": {"code": "ACCOUNT_DISABLED", "message": "Account has been disabled"}},
         )
 
-    # Correct password; if MFA is enabled, require the second factor before
-    # issuing real tokens. Clear the brute-force counters now since the
-    # password itself was correct.
+    # Correct password; if MFA is enabled, require the second factor before issuing real tokens.
+    # Counters are NOT cleared here: a correct password alone must not buy a fresh budget of
+    # guesses at the second factor (they're cleared once MFA succeeds, or expire after 15 min).
     if user.mfa_enabled:
-        await _redis_op(lambda r: r.delete(_attempt_key, _lockout_key, _ip_attempt_key))
         mfa_token = create_access_token(subject=str(user.id), extra_claims={"type": "mfa_pending"})
         return {"mfa_required": True, "mfa_token": mfa_token}
 
@@ -341,9 +406,12 @@ async def mfa_disable(
 )
 async def mfa_challenge(
     payload: dict,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     import pyotp
+
+    await _rate_limit(request, "mfa", settings.AUTH_RATE_LIMIT_PER_MINUTE)
 
     mfa_token = str(payload.get("mfa_token", ""))
     code = str(payload.get("code", ""))
@@ -360,6 +428,15 @@ async def mfa_challenge(
     if not user or not user.mfa_enabled or not user.totp_secret_enc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="MFA is not enabled for this account")
 
+    # Per-user cap on second-factor guesses (5 wrong codes -> 15 min lock), independent of the
+    # mfa_token: otherwise a fresh token from a correct password gives unlimited guesses.
+    _mfa_lock_key, _mfa_fail_key = f"mfa_lock:{user.id}", f"mfa_fail:{user.id}"
+    if await _redis_call(lambda r: r.get(_mfa_lock_key)):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"error": {"code": "MFA_LOCKED", "message": "Too many invalid codes. Try again in 15 minutes."}},
+        )
+
     secret = decrypt_credential(user.totp_secret_enc)
     valid = pyotp.TOTP(secret).verify(code, valid_window=1)
 
@@ -372,7 +449,16 @@ async def mfa_challenge(
             db.add(user)
 
     if not valid:
+        async def _mfa_fail(r):
+            n = await r.incr(_mfa_fail_key)
+            await r.expire(_mfa_fail_key, 900)
+            if int(n) >= 5:
+                await r.set(_mfa_lock_key, "1", ex=900)
+                await r.delete(_mfa_fail_key)
+
+        await _redis_call(_mfa_fail)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid code")
+    await _redis_call(lambda r: r.delete(_mfa_fail_key, _mfa_lock_key))
 
     member_result = await db.execute(
         select(OrgMember).where(OrgMember.user_id == user.id).order_by(OrgMember.created_at.asc()).limit(1)
@@ -403,8 +489,10 @@ async def mfa_challenge(
 )
 async def refresh_token(
     payload: RefreshRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
+    await _rate_limit(request, "refresh", settings.AUTH_RATE_LIMIT_PER_MINUTE * 6)
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail={"error": {"code": "INVALID_REFRESH_TOKEN", "message": "Invalid or expired refresh token"}},

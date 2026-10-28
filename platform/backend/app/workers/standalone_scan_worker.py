@@ -193,6 +193,12 @@ async def _run_auto_takeover(org_id, subdomains: list[str]) -> dict:
         from app.api.v1.takeover import _stream_takeover_scan, TakeoverRequest
         async with Session() as db:
             scan_id = str(_uuid.uuid4())
+            # Drop hosts the scan-target policy refuses (e.g. subdomains resolving to private
+            # IPs) individually, so one internal name doesn't abort the whole batch.
+            from app.core.target_guard import scan_target_problem
+            subdomains = [h for h in subdomains if not scan_target_problem(h)]
+            if not subdomains:
+                return {"status": "skipped", "reason": "no_public_subdomains"}
             req = TakeoverRequest(targets=subdomains)
             async for _ in _stream_takeover_scan(scan_id, req, "auto-scan@system", org_id, db):
                 pass

@@ -22,11 +22,12 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings as _get_settings
 from app.core.database import get_db
+from app.core.target_guard import guard_scan_target
 from app.core.dependencies import get_current_org_id, get_current_user
 from app.core.remediation import get_remediation
 from app.api.v1.dashboard import invalidate_dashboard_cache
@@ -904,6 +905,13 @@ class SecretScanRequest(BaseModel):
     include_wayback: bool = True
     max_js_files: int = 100
     max_git_commits: int = 200  # git_repo scans only — bounds clone/walk cost
+
+    @model_validator(mode="after")
+    def _guard_url_target(self):
+        # url and git_repo scans connect to the host in `target`; github_org/github_user don't
+        if self.scan_type in ("url", "git_repo"):
+            guard_scan_target(self.target)
+        return self
 
 
 # ── History endpoints ──────────────────────────────────────────────────────────

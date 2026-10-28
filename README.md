@@ -215,7 +215,7 @@ sudo systemctl start postgresql redis-server
 **Clone and start:**
 
 ```bash
-git clone https://github.com/BaymaxPop23/AttackTrace.git
+git clone https://github.com/SJ-Source-Sink/AttackTrace.git
 cd AttackTrace
 chmod +x start.sh && ./start.sh
 ```
@@ -250,7 +250,7 @@ tail -f logs/frontend.log
 **Prerequisites:** [Docker Desktop](https://docs.docker.com/get-docker/)
 
 ```bash
-git clone https://github.com/BaymaxPop23/AttackTrace.git
+git clone https://github.com/SJ-Source-Sink/AttackTrace.git
 cd AttackTrace
 chmod +x setup.sh && ./setup.sh
 ```
@@ -378,7 +378,7 @@ Configure at **Settings → Integrations** (all credentials encrypted AES-256-GC
 | **Jira** | Automatic remediation ticket creation from findings |
 | **Slack** | Scan completion and critical finding alerts |
 
-Generate **platform API keys** for CI/CD at **Settings → API Keys**.
+Generate **platform API keys** for CI/CD at **Settings → API Keys**. A key acts as its creator and never exceeds their role; its `scopes` narrow it further: `read` (GET only), `write` (all methods), `admin`, or `*`. An empty scope list means `read` + `write`.
 
 ---
 
@@ -389,7 +389,7 @@ Generate **platform API keys** for CI/CD at **Settings → API Keys**.
 | **Owner** | Full access including billing; cannot be removed |
 | **Admin** | Manage team, settings, all scans and findings |
 | **Analyst** | Run scans, manage findings, use all security tools |
-| **Viewer** | Read-only access to scans, assets, and findings |
+| **Viewer** | Read-only access to scans, assets, and findings (any write request is rejected with 403) |
 
 Add team members at **Settings → Team Members** — direct create or shareable invite link.
 
@@ -451,13 +451,19 @@ Key files:
 
 ---
 
+## Security & Deployment Notes
+
+AttackTrace is built to run scanners from your own host, so treat the deployment itself as sensitive.
+
+- **Default login is for local development only.** With `ENVIRONMENT=development` the seed creates `admin` / `admin` and an open invite code (`ATTACKTRACE`) so a fresh install works immediately. With any other `ENVIRONMENT` the seed refuses a weak `FIRST_SUPERUSER_PASSWORD` (or generates one and prints it once) and creates no open invite code unless you set `SEED_OPEN_INVITE=true`. Change the password and remove the invite code before exposing an instance to a network.
+- **Scan targets are restricted to public addresses.** Scanners refuse loopback, private, CGNAT and link-local targets (including the cloud metadata address `169.254.169.254`) so a user can't use the platform to probe its own host or network. Link-local is always blocked. To scan internal ranges you own, set `ALLOW_PRIVATE_SCAN_TARGETS=true`.
+- **Behind a reverse proxy**, set `TRUST_PROXY_HEADERS=true` so login rate limits and lockouts use the real client IP (from `X-Forwarded-For`). Only enable it when a proxy you control sets that header.
+- **Authentication hardening:** login lockouts are per account + source IP, MFA codes are limited to 5 wrong attempts per 15 minutes, and register/refresh/MFA endpoints are rate limited.
+- **Screenshots** under `/static/screenshots/` are served without authentication (they load in `<img>` tags) but only image files in a `screenshots/` folder are reachable, and only by their unguessable org/scan path.
+
+---
+
 ## Troubleshooting
-
-### Backend fails to start — `SettingsError: error parsing CORS_ORIGINS`
-
-```bash
-sed -i '' '/^CORS_ORIGINS=/d' platform/backend/.env
-```
 
 ### Backend fails — `ValueError: password cannot be longer than 72 bytes`
 

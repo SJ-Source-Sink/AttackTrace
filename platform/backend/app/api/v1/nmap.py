@@ -18,9 +18,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.target_guard import guard_scan_target
 from app.core.config import get_settings as _get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user, require_tool
+from app.core.scan_args import reject_option_like, validate_nmap_flags
 from app.models.db.asset import AssetType
 from app.models.db.audit import AuditLog
 from app.models.db.user import User
@@ -214,6 +216,12 @@ def _has_raw_socket_capability() -> bool:
 
 
 class NmapScanRequest(BaseModel):
+    @field_validator("target")
+    @classmethod
+    def _guard_scan_target(cls, v):
+        # Block loopback/private/metadata addresses unless ALLOW_PRIVATE_SCAN_TARGETS (see target_guard)
+        return guard_scan_target(v)
+
     target: str
     scan_type: str = "quick"
     ports: str | None = None
@@ -229,7 +237,7 @@ class NmapScanRequest(BaseModel):
         # Basic sanity — block shell metacharacters
         if re.search(r"[;&|`$(){}<>]", v):
             raise ValueError("Target contains invalid characters")
-        return v
+        return reject_option_like(v)
 
     @field_validator("timing")
     @classmethod
@@ -253,9 +261,8 @@ class NmapScanRequest(BaseModel):
     def validate_custom_flags(cls, v: str | None) -> str | None:
         if v is None:
             return v
-        # Block dangerous shell chars
-        if re.search(r"[;&|`$(){}<>]", v or ""):
-            raise ValueError("Custom flags contain invalid characters")
+        # Allowlist only: nmap flags like -iL/-oN/--script <path> read or write server files
+        validate_nmap_flags(v)
         return v
 
 

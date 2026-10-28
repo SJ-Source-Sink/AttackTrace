@@ -3,6 +3,7 @@ AttackMapper integration — calls the attackmapper Python API directly (no subp
 Works on any machine after git pull with no pip install required.
 """
 
+import logging
 import asyncio
 import json
 import os
@@ -20,6 +21,8 @@ from pydantic import BaseModel, field_validator
 from app.core.config import get_settings as _get_settings
 from app.core.dependencies import get_current_org_id, get_current_user, require_tool
 from app.models.db.user import User
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/attackmapper", tags=["AttackMapper"])
 
@@ -680,8 +683,9 @@ async def get_apt_groups(
         total = len(items)
         return {"items": items[offset: offset + limit], "total": total}
 
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+    except Exception:
+        logger.exception("attackmapper request failed")
+        raise HTTPException(status_code=500, detail="Internal error while reading threat intelligence data")
 
 
 @router.get("/cves", summary="Get CVEs from the local threat intel cache")
@@ -759,8 +763,9 @@ async def get_cves(
             })
 
         return {"items": items, "total": total, "returned": len(items)}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+    except Exception:
+        logger.exception("attackmapper request failed")
+        raise HTTPException(status_code=500, detail="Internal error while reading threat intelligence data")
 
 
 class CorrelateRequest(BaseModel):
@@ -955,5 +960,6 @@ async def get_attackmapper_stats(
             "last_updated": cache_stats.get("last_update"),
             "total_items": total_items,
         }
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+    except Exception:
+        logger.exception("attackmapper request failed")
+        raise HTTPException(status_code=500, detail="Internal error while reading threat intelligence data")

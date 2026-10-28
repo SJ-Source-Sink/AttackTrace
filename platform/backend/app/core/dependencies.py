@@ -5,7 +5,7 @@ FastAPI dependency injection: database sessions, authentication, and RBAC.
 from typing import Annotated, Optional
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, Security, status
+from fastapi import Depends, HTTPException, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt.exceptions import InvalidTokenError
 from sqlalchemy import select
@@ -19,10 +19,15 @@ from app.models.db.org import ApiKey
 
 settings = get_settings()
 
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# POST endpoints a read-only (viewer) member may call: they compute/return data, never persist it
+_VIEWER_ALLOWED_POSTS = frozenset({"/ai/search", "/ai/summarize", "/reports/generate"})
+
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
+    request: Request,
     credentials: Annotated[
         Optional[HTTPAuthorizationCredentials], Security(bearer_scheme)
     ] = None,
@@ -55,7 +60,7 @@ async def get_current_user(
             raise credentials_exception
     except (InvalidTokenError, ValueError):
         # Fall back to API key auth
-        return await _authenticate_api_key(token, db, credentials_exception)
+        return await _authenticate_api_key(token, db, credentials_exception, request.method)
 
     # Load user from DB
     result = await db.execute(
@@ -76,9 +81,10 @@ async def _authenticate_api_key(
     token: str,
     db: AsyncSession,
     exc: HTTPException,
+    method: str = "GET",
     required_scope: str | None = None,
 ) -> User:
-    """Authenticate via hashed API key lookup with optional scope enforcement."""
+    """Authenticate via hashed API key lookup, enforcing the key's scopes against the HTTP method."""
     from datetime import datetime, timezone
 
     key_hash = hash_api_key(token)
@@ -106,6 +112,21 @@ async def _authenticate_api_key(
                     "message": f"API key does not have the required scope: '{required_scope}'",
                 }},
             )
+
+    # Method-level scope enforcement. Vocabulary: "read", "write", "admin", "*".
+    # An empty list means the default (read + write); the key never exceeds its creator's role,
+    # which the role/membership checks still apply on top of.
+    granted = set(api_key.scopes or []) or {"read", "write"}
+    needed = "read" if method in _SAFE_METHODS else "write"
+    allowed = {"read", "write", "admin", "*"} if needed == "read" else {"write", "admin", "*"}
+    if not (granted & allowed):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": {
+                "code": "INSUFFICIENT_SCOPE",
+                "message": f"API key lacks the '{needed}' scope required for {method}",
+            }},
+        )
 
     # Update last_used (non-blocking — fire and forget the flush)
     api_key.last_used = datetime.now(timezone.utc)
@@ -300,9 +321,16 @@ def require_tool(tool_key: str) -> ToolChecker:
 
 
 async def get_current_org_id(
+    request: Request,
     current_user: Annotated[User, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db),
 ) -> UUID:
-    """Extract and validate the org_id from the current user's JWT claims."""
+    """
+    Resolve the caller's org and re-check membership against the DB.
+
+    The JWT's org claim alone isn't trusted: a member who was removed (or demoted to viewer)
+    loses access immediately instead of when their token expires. Viewers are read-only.
+    """
     org_id_str = getattr(current_user, "_jwt_org_id", None)
     if org_id_str is None:
         raise HTTPException(
@@ -310,9 +338,28 @@ async def get_current_org_id(
             detail={"error": {"code": "NO_ORG_CONTEXT", "message": "No organization selected"}},
         )
     try:
-        return UUID(org_id_str)
+        org_id = UUID(org_id_str)
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": {"code": "INVALID_ORG_ID", "message": "Invalid organization ID"}},
         )
+
+    member = (await db.execute(
+        select(OrgMember).where(OrgMember.user_id == current_user.id, OrgMember.org_id == org_id)
+    )).scalar_one_or_none()
+    if member is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": {"code": "NOT_MEMBER", "message": "Not a member of this organization"}},
+        )
+
+    if member.role == MemberRole.VIEWER and request.method not in _SAFE_METHODS:
+        path = request.url.path.removeprefix(settings.API_V1_PREFIX)
+        if path not in _VIEWER_ALLOWED_POSTS:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"error": {"code": "VIEWER_READ_ONLY",
+                                  "message": "Viewers have read-only access"}},
+            )
+    return org_id

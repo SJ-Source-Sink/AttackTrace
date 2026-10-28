@@ -27,12 +27,14 @@ dnspython>=2.6.0
 playwright>=1.40.0
 croniter>=2.0.0
 weasyprint>=62.0
+Pillow>=10.0.0  # app/services/export_service.py embeds screenshots (also a weasyprint dependency)
 # Scanner-specific deps
 jsbeautifier>=1.15.1   # JS Analysis scanner — beautifies minified JS for accurate pattern matching
 boto3>=1.34.0          # CSPM scanner — AWS API access
 google-auth>=2.35.0    # CSPM scanner — GCP service-account token minting (REST checks via httpx)
 pyotp>=2.10.0          # MFA — TOTP secret generation/verification
 cyclonedx-python-lib>=11.0.0  # Supply chain scanner — CycloneDX SBOM generation
+packageurl-python>=0.11.0  # supply_chain.py imports PackageURL directly
 GitPython>=3.1.40      # Secrets scanner — git history cloning/diff walking
 # NOTE: checkov is intentionally NOT here — it has destructive transitive deps
 # (downgrades urllib3 2.x→1.x which breaks httpx, and networkx 3.x→2.x).

@@ -509,7 +509,7 @@ async def delete_rule(
 async def toggle_rule(
     rule_id: str,
     request: Request,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_tool("mobile"))],
 ) -> Response:
     body = await request.json()
     resp = await _msra_request("PATCH", f"/api/rules/{rule_id}/toggle", json=body)

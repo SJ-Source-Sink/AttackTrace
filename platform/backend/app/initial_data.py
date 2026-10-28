@@ -1,6 +1,6 @@
 """
 Seed initial data: creates the first superuser, default organization,
-default workspace, and an open invite code so anyone can register.
+default workspace and, in development only, an open invite code.
 
 Run inside the backend container:
     python -m app.initial_data
@@ -12,6 +12,7 @@ Or via Makefile:
 import asyncio
 import os
 import re
+import secrets
 import sys
 
 from sqlalchemy import select
@@ -38,8 +39,24 @@ async def seed() -> None:
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     email    = os.getenv("FIRST_SUPERUSER_EMAIL", "admin")
-    password = os.getenv("FIRST_SUPERUSER_PASSWORD", "admin")
     org_name = os.getenv("FIRST_ORG_NAME", "AttackTrace")
+
+    # Development keeps the documented admin/admin login and open invite code. Anywhere else the
+    # seed must not create a well-known credential: refuse a weak password, or generate one.
+    is_dev = os.getenv("ENVIRONMENT", settings.ENVIRONMENT).lower() == "development"
+    password = os.getenv("FIRST_SUPERUSER_PASSWORD", "")
+    generated = False
+    if not is_dev:
+        if not password:
+            password, generated = secrets.token_urlsafe(18), True
+        elif password.lower() in {"admin", "password", "changeme"} or len(password) < 12:
+            print("[seed] ERROR: FIRST_SUPERUSER_PASSWORD is weak. Outside ENVIRONMENT=development it "
+                  "must be at least 12 characters and not a common default (or leave it unset to "
+                  "generate one).", file=sys.stderr)
+            sys.exit(1)
+    elif not password:
+        password = "admin"
+    open_invite = is_dev or os.getenv("SEED_OPEN_INVITE", "").lower() == "true"
 
     async with async_session() as db:
         # ── idempotent: skip if superuser already exists ─────────────────────
@@ -98,7 +115,7 @@ async def seed() -> None:
         existing_invite = await db.execute(
             select(InviteCode).where(InviteCode.code == "ATTACKTRACE")
         )
-        if not existing_invite.scalar_one_or_none():
+        if open_invite and not existing_invite.scalar_one_or_none():
             invite = InviteCode(
                 org_id=org.id,
                 created_by=user.id,
@@ -114,9 +131,18 @@ async def seed() -> None:
 
     await engine.dispose()
     print(f"[seed] Created org {org_name!r} (slug={slug})")
-    print(f"[seed] Created superuser: {email} / (password set)")
-    print(f"[seed] Default login — username: admin  password: admin")
-    print(f"[seed] Invite code for new users: ATTACKTRACE")
+    if generated:
+        print(f"[seed] Created superuser: {email}")
+        print(f"[seed] GENERATED PASSWORD (shown once, change it after first login): {password}")
+    elif is_dev:
+        print(f"[seed] Created superuser: {email} / {'admin' if password == 'admin' else '(password set)'}")
+        print("[seed] DEVELOPMENT defaults: do not expose this instance to a network as-is.")
+    else:
+        print(f"[seed] Created superuser: {email} / (password set)")
+    if open_invite:
+        print("[seed] Open invite code for new users: ATTACKTRACE (anyone with it can register)")
+    else:
+        print("[seed] No open invite code created; add members from Settings -> Team Members.")
 
 
 def main() -> None:

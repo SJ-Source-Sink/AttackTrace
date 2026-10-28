@@ -28,6 +28,9 @@ import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, field_validator
+
+from app.core.scan_args import reject_option_like
+from app.core.target_guard import guard_scan_target
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings as _get_settings
@@ -542,7 +545,7 @@ def _normalize_url(v: str) -> str:
         raise ValueError("Target contains invalid characters")
     if not re.match(r"^https?://", v, re.I):
         v = "https://" + v
-    return v
+    return guard_scan_target(v)
 
 
 class WafDetectRequest(BaseModel):
@@ -604,7 +607,7 @@ class PortFirewallRequest(BaseModel):
             raise ValueError("Target is required")
         if re.search(r"[;&|`$(){}<>]", v):
             raise ValueError("Target contains invalid characters")
-        return v
+        return guard_scan_target(reject_option_like(v))
 
     @field_validator("mode")
     @classmethod
@@ -3303,7 +3306,7 @@ class PhysicalScanRequest(BaseModel):
         v = v.strip()
         if not v:
             raise ValueError("Target is required")
-        return v
+        return guard_scan_target(reject_option_like(v))
 
     @field_validator("scan_mode")
     @classmethod

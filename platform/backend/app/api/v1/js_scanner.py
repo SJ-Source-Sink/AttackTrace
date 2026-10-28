@@ -33,9 +33,10 @@ from uuid import UUID
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.target_guard import guard_scan_target
 from app.core.config import get_settings as _get_settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
@@ -138,6 +139,12 @@ from app.core.sse import sse_event as _sse
 # ──────────────────────────────────────────────────────────────────────────────
 
 class JSScanRequest(BaseModel):
+    @field_validator("target")
+    @classmethod
+    def _guard_scan_target(cls, v):
+        # Block loopback/private/metadata addresses unless ALLOW_PRIVATE_SCAN_TARGETS (see target_guard)
+        return guard_scan_target(v)
+
     target: str
     max_depth: int = 2
     max_files: int = 50

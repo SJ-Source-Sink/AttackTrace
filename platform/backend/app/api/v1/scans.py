@@ -172,13 +172,35 @@ async def cancel_or_delete_scan_job(
                 f.unlink(missing_ok=True)
 
 
+@router.post(
+    "/{scan_id}/stream-token",
+    summary="Mint a short-lived token for the live scan stream",
+)
+async def scan_stream_token(
+    scan_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    org_id: UUID = Depends(get_current_org_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from app.core.security import create_stream_token
+
+    job = await get_scan_by_id(db, scan_id, org_id)
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"code": "SCAN_NOT_FOUND", "message": "Scan not found"}},
+        )
+    return {"token": create_stream_token(str(current_user.id), str(org_id), str(scan_id)), "expires_in": 60}
+
+
 @router.get(
     "/{scan_id}/stream",
     summary="Stream real-time scan progress via Server-Sent Events",
     description=(
         "Subscribe to live scan events: module_start, module_complete, finding, "
-        "status_change, error, complete. Connect with EventSource in the browser. "
-        "Pass the JWT as ?token= query param since EventSource cannot set headers."
+        "status_change, error, complete. Connect with EventSource in the browser, passing a "
+        "short-lived ?token= from POST /scans/{id}/stream-token (EventSource cannot set headers). "
+        "Non-browser clients may send an Authorization: Bearer access token instead."
     ),
     response_class=StreamingResponse,
 )
@@ -199,8 +221,10 @@ async def scan_stream(
         detail={"error": {"code": "UNAUTHORIZED", "message": "Invalid or expired credentials"}},
     )
 
-    # Resolve token: query param takes precedence (browser EventSource), then header
-    raw_token = token
+    # Browser EventSource passes a short-lived, scan-bound stream token in ?token=; other
+    # clients may use a normal access token in the Authorization header. A full access token in
+    # the query string is refused (it would end up in logs/Referer headers).
+    raw_token, from_query = token, bool(token)
     if not raw_token:
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
@@ -211,7 +235,10 @@ async def scan_stream(
 
     try:
         payload = decode_token(raw_token)
-        if payload.get("type") != "access":
+        if from_query:
+            if payload.get("type") != "sse" or payload.get("scan_id") != str(scan_id):
+                raise credentials_exception
+        elif payload.get("type") != "access":
             raise credentials_exception
         user_id = payload.get("sub")
         org_id_str = payload.get("org_id")

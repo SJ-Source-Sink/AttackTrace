@@ -24,10 +24,12 @@ from uuid import UUID
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.target_guard import guard_scan_target
 from app.core.config import get_settings as _get_settings
+from app.core.scan_args import reject_option_like
 from app.core.database import get_db
 from app.core.dependencies import get_current_org_id, get_current_user
 from app.models.db.user import User
@@ -200,6 +202,12 @@ from app.core.sse import sse_event as _sse
 # ── Pydantic model ────────────────────────────────────────────────────────────
 
 class ContainerScanRequest(BaseModel):
+    @field_validator("k8s_api_url", "registry_url")
+    @classmethod
+    def _guard_scan_target(cls, v):
+        # Block loopback/private/metadata addresses unless ALLOW_PRIVATE_SCAN_TARGETS (see target_guard)
+        return guard_scan_target(v)
+
     scan_type: str  # "image", "kubernetes_api", "exposed_registry"
     image: str | None = None
     k8s_api_url: str | None = None
@@ -208,6 +216,12 @@ class ContainerScanRequest(BaseModel):
     check_cve: bool = True
     check_config: bool = True
     check_secrets: bool = True
+
+    @field_validator("image")
+    @classmethod
+    def validate_image(cls, v: str | None) -> str | None:
+        # `trivy image <x>` / `docker pull <x>`: a leading '-' would be parsed as an option
+        return reject_option_like(v, "Image") if v else v
 
 
 # ── Finding-quality adapter (shared across all 3 scan types — same shape) ────
