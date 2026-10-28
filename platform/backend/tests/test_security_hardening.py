@@ -138,3 +138,21 @@ def test_stream_token_is_scoped_and_not_an_access_token():
     claims = decode_token(create_stream_token("u1", "o1", "s1"))
     assert claims["type"] == "sse" and claims["scan_id"] == "s1" and claims["org_id"] == "o1"
     assert claims["exp"] - claims["iat"] <= 60
+
+
+# ── client IP behind a proxy (X-Forwarded-For is client-spoofable) ───────────
+
+@pytest.mark.parametrize("trust,hops,xff,expected", [
+    (False, 1, "6.6.6.6", "10.0.0.9"),                    # header ignored unless opted in
+    (True, 1, "6.6.6.6, 203.0.113.7", "203.0.113.7"),     # spoofed leftmost entry ignored
+    (True, 2, "6.6.6.6, 203.0.113.7, 10.1.1.1", "203.0.113.7"),
+    (True, 1, "", "10.0.0.9"),                            # no header -> socket peer
+    (True, 3, "203.0.113.7", "10.0.0.9"),                 # fewer entries than hops -> don't guess
+])
+def test_client_ip_uses_trusted_proxy_entry(monkeypatch, trust, hops, xff, expected):
+    from app.api.v1 import auth
+
+    monkeypatch.setattr(auth.settings, "TRUST_PROXY_HEADERS", trust)
+    monkeypatch.setattr(auth.settings, "TRUSTED_PROXY_HOPS", hops)
+    req = types.SimpleNamespace(headers={"x-forwarded-for": xff}, client=types.SimpleNamespace(host="10.0.0.9"))
+    assert auth._client_ip(req) == expected

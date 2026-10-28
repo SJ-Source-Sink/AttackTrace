@@ -51,9 +51,12 @@ def _slugify(name: str) -> str:
 
 def _client_ip(request: Request) -> str:
     if settings.TRUST_PROXY_HEADERS:
-        fwd = request.headers.get("x-forwarded-for", "")
-        if fwd:
-            return fwd.split(",")[0].strip()
+        # Each proxy appends the address it saw, so the leftmost entries are client-supplied and
+        # spoofable. Take the Nth from the right, N = number of trusted proxies in front of us.
+        parts = [p.strip() for p in request.headers.get("x-forwarded-for", "").split(",") if p.strip()]
+        hops = max(1, settings.TRUSTED_PROXY_HOPS)
+        if len(parts) >= hops:
+            return parts[-hops]
     return request.client.host if request.client else "unknown"
 
 

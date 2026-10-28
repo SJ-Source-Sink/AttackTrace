@@ -90,6 +90,8 @@ class Settings(BaseSettings):
     # Only enable behind a reverse proxy you control: client IPs for rate limits/lockouts are then
     # taken from X-Forwarded-For (otherwise every user behind the proxy shares one IP).
     TRUST_PROXY_HEADERS: bool = False
+    # Number of trusted proxies in front of the app; the client IP is the Nth entry from the right
+    TRUSTED_PROXY_HOPS: int = 1
     AUTH_RATE_LIMIT_PER_MINUTE: int = 10   # tighter limit on /auth endpoints (brute-force protection)
 
     # File uploads
