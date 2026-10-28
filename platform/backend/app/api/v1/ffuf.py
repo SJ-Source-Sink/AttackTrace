@@ -236,6 +236,15 @@ def _discover_dynamic_wordlists() -> list[tuple[str, str, str]]:
     return extra
 
 
+def _wordlist_roots() -> list[Path]:
+    """Directories wordlists may be read from: the listed/known ones only."""
+    roots = {Path(path).resolve().parent for _, path, _ in _KNOWN_WORDLISTS}
+    roots |= {_BUNDLED_DIR.resolve(), _NUCLEI_WORDLISTS.resolve(), Path("/usr/share/wordlists").resolve(),
+              (_HOME / "wordlists").resolve(), (_HOME / "tools" / "wordlists").resolve(),
+              Path("/usr/local/share/wordlists").resolve()}
+    return sorted(roots)
+
+
 HTTP_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
 
 
@@ -243,14 +252,10 @@ class FfufScanRequest(BaseModel):
     @field_validator("url")
     @classmethod
     def _guard_scan_target(cls, v):
-        # A FUZZ keyword in the host (subdomain fuzzing) can't resolve until substituted
-        from urllib.parse import urlsplit
-
-        try:
-            netloc = urlsplit(v if "://" in v else "//" + v).netloc
-        except ValueError:
-            netloc = ""
-        return guard_scan_target(v, allow_unresolvable="FUZZ" in netloc)
+        # The host must resolve to a public address now. FUZZ is only supported in the path, query,
+        # headers and body: an unresolvable FUZZ.<domain> could be pointed at an internal address
+        # by the domain owner's DNS once words are substituted.
+        return guard_scan_target(v)
 
     url: str
     wordlist: str | None = None
@@ -608,6 +613,13 @@ async def run_ffuf_scan(
         resolved = Path(wordlist).resolve()
         if not resolved.is_file():
             raise HTTPException(status_code=400, detail=f"Wordlist not found: {wordlist}")
+        # ffuf sends every line to the target, so an arbitrary server file here would be
+        # exfiltrated to whatever host the caller points the scan at. Only known wordlist dirs.
+        if not any(resolved.is_relative_to(root) for root in _wordlist_roots()):
+            raise HTTPException(
+                status_code=400,
+                detail="Wordlist must be one of the listed wordlists (see GET /ffuf/wordlists)",
+            )
         wordlist = str(resolved)
     else:
         wordlist = _detect_wordlist()

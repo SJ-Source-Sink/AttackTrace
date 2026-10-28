@@ -80,6 +80,7 @@ def test_target_guard_fails_closed_on_unresolvable_unless_opted_in(monkeypatch):
     "user@127.0.0.1", "git@127.0.0.1:x/y", "ssh://git@10.0.0.1/r.git", "http://x\\@127.0.0.1",
     "127.0.0.1#@example.com", "2130706433", "0x7f.0.0.1", "127.1", "user:pw@localhost:8080/p",
     "http://a@b@127.0.0.1", "//127.0.0.1", "[::1",
+    "8.8.8.8%@127.0.0.1", "8.8.8.8%25@127.0.0.1", "http://8.8.8.8%@127.0.0.1/",  # '%' must not truncate
 ])
 def test_target_guard_parses_like_the_client(monkeypatch, target):
     # parser-differential bypasses: userinfo/scp-style/obfuscated forms must not look "unresolvable"
@@ -98,15 +99,30 @@ def test_secrets_guard_is_deny_by_default(monkeypatch):
     assert SecretScanRequest(target="some-org", scan_type="github_org").target == "some-org"
 
 
-def test_takeover_and_ffuf_opt_in_to_unresolvable(monkeypatch):
+def test_takeover_opts_in_to_unresolvable_but_ffuf_does_not(monkeypatch):
     from app.api.v1.ffuf import FfufScanRequest
     from app.api.v1.takeover import TakeoverRequest
 
     monkeypatch.setattr(target_guard, "get_settings", _settings(False))
     assert TakeoverRequest(targets=["dangling.no-such-host-zzqq-12345.invalid"])
-    assert FfufScanRequest(url="http://FUZZ.no-such-host-zzqq-12345.invalid/")
+    # FUZZ.<domain> can't be vetted before substitution (the domain's DNS could answer 127.0.0.1)
     with pytest.raises(ValueError):
-        FfufScanRequest(url="http://no-such-host-zzqq-12345.invalid/FUZZ")  # no FUZZ in host
+        FfufScanRequest(url="http://FUZZ.no-such-host-zzqq-12345.invalid/")
+    with pytest.raises(ValueError):
+        FfufScanRequest(url="http://no-such-host-zzqq-12345.invalid/FUZZ")
+
+
+def test_ffuf_wordlists_confined_to_known_directories():
+    import pathlib
+
+    from app.api.v1 import ffuf
+
+    roots = ffuf._wordlist_roots()
+    allowed = lambda p: any(pathlib.Path(p).resolve().is_relative_to(r) for r in roots)  # noqa: E731
+    assert allowed(ffuf._BUNDLED_DIR / "subdomains.txt")
+    assert not allowed("/etc/passwd")
+    assert not allowed(pathlib.Path.home() / ".attacktrace" / "scans" / "x.json")
+    assert not allowed(ffuf._BUNDLED_DIR / ".." / ".env")  # traversal out of the wordlists dir
 
 
 def test_target_guard_opt_in_allows_private_but_never_metadata(monkeypatch):

@@ -485,10 +485,15 @@ export default function FfufPage() {
                     <Input
                       value={customWordlist}
                       onChange={(e) => setCustomWordlist(e.target.value)}
-                      placeholder="/path/to/wordlist.txt"
+                      placeholder="~/wordlists/my-list.txt"
                       className="font-mono text-xs h-8"
                       disabled={running}
                     />
+                  )}
+                  {wordlistMode === "custom" && (
+                    <p className="text-[10px] text-zinc-600">
+                      Must be inside a wordlists folder on the server (e.g. ~/wordlists, /usr/share/wordlists).
+                    </p>
                   )}
 
                   {wordlistMode === "auto" && (

@@ -65,7 +65,7 @@ def _host_of(token: str) -> str | None:
     if "\\" in token:  # backslash handling differs between URL parsers: refuse
         return None
     try:
-        return ipaddress.ip_address(token.split("%")[0]).compressed  # bare IPv4/IPv6
+        return ipaddress.ip_address(token).compressed  # whole token is a bare IPv4/IPv6 (scoped v6 ok)
     except ValueError:
         pass
     try:
@@ -104,7 +104,7 @@ def scan_target_problem(raw: str, allow_unresolvable: bool = False) -> str | Non
         if host is None:
             return f"{token[:60]}: could not be parsed as a host or URL"
         try:
-            addrs = [ipaddress.ip_address(host.split("%")[0])]
+            addrs = [ipaddress.ip_address(host)]
         except ValueError:
             try:
                 infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
@@ -115,7 +115,7 @@ def scan_target_problem(raw: str, allow_unresolvable: bool = False) -> str | Non
             addrs = []
             for info in infos:
                 try:
-                    addrs.append(ipaddress.ip_address(info[4][0].split("%")[0]))
+                    addrs.append(ipaddress.ip_address(info[4][0]))
                 except ValueError:
                     continue
         for addr in addrs:
